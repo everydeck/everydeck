@@ -1,0 +1,27 @@
+{
+  "name": "@everydeck/check",
+  "version": "0.1.0",
+  "description": "everydeck skeleton: reads the facts of an app repository (tables, pages, routes, flows, each with its place in the code) into everydeck/everydeck-befund.json",
+  "license": "MIT",
+  "homepage": "https://everydeck.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/everydeck/everydeck.git",
+    "directory": "packages/check"
+  },
+  "type": "module",
+  "bin": {
+    "everydeck-scaffold": "./befund-skeleton.mjs"
+  },
+  "files": [
+    "befund-skeleton.mjs",
+    "befund-reads.mjs",
+    "befund-display.mjs",
+    "befund-icon.mjs",
+    "befund-db.mjs",
+    "befund-ast.py",
+    "rules/everydeck-rules.mjs",
+    "README.md",
+    "LICENSE"
+  ]
+}

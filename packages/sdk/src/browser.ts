@@ -1,0 +1,442 @@
+/**
+ * @everydeck/sdk/browser – Browser-Erfassung (docs/04 „Browser- und Server-Erfassung“, trust `browser`): unbehandelte Fehler, aktionsgebundene
+ * Requestfehler auf dem zentralen Requestweg (der gestellte `fetch`), erlaubte Breadcrumbs. Alles aus dem Browser ist eine Behauptung;
+ * Serverbelege werden nur über gemeinsame IDs (`x-everydeck-operation-id`, `x-everydeck-attempt-id`) zusammengeführt.
+ *
+ * Nie erfasst: Request-/Response-Körper, Tokens, Header, Formularwerte, DOM, Query-Strings, Chattexte. `route` ist nur der Pfad.
+ *
+ * B31 Schnitt C: Grundabdeckung ohne Zutun – jede fehlgeschlagene Anfrage an `captureHosts` (Standard: der eigene Host der Seite) wird gemeldet,
+ * auch außerhalb einer Aktion (Netzfehler, 4xx, 5xx; 401 nur, solange eine Person angemeldet ist): als `page.request_failed` mit Seite (Weg),
+ * Routenmuster und Status, ohne Inhalte. Das SDK legt dafür eine Hülle um `globalThis.fetch` (abschaltbar mit `captureBackground: false`);
+ * `everydeck.fetch` erfasst genauso (vor 0.1.8 blieb es still – kein stilles Abschalten bei einem Update). Aktionen (`ctx.fetch`) bleiben für Abläufe.
+ */
+import { EverydeckClient, cleanClient, answerOf, ANSWER_MAX_BYTES, type ClientInfo, type HttpContext, type EverydeckOptions, type Frame, type ErrorAnswer } from './core.js';
+
+export interface ActionMeta { operationId?: string; attemptId?: string; objectType?: string; objectRef?: string; subjectRef?: string; accountRef?: string; /** HTTP statuses that are an expected answer for every request of this action (e.g. 404 = not there yet). Recorded as a step, never as an error. */ expectStatus?: number[] }
+/** Per-request options of `ctx.fetch` (third argument). `expect`: statuses that are an expected answer of this request. */
+export interface RequestOptions { expect?: number[] }
+export type ActionFetch = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1], options?: RequestOptions) => Promise<Response>;
+export interface ActionContext extends ActionMeta { name: string; operationId: string; attemptId: string; attempt: number; fetch: ActionFetch; /** A plain `fetch` for data clients (e.g. `global.fetch` of supabase-js) whose requests of this action treat these statuses as expected answers. */ expecting(statuses: number[]): typeof fetch; /** neuer Versuch derselben Aktion (neue attempt_id, gleiche operation_id) */ retry(): ActionContext }
+/** B23: Laufzeit-Module, die das SDK nicht selbst importieren kann (Expo, React Native) – die App reicht sie durch */
+export interface RuntimeModules {
+  expo?: { Updates?: { updateId?: string | null; runtimeVersion?: string | null; channel?: string | null }; Application?: { nativeApplicationVersion?: string | null; nativeBuildVersion?: string | null }; Platform?: { OS?: string } };
+  reactNative?: { Platform?: { OS?: string; Version?: string | number } };
+}
+/**
+ * B23: Speicher für den Offline-Puffer. Gleiche Form wie `localStorage` und wie AsyncStorage in React Native/Expo (dort asynchron) –
+ * `storage: AsyncStorage` genügt. Werte sind JSON-Strings der ungesendeten Ereignisse unter einem Schlüssel.
+ */
+export interface StorageAdapter { getItem(key: string): string | null | Promise<string | null>; setItem(key: string, value: string): void | Promise<void>; removeItem(key: string): void | Promise<void> }
+export interface BrowserOptions extends EverydeckOptions { /** B23: Speicher für nicht gesendete Ereignisse (Standard: `localStorage`, das es in React Native nicht gibt – dort AsyncStorage übergeben) */ storage?: StorageAdapter; /** B23: Plattform und Version automatisch erkennen (Standard an); `client` überschreibt einzelne Angaben */ detectClient?: boolean; /** B23: Expo/React-Native-Module für die Erkennung */ runtime?: RuntimeModules; /** B23: Seitenmuster aus dem Router der App, wie im Manifest unter `screens` deklariert (`/partner/:slug`); jede Adresse wird auf das passende Muster abgebildet */ screens?: string[]; /** B23: Muster der API-Pfade der App, wie im Manifest unter `api_routes` deklariert (`/api/partners/:slug`); der Pfad jeder erfassten Anfrage und Pfade in Fehlermeldungen werden darauf abgebildet (Supabase-Pfade brauchen keine Muster) */ apiRoutes?: string[]; /** B23: eigener Seitenname aus der Adresse (Vorrang vor `screens`; das Ergebnis wird trotzdem auf die Muster abgebildet) */ routeName?: (u: URL) => string; /** B23: nicht gesendete Ereignisse beim Beenden zwischenspeichern (Standard: nur in nativen Apps) */ persist?: boolean; sessionId?: string; captureUnhandled?: boolean; /** Pfad bereinigen (Standard: pathname); das Ergebnis wird auf `apiRoutes` abgebildet (B23) */ sanitizeRoute?: (url: URL) => string; /** Hosts, deren Requests erfasst werden: innerhalb einer Aktion (Standard: alle) und – B31 – im Hintergrund (Standard: der eigene Host der Seite); die API der App auf einem anderen Host hier nennen */ captureHosts?: string[]; /** Whether a captured request may carry the correlation headers `x-everydeck-*` (default: yes). Return false for targets whose CORS policy does not allow these headers; the request is still captured, only without server-side correlation. */ correlate?: (url: URL) => boolean;
+  /** B31 Schnitt C: jede fehlgeschlagene Anfrage an `captureHosts` (Standard: der eigene Host) auch außerhalb einer Aktion melden – über eine Hülle um `globalThis.fetch` (Standard an) */ captureBackground?: boolean }
+
+const uuid = () => (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
+const SAFE = /^[a-z][a-z0-9_.-]{0,95}$/;
+const classOf = (v: unknown): string => { const n = (v instanceof Error ? v.name : typeof v === 'string' ? 'error' : 'unknown_error').toLowerCase().replace(/[^a-z0-9_.-]/g, '_').replace(/^[^a-z]+/, ''); return SAFE.test(n) ? n : 'error'; };
+/** Nachricht ohne Geheimnisse und ohne Query-Reste; gekürzt. */
+export function sanitizeMessage(m: unknown): string { const s = String(m instanceof Error ? m.message : m ?? '').replace(/bearer\s+[a-z0-9._~+/=-]+/gi, 'bearer [redacted]').replace(/\?[^\s'"]*/g, '?[query]').replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]'); return s.slice(0, 300); }
+export function framesOf(err: unknown, max = 8): Frame[] | undefined {
+  const st = err instanceof Error ? err.stack : undefined; if (!st) return undefined;
+  const out: Frame[] = [];
+  for (const line of st.split('\n').slice(1)) {
+    const m = /at\s+(?:(.+?)\s+\()?([^()]+?)(?::(\d+))?(?::\d+)?\)?\s*$/.exec(line.trim()); if (!m) continue;
+    const file = (m[2] ?? '').replace(/\?.*$/, '').split('/').slice(-2).join('/');
+    out.push({ function: (m[1] ?? 'anonymous').slice(0, 128), ...(file ? { file: file.slice(0, 240) } : {}), ...(m[3] ? { line: Number(m[3]) } : {}) });
+    if (out.length >= max) break;
+  }
+  return out.length ? out : undefined;
+}
+/** Pfad einer Anfrage ohne deklarierte Muster: Supabase-Pfade wie sie sind, sonst nur der erste Abschnitt (B23) */
+export const defaultRoute = (u: URL): string => apiRouteOf(u.pathname, []);
+
+// ── B23: Plattform, Version je Plattform, grobes Gerät, Weg vor dem Fehler ─────────────────────────────────────────────────────────────
+type G = Record<string, unknown> & { navigator?: { userAgent?: string; product?: string; userAgentData?: { platform?: string; mobile?: boolean } }; location?: { href?: string } };
+const ID_SEGMENT = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,}|[A-Za-z0-9_-]{20,})$/i;
+// ── B23: Seiten- und API-Muster – dieselben Regeln wie screenOf/apiRouteOf/scrubPaths in packages/contracts (das SDK hat keine Abhängigkeiten; ein Test prüft die Gleichheit)
+/** Spezifischstes passendes Muster (fester Abschnitt vor `:param` vor `*`) oder null */
+function bestPattern(segs: string[], patterns: readonly string[]): string | null {
+  let best: { p: string; score: number[] } | null = null;
+  for (const p of patterns) {
+    const ps = p.split('/').filter(Boolean); const wild = ps.at(-1) === '*'; const fixed = wild ? ps.slice(0, -1) : ps;
+    if (wild ? segs.length < fixed.length : segs.length !== fixed.length) continue;
+    if (!fixed.every((x, i) => x.startsWith(':') || x === segs[i])) continue;
+    const score = [...fixed.map((x) => (x.startsWith(':') ? 2 : 3)), ...(wild ? [1] : [])];
+    const better = !best || (() => { for (let i = 0; i < Math.max(score.length, best.score.length); i++) { const a = score[i] ?? 0; const b = best.score[i] ?? 0; if (a !== b) return a > b; } return false; })();
+    if (better) best = { p: p === '/*' || p === '/' ? p : `/${ps.join('/')}`, score };
+  }
+  return best?.p ?? null;
+}
+const segsOf = (address: string) => String(address).replace(/[?#].*$/, '').split('/').filter(Boolean);
+/** Ohne passendes Muster: der erste Abschnitt – bei deklarierten Mustern nur ein fester erster Abschnitt eines Musters (sonst `/*`), ohne Muster nur, wenn er keine Kennung ist (sonst `/:id`) */
+function firstSegment(segs: string[], patterns: readonly string[]): string {
+  const first = segs[0]!;
+  if (patterns.length) return patterns.some((p) => p.split('/').filter(Boolean)[0] === first) ? `/${first}` : '/*';
+  return ID_SEGMENT.test(first) ? '/:id' : `/${first}`.slice(0, 80);
+}
+/**
+ * B23: Adresse → Seitenmuster der App. Das spezifischste passende Muster gewinnt (fester Abschnitt vor `:param` vor `*`); ohne passendes Muster
+ * bleibt nur der erste Abschnitt (siehe firstSegment). So verlässt kein Slug, Name und keine Kennung den Browser. Gleiche Regel im SDK.
+ */
+export function screenOf(address: string, patterns: readonly string[]): string {
+  const segs = segsOf(address);
+  if (!segs.length) return '/';
+  return bestPattern(segs, patterns) ?? firstSegment(segs, patterns);
+}
+/**
+ * B23: Pfade, die von sich aus keine Namen tragen: Supabase-REST (`/rest/v1/<tabelle>`, `/rest/v1/rpc/<funktion>`), Edge Functions
+ * (`/functions/v1/<name>`), Auth (`/auth/v1/<vorgang>`), Storage bis zum Bucket (der Dateipfad wird `*`), Realtime, GraphQL. Tiefer → `/*`.
+ */
+export function supabaseRouteOf(segs: readonly string[]): string | null {
+  const [a, v] = segs;
+  if (v !== 'v1' || !a) return null;
+  const keep = (n: number) => `/${segs.slice(0, n).join('/')}${segs.length > n ? '/*' : ''}`;
+  if (a === 'rest') return segs[2] === 'rpc' ? keep(4) : keep(3);
+  if (a === 'functions' || a === 'auth') return keep(3);
+  if (a === 'storage') { if (segs[2] !== 'object') return keep(4); const kind = ['public', 'sign', 'authenticated', 'list', 'info', 'upload', 'move', 'copy', 'render'].includes(segs[3] ?? '') ? 1 : 0; return keep(4 + kind); }
+  if (a === 'realtime' || a === 'graphql') return keep(2);
+  return null;
+}
+/** B23: API-Pfad einer Anfrage → deklariertes Muster (`api_routes`), sonst eingebaute Supabase-Pfade, sonst nur der erste Abschnitt */
+export function apiRouteOf(path: string, patterns: readonly string[]): string {
+  const segs = segsOf(path);
+  if (!segs.length) return '/';
+  return bestPattern(segs, patterns) ?? supabaseRouteOf(segs) ?? firstSegment(segs, patterns);
+}
+/**
+ * B23: Adressen und Pfade in einer Fehlermeldung wie API-Pfade behandeln (`https://app.example/partner/jane-doe` → `https://app.example/partner/:slug`,
+ * `GET /api/partners/jane-doe` → `GET /api/partners/:slug`); Query und Fragment fallen weg. Muster: Seiten und API-Pfade zusammen. Pfade zu Code-Dateien
+ * (`/assets/Profile-7f2c91.js`) bleiben, freier Text ohne Pfad bleibt unverändert.
+ */
+const CODE_FILE = /\.(?:m?js|cjs|jsx|ts|tsx|css|map|vue|svelte|wasm|html?)$/i;
+export function scrubPaths(text: string, patterns: readonly string[]): string {
+  const path = (p: string) => (CODE_FILE.test(p.replace(/:\d+(?::\d+)?$/, '')) ? p : apiRouteOf(p, patterns));   // Dateien des App-Codes (Chunks, Quellen) sind keine Nutzerdaten
+  return String(text)
+    .replace(/\bhttps?:\/\/[^\s'"<>()]+/g, (u) => { try { const x = new URL(u); return `${x.origin}${x.pathname === '/' ? '' : path(x.pathname)}`; } catch { return u; } })
+    .replace(/(^|[\s'"(=:,])(\/[A-Za-z0-9._~%-]+(?:\/[A-Za-z0-9._~%:@-]+)+)(?:[?#][^\s'"]*)?/g, (_m, pre: string, p: string) => `${pre}${path(p)}`);
+}
+/** Pfad einer Adresse, auch bei Hash-Routern (`/#/partner/x` → `/partner/x`) */
+const pathOf = (u: URL): string => (u.pathname === '/' && u.hash.startsWith('#/') ? u.hash.slice(1) : u.pathname);
+/** Seitenname ohne deklarierte Muster: nur der erste Abschnitt (/partner/ayu-made → /partner, /123 → /:id) */
+export const defaultRouteName = (u: URL): string => screenOf(pathOf(u), []);
+/** Betriebssystem mit Hauptversion und Geräteklasse aus dem User-Agent – grob, nie Modell oder Kennung */
+type Device = Pick<ClientInfo, 'os' | 'os_major' | 'device_class'>;
+export function deviceOf(ua: string, uaData?: { platform?: string; mobile?: boolean }): Device {
+  const r = rawDevice(ua, uaData) as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(r).filter(([, v]) => v !== undefined)) as Device;
+}
+function rawDevice(ua: string, uaData?: { platform?: string; mobile?: boolean }): { os: NonNullable<ClientInfo['os']>; os_major?: number | undefined; device_class?: ClientInfo['device_class'] } {
+  const m = (re: RegExp) => { const x = re.exec(ua); return x ? Number(x[1]) : undefined; };
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && /Mobile\//.test(ua))) return { os: 'ios', os_major: m(/OS (\d+)[_.]/) ?? m(/Version\/(\d+)/), device_class: 'tablet' };
+  if (/iPhone|iPod/.test(ua)) return { os: 'ios', os_major: m(/OS (\d+)[_.]/), device_class: 'phone' };
+  if (/Android/.test(ua)) return { os: 'android', os_major: m(/Android (\d+)/), device_class: /Mobile/.test(ua) ? 'phone' : 'tablet' };
+  if (/CrOS/.test(ua)) return { os: 'chromeos', device_class: 'desktop' };
+  if (/Windows NT/.test(ua)) return { os: 'windows', os_major: m(/Windows NT (\d+)/), device_class: 'desktop' };
+  if (/Mac OS X|Macintosh/.test(ua)) return { os: 'macos', os_major: m(/Mac OS X (\d+)[_.]/), device_class: 'desktop' };
+  if (/Linux/.test(ua)) return { os: 'linux', device_class: uaData?.mobile ? 'phone' : 'desktop' };
+  return { os: 'other', ...(uaData?.mobile ? { device_class: 'phone' as const } : {}) };
+}
+const asPlatform = (os: string | undefined): ClientInfo['platform'] | null => (os === 'ios' || os === 'android' ? os : os === 'web' ? 'web' : os === 'windows' || os === 'macos' ? 'desktop' : null);
+/**
+ * Herkunft erkennen: Chrome-Erweiterung, Capacitor (App.getInfo für Version und Build, Capgo für Live-Updates), Expo (Updates, Application),
+ * React Native, Electron, Tauri, Flutter-Web, sonst Web. `later` liefert, was nur asynchron abfragbar ist (native App-Version).
+ */
+export function detectClient(g: G = globalThis as unknown as G, mods: RuntimeModules = {}): { client: ClientInfo; later: Promise<Partial<ClientInfo>> | null } {
+  const ua = g.navigator?.userAgent ?? ''; const dev = deviceOf(ua, g.navigator?.userAgentData);
+  const chrome = g['chrome'] as { runtime?: { id?: string; getManifest?: () => { version?: string; manifest_version?: number } } } | undefined;
+  if (chrome?.runtime?.id && typeof chrome.runtime.getManifest === 'function') {
+    const mf = chrome.runtime.getManifest();
+    return { client: { platform: 'extension', runtime: mf.manifest_version === 3 ? 'chrome_mv3' : 'other', ...(mf.version ? { app_version: mf.version } : {}), ...dev }, later: null };
+  }
+  if (mods.expo) {
+    const os = asPlatform(mods.expo.Platform?.OS) ?? 'web'; const up = mods.expo.Updates ?? {}; const ap = mods.expo.Application ?? {};
+    const version = ap.nativeApplicationVersion ?? up.runtimeVersion ?? undefined;
+    return { client: { platform: os, runtime: 'expo', ...(version ? { app_version: version } : {}), ...(ap.nativeBuildVersion ? { build: ap.nativeBuildVersion } : {}), ...(up.updateId ? { update_id: up.updateId } : {}), ...(up.channel ? { channel: up.channel } : {}), ...dev, ...(os === 'ios' || os === 'android' ? { os } : {}) }, later: null };
+  }
+  if (mods.reactNative || g.navigator?.product === 'ReactNative') {
+    const os = asPlatform(mods.reactNative?.Platform?.OS) ?? 'android';
+    const v = mods.reactNative?.Platform?.Version;
+    return { client: { platform: os, runtime: 'react_native', os: os === 'ios' ? 'ios' : 'android', ...(v !== undefined && Number.isFinite(parseInt(String(v), 10)) ? { os_major: parseInt(String(v), 10) } : {}), ...(dev.device_class ? { device_class: dev.device_class } : {}) }, later: null };
+  }
+  const cap = g['Capacitor'] as { getPlatform?: () => string; Plugins?: { App?: { getInfo?: () => Promise<{ version?: string; build?: string }> }; CapacitorUpdater?: { current?: () => Promise<{ bundle?: { id?: string; version?: string } }> } } } | undefined;
+  if (cap?.getPlatform) {
+    const os = asPlatform(cap.getPlatform()) ?? 'web';
+    const native = os === 'ios' || os === 'android';
+    const later = native ? (async () => {
+      const out: Partial<ClientInfo> = {};
+      try { const info = await cap.Plugins?.App?.getInfo?.(); if (info?.version) out.app_version = info.version; if (info?.build) out.build = info.build; } catch { /* Plugin fehlt: Version bleibt offen */ }
+      try { const cur = await cap.Plugins?.CapacitorUpdater?.current?.(); const id = cur?.bundle?.version ?? cur?.bundle?.id; if (id && id !== 'builtin') out.update_id = id; } catch { /* kein Live-Update */ }
+      return out;
+    })() : null;
+    return { client: { platform: os, runtime: native ? 'capacitor' : 'browser', ...dev }, later };
+  }
+  const proc = g['process'] as { versions?: { electron?: string } } | undefined;
+  if (proc?.versions?.electron) return { client: { platform: 'desktop', runtime: 'electron', ...dev }, later: null };
+  if (g['__TAURI__'] || g['__TAURI_INTERNALS__']) return { client: { platform: 'desktop', runtime: 'tauri', ...dev }, later: null };
+  if (g['_flutter']) return { client: { platform: 'web', runtime: 'flutter', ...dev }, later: null };
+  return { client: { platform: 'web', runtime: 'browser', ...dev }, later: null };
+}
+const PENDING_KEY = 'everydeck.pending.v1';
+/** B37 Baustein 3: eine Seite, die auf kein deklariertes Muster passt – nur Fingerabdruck der Form und Tiefe, nie die Adresse */
+export const UNKNOWN_SCREEN = 'everydeck.sdk.unknown_screen';
+/** Form einer Adresse: Kennungen (Zahlen, UUIDs, lange Zeichenfolgen) werden `:p`; daraus ein Fingerabdruck (2 × FNV-1a 32, 16 Hex-Zeichen) */
+export function screenShape(address: string): { shape: string; depth: number } | null {
+  const segs = segsOf(address); if (!segs.length) return null;
+  const form = `/${segs.map((x) => (ID_SEGMENT.test(x) ? ':p' : x)).join('/')}`;
+  const fnv = (seed: number) => { let h = seed >>> 0; for (let i = 0; i < form.length; i++) { h ^= form.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
+  return { shape: fnv(0x811c9dc5) + fnv(0x01234567), depth: segs.length };
+}
+/** B38: Herkunft der Seite (Schema, Host, Port, ohne Pfad) – nur http(s); eine App in einer nativen Hülle (capacitor://) hat keine Domain */
+export function originOf(g: G): { origin?: string } {
+  try { const u = new URL(String(g.location?.href ?? '')); return /^https?:$/.test(u.protocol) ? { origin: u.origin.toLowerCase() } : {}; } catch { return {}; }
+}
+const PATCHED = Symbol.for('everydeck.fetch.patched'); const ORIGINAL = Symbol.for('everydeck.fetch.original');
+
+
+export class EverydeckBrowser {
+  readonly client: EverydeckClient;
+  readonly sessionId: string;
+  private subject: { subjectRef?: string; accountRef?: string } = {};
+  private readonly baseFetch: typeof fetch;
+  private readonly route: (u: URL) => string;
+  private readonly hosts: string[] | null;
+  private readonly correlate: (u: URL) => boolean;
+  /** B23: letzte Bildschirme/Routen (Namen), älteste zuerst */
+  private readonly trailList: string[] = [];
+  private readonly unknownSeen = new Set<string>();
+  private readonly routeName: (u: URL) => string;
+  /** Erkennung abgeschlossen (native Version nachgetragen) */
+  readonly ready: Promise<void>;
+  /**
+   * Reported request failures, keyed by the exact object the app receives (the failed Response or the thrown network error).
+   * A later throw counts as the *same* failure only if it is that object or carries it as `cause`, `context` or `response`;
+   * a shared attempt id alone proves nothing about the cause.
+   */
+  private readonly reported = new WeakMap<object, { attemptId: string; errorClass: string }>();
+  /** Number of reported request failures per running attempt (for the "after a failed request" hint on independent errors). */
+  private readonly failedInAttempt = new Map<string, number>();
+  private markFailed(attemptId: string, obj: unknown, errorClass: string): void {
+    if (obj && (typeof obj === 'object' || typeof obj === 'function')) this.reported.set(obj as object, { attemptId, errorClass });
+    if (this.failedInAttempt.size >= 1000) this.failedInAttempt.clear();
+    this.failedInAttempt.set(attemptId, (this.failedInAttempt.get(attemptId) ?? 0) + 1);
+  }
+  /** The reported request failure this thrown value provably is or wraps, within the same attempt – otherwise null. */
+  private propagated(e: unknown, attemptId: string): { errorClass: string } | null {
+    const candidates: unknown[] = [e];
+    if (e && typeof e === 'object') for (const k of ['cause', 'context', 'response'] as const) { try { candidates.push((e as Record<string, unknown>)[k]); } catch { /* getter threw */ } }
+    for (const c of candidates) {
+      if (!c || (typeof c !== 'object' && typeof c !== 'function')) continue;
+      const hit = this.reported.get(c as object);
+      if (hit && hit.attemptId === attemptId) return { errorClass: hit.errorClass };
+    }
+    return null;
+  }
+  constructor(o: BrowserOptions) {
+    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, apiRoutes, storage, captureBackground, ...core } = o;
+    // B31 Schnitt C: das ursprüngliche fetch – für die Anfragen der App über das SDK und für den eigenen Versand (nie durch die Hülle)
+    const g0 = globalThis as unknown as { fetch?: typeof fetch & { [PATCHED]?: boolean; [ORIGINAL]?: typeof fetch } };
+    const orig: typeof fetch | null = typeof g0.fetch === 'function' ? (g0.fetch[ORIGINAL] ?? g0.fetch.bind(globalThis)) : null;
+    // B23: Herkunft erkennen; ausdrückliche Angaben der App (`client`) gehen vor
+    const found = detect === false ? { client: undefined, later: null } : detectClient(globalThis as unknown as G, runtime ?? {});
+    this.store = storage ?? null;
+    // B23: nach einem gescheiterten Sendeversuch den Puffer sichern (offline), nach erfolgreichem Leeren die Sicherung entfernen
+    this.client = new EverydeckClient({ ...core, ...(core.fetch ? {} : orig ? { fetch: orig } : {}), keepalive: true, client: { platform: 'web', ...(found.client ?? {}), ...originOf(globalThis as unknown as G), ...(o.client ?? {}) } as Partial<ClientInfo>,
+      onSendResult: (r, pending) => { if (r === 'retry') this.savePending(); else if (r === 'accepted' && pending === 0) this.clearPending(); } });
+    const detected = found.later ? found.later.then((x) => { this.client.setClient({ ...x, ...(o.client ?? {}) }); }).catch(() => undefined) : Promise.resolve();
+    this.screens = (screens ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 300);
+    this.routeName = routeName ?? ((u: URL) => screenOf(pathOf(u), this.screens));
+    this.trackRoutes();
+    // B23: offline auf dem Telefon – nicht gesendete Ereignisse beim Beenden zwischenspeichern und beim nächsten Start senden (everydeck dedupliziert)
+    const native = ['ios', 'android'].includes(this.client.getClient()?.platform ?? '');
+    this.persistOn = (persist ?? (native || !!storage)) && this.client.opts.enabled;
+    // Wiederherstellen kann asynchron sein (AsyncStorage): `ready` wartet darauf, der erste Flush danach sendet die alten Ereignisse mit
+    this.ready = Promise.all([detected, this.persistOn ? this.restorePending() : Promise.resolve()]).then(() => undefined);
+    this.sessionId = sessionId ?? uuid();
+    this.baseFetch = (o.fetch ?? orig ?? ((...a: Parameters<typeof fetch>) => globalThis.fetch(...a)));
+    this.apiRoutes = (apiRoutes ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 500);
+    // B23: Pfad einer Anfrage nur als Muster – auch das Ergebnis einer eigenen sanitizeRoute-Funktion
+    this.route = (u: URL) => apiRouteOf(sanitizeRoute ? sanitizeRoute(u) : u.pathname, this.apiRoutes);
+    this.hosts = captureHosts ?? null;
+    this.endpoint = this.client.opts.endpoint;
+    // B31 Schnitt C: Hülle um globalThis.fetch – jede Anfrage der App an die eigenen Hosts läuft über den zentralen Weg (ohne Aktion: ohne Kopfzeilen, nur Fehler gemeldet)
+    if (captureBackground !== false && this.client.opts.enabled && orig && g0.fetch && !g0.fetch[PATCHED]) {
+      const wrapped = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => this.fetchWithContext(null, input, init, undefined, orig)) as typeof fetch & { [PATCHED]?: boolean; [ORIGINAL]?: typeof fetch };
+      wrapped[PATCHED] = true; wrapped[ORIGINAL] = orig; g0.fetch = wrapped;
+      this.uninstall = () => { if (g0.fetch === wrapped) g0.fetch = orig; };
+    }
+    this.correlate = correlate ?? (() => true);
+    if (captureUnhandled !== false && typeof globalThis.addEventListener === 'function') {
+      globalThis.addEventListener('error', (e: unknown) => { const ev = e as { error?: unknown; message?: string }; this.captureUnhandled('browser.unhandled_error', ev.error ?? ev.message); });
+      globalThis.addEventListener('unhandledrejection', (e: unknown) => { this.captureUnhandled('browser.unhandled_rejection', (e as { reason?: unknown }).reason); });
+      globalThis.addEventListener('pagehide', () => { void this.savePending(); this.client.flushKeepalive(); });
+      globalThis.addEventListener('visibilitychange', () => { if ((globalThis as { document?: { visibilityState?: string } }).document?.visibilityState === 'hidden') { void this.savePending(); this.client.flushKeepalive(); } });
+    }
+  }
+  private persistOn = false;
+  /** B31 Schnitt C: die Hülle um globalThis.fetch wieder entfernen (Tests, Abmelden des SDK) */
+  uninstall: () => void = () => {};
+  private readonly endpoint: string;
+  /** B31 Schnitt C: dieselbe fehlgeschlagene Hintergrundanfrage (Methode, Route, Status, Seite) höchstens alle 30 s */
+  private readonly lastBackground = new Map<string, number>();
+  /**
+   * B33b: Fakten aus dem Körper einer fehlgeschlagenen Antwort (Fehlercode, Meldung) – aus einer Kopie, nur bei JSON bis ANSWER_MAX_BYTES und höchstens
+   * 2 s lang; die App bekommt ihre Antwort sofort und unverändert. Die Meldung zusätzlich mit Pfaden nur als Muster (wie Fehlermeldungen).
+   */
+  private answer(res: Response): Promise<ErrorAnswer | undefined> {
+    const ct = res.headers?.get?.('content-type') ?? ''; const len = Number(res.headers?.get?.('content-length') ?? 0);
+    if (!/json/i.test(ct) || len > ANSWER_MAX_BYTES) return Promise.resolve(undefined);
+    let copy: Response; try { copy = res.clone(); } catch { return Promise.resolve(undefined); }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(undefined), 2000);
+      copy.text().then((body) => {
+        const a = answerOf(body, ct);
+        resolve(a ? { ...a, ...(a.message ? { message: scrubPaths(a.message, [...this.apiRoutes, ...this.screens]).slice(0, 300) } : {}) } : undefined);
+      }, () => resolve(undefined)).finally(() => clearTimeout(timer));
+    });
+  }
+  private backgroundFailure(http: HttpContext, cls: string, message: string, response?: ErrorAnswer): void {
+    const page = this.trailList.at(-1) ?? '';
+    const key = `${http.method} ${http.route} ${http.status ?? cls} ${page}`; const now = Date.now();
+    if ((this.lastBackground.get(key) ?? 0) > now - 30_000) return;
+    if (this.lastBackground.size > 200) this.lastBackground.clear();
+    this.lastBackground.set(key, now);
+    const { sessionId, ...r } = this.ctxRefs(null);
+    this.client.error('page.request_failed', cls, { ...r, sessionId, trail: this.trail(), http, message, ...(response ? { response } : {}) });
+  }
+  private readonly store: StorageAdapter | null;
+  private screens: string[] = [];
+  private apiRoutes: string[] = [];
+  /** B23: Fehlermeldung ohne Token, Query, E-Mail und mit Pfaden nur als Muster (Seiten und API) */
+  private msg(e: unknown): string { return scrubPaths(sanitizeMessage(e), [...this.apiRoutes, ...this.screens]).slice(0, 300); }
+  /** B23: Bildschirmwechsel einer App ohne Adressleiste (React Navigation, native Screens) – nur der Name, nie Parameter; eine Adresse (`/partner/ayu-made`, z. B. aus Expo Routers usePathname) wird auf die Muster abgebildet */
+  /** B37 Baustein 3: Seiten, die der Befund nicht kennt – je Form einmal je Seitenleben, höchstens 20; nur mit deklarierten Mustern (sonst ist alles unbekannt) */
+  private unknownScreen(address: string): void {
+    if (!this.screens.length || this.unknownSeen.size >= 20) return;
+    const segs = segsOf(address); if (!segs.length || bestPattern(segs, this.screens)) return;
+    const s = screenShape(address); if (!s || this.unknownSeen.has(s.shape)) return;
+    this.unknownSeen.add(s.shape); this.breadcrumb(UNKNOWN_SCREEN, { shape: s.shape, depth: s.depth });
+  }
+  screen(name: string): void { const raw = String(name); if (raw.startsWith('/')) this.unknownScreen(raw); this.pushTrail(raw); }
+  private pushTrail(raw: string): void { const n = (raw.startsWith('/') ? screenOf(raw, this.screens) : raw.replace(/[?#\s].*$/, '')).slice(0, 80); if (!n || this.trailList.at(-1) === n) return; this.trailList.push(n); if (this.trailList.length > 10) this.trailList.shift(); }
+  /** Weg vor dem Fehler (Kopie) */
+  trail(): string[] { return [...this.trailList]; }
+  private trackRoutes(): void {
+    const g = globalThis as unknown as { location?: { href?: string }; history?: { pushState?: (...a: unknown[]) => void; replaceState?: (...a: unknown[]) => void }; addEventListener?: (t: string, f: () => void) => void };
+    const note = () => { try { if (g.location?.href) { const u = new URL(g.location.href); this.unknownScreen(pathOf(u)); this.pushTrail(this.routeName(u)); } } catch { /* keine Adresse */ } };
+    note();
+    if (g.history && typeof g.history.pushState === 'function') {
+      for (const k of ['pushState', 'replaceState'] as const) {
+        const orig = g.history[k]!.bind(g.history);
+        g.history[k] = (...a: unknown[]) => { const r = orig(...a); note(); return r; };
+      }
+    }
+    if (typeof g.addEventListener === 'function') { g.addEventListener('popstate', note); g.addEventListener('hashchange', note); }
+  }
+  private storage(): StorageAdapter | null { if (this.store) return this.store; try { return (globalThis as unknown as { localStorage?: StorageAdapter }).localStorage ?? null; } catch { return null; } }
+  /** B23: nicht gesendete Ereignisse jetzt sichern – in Expo/React Native beim Wechsel in den Hintergrund aufrufen (`AppState` → `background`) */
+  persist(): Promise<void> { return this.savePending(); }
+  private async savePending(): Promise<void> { if (!this.persistOn) return; try { const ev = this.client.exportPending(300); const st = this.storage(); if (!st) return; if (ev.length) await st.setItem(PENDING_KEY, JSON.stringify(ev)); else await st.removeItem(PENDING_KEY); } catch { /* Speicher voll oder gesperrt */ } }
+  private async clearPending(): Promise<void> { if (!this.persistOn) return; try { await this.storage()?.removeItem(PENDING_KEY); } catch { /* egal */ } }
+  /** synchroner Speicher (localStorage) wird noch im Konstruktor wiederhergestellt, asynchroner (AsyncStorage) bis `ready` */
+  private async restorePending(): Promise<void> {
+    try {
+      const st = this.storage(); if (!st) return;
+      const got = st.getItem(PENDING_KEY); const raw = got instanceof Promise ? await got : got;
+      if (!raw) return;
+      const rm = st.removeItem(PENDING_KEY); if (rm instanceof Promise) await rm;
+      this.client.importPending(JSON.parse(raw));
+    } catch { /* beschädigt: verwerfen */ }
+  }
+  /** Bekannte Person/Organisation dieser Sitzung (Behauptung; autoritativ wird sie nur über die Identitätsquelle des Servers). */
+  setSubject(subjectRef: string | null, accountRef?: string | null): void { this.subject = { ...(subjectRef ? { subjectRef } : {}), ...(accountRef ? { accountRef } : {}) }; }
+  /** No ambient async context: use the context passed to action(). */
+  currentAction(): ActionContext | null { return null; }
+  private ctxRefs(ctx: ActionContext | null) { return { sessionId: this.sessionId, ...(ctx ? { operationId: ctx.operationId, attemptId: ctx.attemptId, ...(ctx.objectType ? { objectType: ctx.objectType } : {}), ...(ctx.objectRef ? { objectRef: ctx.objectRef } : {}), ...(ctx.subjectRef ? { subjectRef: ctx.subjectRef } : {}), ...(ctx.accountRef ? { accountRef: ctx.accountRef } : {}) } : this.subject) }; }
+  private captureUnhandled(name: string, err: unknown): void {
+    const { sessionId, ...r } = this.ctxRefs(null);
+    this.client.error(name, classOf(err), { ...r, sessionId, trail: this.trail(), message: this.msg(err), ...(framesOf(err) ? { frames: framesOf(err)!, contextStatus: 'browser_no_source_maps' as const } : {}) });
+  }
+  breadcrumb(name: string, fields?: Record<string, string | number | boolean>): void { const { sessionId, ...r } = this.ctxRefs(null); this.client.breadcrumb(name, sessionId, { ...r, ...(fields ? { fields } : {}) }); }
+  /**
+   * Eine Nutzeraktion: operation_id/attempt_id, Breadcrumbs für Start/Ende, Requestfehler über `ctx.fetch`, geworfene Fehler als `error`
+   * (und weitergeworfen). Kein fachlicher Erfolg wird behauptet – der kommt nur vom Server.
+   */
+  async action<T>(name: string, fn: (ctx: ActionContext) => PromiseLike<T> | T, meta: ActionMeta = {}): Promise<T> {
+    const ctx = this.newContext(name, { ...this.subject, ...meta }, meta.operationId ?? uuid(), 1);
+    return this.runAction(ctx, fn);
+  }
+  private newContext(name: string, meta: ActionMeta, operationId: string, attempt: number): ActionContext {
+    const self = this;
+    const ctx: ActionContext = { ...meta, name, operationId, attemptId: meta.attemptId ?? uuid(), attempt, fetch: (input, init, options) => self.fetchWithContext(ctx, input, init, options), expecting: (statuses) => (input, init) => self.fetchWithContext(ctx, input, init, { expect: statuses }), retry() { const { attemptId: _old, ...nextMeta } = meta; return self.newContext(name, nextMeta, operationId, attempt + 1); } };
+    return Object.freeze(ctx);
+  }
+  async runAction<T>(ctx: ActionContext, fn: (ctx: ActionContext) => PromiseLike<T> | T): Promise<T> {
+    const { sessionId, ...r } = this.ctxRefs(ctx);
+    this.client.breadcrumb(`${ctx.name}.started`, sessionId, r);
+    const started = Date.now();
+    try {
+      const out = await fn(ctx);
+      this.client.breadcrumb(`${ctx.name}.finished`, sessionId, { ...r, fields: { duration_ms: Date.now() - started } });
+      return out;
+    } catch (e) {
+      const same = this.propagated(e, ctx.attemptId);
+      // Provably the same failure passed on: a step of the already reported error, no second case.
+      if (same) this.client.breadcrumb(`${ctx.name}.failed`, sessionId, { ...r, fields: { error_class: classOf(e), propagated_request_failure: true, request_error_class: same.errorClass, duration_ms: Date.now() - started } });
+      // Anything else keeps its own sanitized message and frames; an earlier failed request is only a hint, not a cause.
+      else this.client.error(`${ctx.name}.failed`, classOf(e), { ...r, sessionId, trail: this.trail(), message: this.msg(e), ...(framesOf(e) ? { frames: framesOf(e)!, contextStatus: 'browser_no_source_maps' as const } : {}), ...(this.failedInAttempt.get(ctx.attemptId) ? { fields: { after_request_failure: true } } : {}) });
+      throw e;
+    } finally { this.failedInAttempt.delete(ctx.attemptId); }
+  }
+  /** Der zentrale Requestweg: Korrelations-Header innerhalb einer Aktion, Fehler (Nicht-2xx außer erwarteten Status, Netz, Timeout) als `error` mit bereinigtem Kontext; ein weitergegebener Anfragefehler (dasselbe Objekt oder als cause/context/response) ist ein Schritt, jeder andere Fehler bleibt ein eigener Fehler. */
+  readonly fetch: typeof fetch = (input, init) => this.fetchWithContext(null, input, init);
+  private async fetchWithContext(ctx: ActionContext | null, input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1], options?: RequestOptions, via?: typeof fetch): Promise<Response> {
+    const req = input instanceof Request ? input : null;
+    const urlStr = req ? req.url : typeof input === 'string' ? input : (input as URL).toString();
+    let url: URL | null = null; try { url = new URL(urlStr, (globalThis as { location?: { href?: string } }).location?.href ?? 'http://localhost/'); } catch { url = null; }
+    const method = ((init?.method ?? req?.method ?? 'GET').toUpperCase()) as HttpContext['method'];
+    const ownHost = (globalThis as { location?: { host?: string } }).location?.host ?? null;
+    const everydeckOwn = !!url && !!this.endpoint && url.href.startsWith(this.endpoint);
+    // B31 Schnitt C: ohne Aktion nur die eigenen Hosts (captureHosts, sonst der Host der Seite); nie everydeck’s eigener Versand
+    const background = !ctx && this.client.opts.enabled && !!url && !everydeckOwn && (this.hosts ? this.hosts.includes(url.host) : !!ownHost && url.host === ownHost);
+    const capture = this.client.opts.enabled && !!ctx && !!url && (!this.hosts || this.hosts.includes(url.host));
+    let headers: Headers | undefined;
+    // Disabled everydeck or an excluded target: the app request stays byte-identical (no extra headers, no CORS preflight caused by everydeck).
+    if (capture && this.correlate(url!)) { headers = new Headers(init?.headers ?? req?.headers ?? undefined); headers.set('x-everydeck-operation-id', ctx!.operationId); headers.set('x-everydeck-attempt-id', ctx!.attemptId); headers.set('x-everydeck-session-id', this.sessionId); }
+    const started = Date.now();
+    try {
+      const res = await (via ?? this.baseFetch)(input, headers ? { ...init, headers } : init);
+      if (background && url && res.status >= 400 && !(options?.expect ?? []).includes(res.status) && !(res.status === 401 && !this.subject.subjectRef)) {
+        const http: HttpContext = { method, route: this.route(url), status: res.status, durationMs: Date.now() - started };
+        void this.answer(res).then((response) => this.backgroundFailure(http, `http_${res.status}`, `HTTP ${res.status} at ${method} ${http.route}`, response));
+      }
+      if (capture && url) {
+        const http: HttpContext = { method, route: this.route(url), status: res.status, durationMs: Date.now() - started };
+        const { sessionId, ...r } = this.ctxRefs(ctx);
+        const expected = res.status >= 400 && ((options?.expect ?? []).includes(res.status) || (ctx!.expectStatus ?? []).includes(res.status));
+        if (expected) this.client.breadcrumb(`${ctx!.name}.request`, sessionId, { ...r, http, fields: { expected: true } });
+        else if (res.status >= 400) {
+          this.markFailed(ctx!.attemptId, res, `http_${res.status}`);
+          const base = { ...r, sessionId, trail: this.trail(), http, message: `HTTP ${res.status} at ${http.route}` };
+          void this.answer(res).then((response) => this.client.error(`${ctx!.name}.request_failed`, `http_${res.status}`, { ...base, ...(response ? { response } : {}) }));
+        }
+        else if (method !== 'GET' && method !== 'HEAD') this.client.breadcrumb(`${ctx!.name}.request`, sessionId, { ...r, http });
+      }
+      return res;
+    } catch (e) {
+      // B31 Schnitt C: ein abgebrochener Hintergrundabruf (Seitenwechsel, AbortController) ist kein Fehler, den der Nutzer sieht
+      // B33b: keine Antwort bei einer Anfrage an einen anderen Host – eine Antwort ohne CORS-Kopf verbirgt der Browser vor der App (Fakt für everydeck)
+      const crossOrigin = !!url && !!ownHost && url.host !== ownHost;
+      if (background && url && (e as Error)?.name !== 'AbortError') this.backgroundFailure({ method, route: this.route(url), durationMs: Date.now() - started, ...(crossOrigin ? { crossOrigin } : {}) }, 'network_error', `network error at ${method} ${this.route(url)}`);
+      if (capture && url) {
+        const { sessionId, ...r } = this.ctxRefs(ctx);
+        const aborted = (e as Error).name === 'AbortError';
+        this.markFailed(ctx!.attemptId, e, aborted ? 'timeout' : 'network_error');
+        this.client.error(`${ctx!.name}.request_failed`, aborted ? 'timeout' : 'network_error', { ...r, sessionId, trail: this.trail(), http: { method, route: this.route(url), durationMs: Date.now() - started, ...(crossOrigin ? { crossOrigin } : {}) }, message: this.msg(e) });
+      }
+      throw e;
+    }
+  };
+  flush(timeoutMs?: number): Promise<boolean> { return this.client.flush(timeoutMs); }
+}
+
+export function initEverydeckBrowser(o: BrowserOptions): EverydeckBrowser { return new EverydeckBrowser(o); }
+export type { ClientInfo, HttpContext, EverydeckOptions } from './core.js';

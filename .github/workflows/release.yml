@@ -1,0 +1,66 @@
+# Builds and publishes the four packages on a tag v*. Trusted Publishing (OIDC): no tokens in this repository.
+# npm: each package names this repository and this workflow file on npmjs.com (Settings → Trusted publisher); npm 11.5.1 or newer.
+# PyPI: each project names this repository, this workflow file and the environment "pypi" (Publishing → Trusted publisher).
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      matrix:
+        package: [sdk, check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm install -g npm@^11.5.1
+      - name: publish packages/${{ matrix.package }}
+        working-directory: packages/${{ matrix.package }}
+        run: |
+          name=$(node -p "require('./package.json').name"); version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version > /dev/null 2>&1; then echo "$name@$version is already published"; exit 0; fi
+          npm install --no-audit --no-fund
+          npm publish --provenance --access public
+  pypi-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [sdk-python, everydeck-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build
+      - run: python -m build --sdist --wheel --outdir dist packages/${{ matrix.package }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.package }}
+          path: dist/
+  pypi-publish:
+    needs: pypi-build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    strategy:
+      matrix:
+        package: [sdk-python, everydeck-check]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.package }}
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true

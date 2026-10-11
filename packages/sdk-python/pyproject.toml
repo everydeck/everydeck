@@ -1,0 +1,23 @@
+[project]
+name = "everydeck"
+version = "0.2.0"
+description = "everydeck Python SDK: bounded buffer, background sender, flush on shutdown, reported data gaps"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.urls]
+Homepage = "https://everydeck.ai"
+Repository = "https://github.com/everydeck/everydeck"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "jsonschema[format]>=4.26", "build>=1.2"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["everydeck*"]

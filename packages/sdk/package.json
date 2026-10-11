@@ -1,0 +1,50 @@
+{
+  "name": "@everydeck/sdk",
+  "version": "0.2.0",
+  "description": "everydeck SDK for TypeScript: server (Node ≥ 22, Deno / Supabase Edge) and browser adapters, transport contract 1.1-r0",
+  "license": "MIT",
+  "homepage": "https://everydeck.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/everydeck/everydeck.git",
+    "directory": "packages/sdk"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
+    "./dist": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./dist/browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
+    "./dist/core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "22.20.4"
+  }
+}

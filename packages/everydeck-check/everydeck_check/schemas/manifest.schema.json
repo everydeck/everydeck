@@ -1,0 +1,2347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Everydeck manifest 1.12-r0 (also accepts 1.0-r0 to 1.11-r0)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "1.0-r0",
+        "1.1-r0",
+        "1.2-r0",
+        "1.3-r0",
+        "1.4-r0",
+        "1.5-r0",
+        "1.6-r0",
+        "1.7-r0",
+        "1.8-r0",
+        "1.9-r0",
+        "1.10-r0",
+        "1.11-r0",
+        "1.12-r0"
+      ]
+    },
+    "release_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "kind": {
+            "enum": [
+              "flow",
+              "identity",
+              "usage",
+              "mail",
+              "billing",
+              "job"
+            ]
+          },
+          "observation": {
+            "enum": [
+              "proposed",
+              "instrumented"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "signal": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+                },
+                "role": {
+                  "enum": [
+                    "start",
+                    "step",
+                    "result",
+                    "failure",
+                    "alternative"
+                  ]
+                },
+                "next": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 6,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+                  }
+                },
+                "browser_error": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,95}$",
+                  "description": "1.9-r0, only on a failure step without a server signal: the name of the browser action (everydeck.action name, e.g. \"claim.submit\") whose failure ends the run as failed when nothing is left on the server – its failed request (<name>.request_failed) or thrown error (<name>.failed); a full error event name is accepted too. Shown as \"failed (reported by the browser only)\" with the trust level of a browser claim; any server evidence of the run takes precedence."
+                }
+              },
+              "required": [
+                "id",
+                "label"
+              ]
+            }
+          },
+          "touches": {
+            "type": "array",
+            "maxItems": 20,
+            "uniqueItems": true,
+            "description": "1.8-r0 (B18): tables or table.column the flow reads or writes, found in the code – lets everydeck answer an agent's context question before a risky change",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z_][a-z0-9_]{0,62}(\\.[a-z_][a-z0-9_]{0,62})?$"
+            }
+          },
+          "expected_duration": {
+            "type": "string",
+            "pattern": "^P(?!$)(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?)?$",
+            "description": "1.9-r0: how long one run of this flow may legitimately take (ISO 8601 duration such as PT4H, P3D, P14D). Until then everydeck shows a run without a declared end as running, not after 30 minutes as completion not confirmed."
+          },
+          "platforms": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "web",
+                "ios",
+                "android",
+                "desktop",
+                "extension",
+                "server"
+              ]
+            },
+            "description": "1.10-r0: the platforms this flow exists on (omitted = all declared platforms)."
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind",
+          "observation"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 50
+    },
+    "signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "capability_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "allowed_source": {
+            "const": "server"
+          },
+          "location": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240,
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+              },
+              "symbol": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "commit": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "path",
+              "symbol",
+              "commit"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "capability_id",
+          "label",
+          "allowed_source",
+          "location"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 100
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "capability_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "kind": {
+            "const": "sequence"
+          },
+          "trigger": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "expect": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "within_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86400
+          },
+          "grace_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3600
+          }
+        },
+        "required": [
+          "id",
+          "capability_id",
+          "kind",
+          "trigger",
+          "expect",
+          "within_seconds",
+          "grace_seconds"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 50
+    },
+    "diagnostic_fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "value_type": {
+            "enum": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          "max_length": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256
+          }
+        },
+        "required": [
+          "name",
+          "value_type",
+          "max_length"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 32
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 280
+        }
+      },
+      "required": [
+        "description"
+      ]
+    },
+    "people": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": [
+            "sdk_identity",
+            "read_bridge"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "display_name",
+              "email",
+              "login_method",
+              "provider_user_id",
+              "org_name",
+              "phone",
+              "whatsapp"
+            ]
+          }
+        },
+        "provider": {
+          "enum": [
+            "supabase_auth",
+            "other"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 280
+        },
+        "roles": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 60
+              },
+              "label_plural": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 60
+              },
+              "rule": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "org": {
+                    "const": true
+                  },
+                  "owns": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  }
+                }
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "label_plural"
+            ]
+          },
+          "description": "1.8-r0: roles as views on people, checked in this order – org (belongs to a named organization), owns (owns objects of this type); a role without a rule takes everybody else"
+        },
+        "manage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "door"
+          ],
+          "properties": {
+            "door": {
+              "$ref": "#/$defs/manage_door"
+            },
+            "edit": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fields"
+              ],
+              "properties": {
+                "fields": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 7,
+                  "uniqueItems": true,
+                  "items": {
+                    "enum": [
+                      "display_name",
+                      "email",
+                      "login_method",
+                      "provider_user_id",
+                      "org_name",
+                      "phone",
+                      "whatsapp"
+                    ]
+                  }
+                },
+                "risk": {
+                  "$ref": "#/$defs/risk"
+                },
+                "reason_required": {
+                  "type": "boolean"
+                }
+              },
+              "description": "people fields the operator may change (never provider_user_id; email only through support.change_email)"
+            },
+            "create": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "risk"
+              ],
+              "properties": {
+                "risk": {
+                  "$ref": "#/$defs/risk"
+                },
+                "door": {
+                  "$ref": "#/$defs/manage_door"
+                }
+              }
+            },
+            "delete": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "risk"
+              ],
+              "properties": {
+                "risk": {
+                  "$ref": "#/$defs/risk"
+                },
+                "door": {
+                  "$ref": "#/$defs/manage_door"
+                }
+              }
+            },
+            "bulk": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "risk"
+              ],
+              "properties": {
+                "risk": {
+                  "$ref": "#/$defs/risk"
+                },
+                "door": {
+                  "$ref": "#/$defs/manage_door"
+                },
+                "fields": {
+                  "type": "array",
+                  "maxItems": 7,
+                  "uniqueItems": true,
+                  "items": {
+                    "enum": [
+                      "display_name",
+                      "email",
+                      "login_method",
+                      "provider_user_id",
+                      "org_name",
+                      "phone",
+                      "whatsapp"
+                    ]
+                  }
+                }
+              }
+            },
+            "export": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "risk"
+              ],
+              "properties": {
+                "risk": {
+                  "$ref": "#/$defs/risk"
+                }
+              }
+            },
+            "import": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "risk"
+              ],
+              "properties": {
+                "risk": {
+                  "$ref": "#/$defs/risk"
+                },
+                "door": {
+                  "$ref": "#/$defs/manage_door"
+                },
+                "update": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "support": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "resend_confirmation": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "risk"
+                  ],
+                  "properties": {
+                    "risk": {
+                      "$ref": "#/$defs/risk"
+                    },
+                    "door": {
+                      "$ref": "#/$defs/manage_door"
+                    }
+                  }
+                },
+                "password_reset_link": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "risk"
+                  ],
+                  "properties": {
+                    "risk": {
+                      "$ref": "#/$defs/risk"
+                    },
+                    "door": {
+                      "$ref": "#/$defs/manage_door"
+                    }
+                  }
+                },
+                "change_email": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "risk"
+                  ],
+                  "properties": {
+                    "risk": {
+                      "$ref": "#/$defs/risk"
+                    },
+                    "door": {
+                      "$ref": "#/$defs/manage_door"
+                    }
+                  }
+                },
+                "message": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "risk",
+                    "channel"
+                  ],
+                  "properties": {
+                    "risk": {
+                      "$ref": "#/$defs/risk"
+                    },
+                    "channel": {
+                      "enum": [
+                        "email",
+                        "push"
+                      ]
+                    },
+                    "door": {
+                      "$ref": "#/$defs/manage_door"
+                    }
+                  },
+                  "description": "1.11-r0: a message to one person or a filtered group through the app's own channel (its mail delivery or its push) – never a messenger of everydeck's own; the bridge lists manage.person.message"
+                }
+              },
+              "description": "support standard actions, only those the login provider offers: resend the confirmation mail, send a password reset link, change the e-mail address; message = a message through the app's own channel (email or push)"
+            }
+          },
+          "description": "1.11-r0 (B22 Schnitt C): the management set for people – the same set as for objects plus support standard actions of the login provider; person data export is owner-only with a reason and logged"
+        }
+      },
+      "required": [
+        "source",
+        "fields"
+      ]
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "kind": {
+            "enum": [
+              "web",
+              "backend",
+              "database",
+              "auth",
+              "worker",
+              "mail",
+              "payments",
+              "analysis",
+              "storage",
+              "queue",
+              "hosting",
+              "other"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          },
+          "capabilities": {
+            "type": "array",
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+            }
+          },
+          "depends_on": {
+            "type": "array",
+            "maxItems": 10,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "role",
+          "evidence"
+        ]
+      }
+    },
+    "objects": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "label_plural": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "fields": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60
+                },
+                "kind": {
+                  "enum": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "date",
+                    "enum",
+                    "email",
+                    "url",
+                    "long_text",
+                    "image",
+                    "money"
+                  ],
+                  "description": "1.11-r0 adds enum (values from the code), email, url, long_text, image (one URL), money (amount with currency)"
+                },
+                "role": {
+                  "enum": [
+                    "title",
+                    "text",
+                    "images",
+                    "price",
+                    "url",
+                    "time",
+                    "ref",
+                    "limit",
+                    "amount",
+                    "period",
+                    "group",
+                    "moderation.signal",
+                    "contact.whatsapp",
+                    "contact.email",
+                    "contact.phone",
+                    "start",
+                    "end",
+                    "duration",
+                    "person",
+                    "promotion"
+                  ],
+                  "description": "1.8-r0: meaning of the field on the admin pages – content (title/text/images/price/url), the named time column of the list (time, a date field), reference to another object (ref, with ref_type), a plan limit counted against the inventory (limit, with ref_type), amount and period (amount/period), group for distributions (group), moderation signal (moderation.signal, with signals), contact channel (contact.*), period (start/end, date fields), answer time in minutes (duration), the other person as subject_ref (person), promoted until (promotion, a date field)"
+                },
+                "ref_type": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+                  "description": "1.8-r0: object type a ref or limit field points to"
+                },
+                "signals": {
+                  "type": "object",
+                  "maxProperties": 12,
+                  "propertyNames": {
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  },
+                  "additionalProperties": {
+                    "enum": [
+                      "fraud",
+                      "fake",
+                      "inaccurate",
+                      "offensive",
+                      "illegal",
+                      "rights",
+                      "duplicate",
+                      "spam",
+                      "other"
+                    ]
+                  },
+                  "description": "1.8-r0: field value → everydeck group of the moderation signal (only with role moderation.signal); the groups fake, inaccurate, offensive, illegal, rights and spam need 1.9-r0. Prefer `reasons` (1.9-r0), which also keeps the app's label."
+                },
+                "reasons": {
+                  "description": "1.9-r0 (with role moderation.signal): every reason value the app stores, with the app's own label and the everydeck group it belongs to. everydeck shows the app's reason and counts and combines signals by group (fraud and fake count as fraud signals). Replaces `signals` for new manifests; `signals` stays valid.",
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 24,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "value",
+                      "label",
+                      "group"
+                    ],
+                    "properties": {
+                      "value": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "label": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 60
+                      },
+                      "group": {
+                        "enum": [
+                          "fraud",
+                          "fake",
+                          "inaccurate",
+                          "offensive",
+                          "illegal",
+                          "rights",
+                          "duplicate",
+                          "spam",
+                          "other"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "values": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 48,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "value"
+                    ],
+                    "properties": {
+                      "value": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "label": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 60
+                      }
+                    }
+                  },
+                  "description": "1.11-r0: with kind enum – the values the code allows, in the app's words"
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$",
+                  "description": "1.11-r0: with kind money – the fixed ISO 4217 currency of this field"
+                },
+                "currency_field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+                  "description": "1.11-r0: with kind money – the declared field that holds the currency of each record (instead of a fixed currency)"
+                },
+                "edit": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "editable"
+                  ],
+                  "properties": {
+                    "editable": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "risk": {
+                      "$ref": "#/$defs/risk"
+                    },
+                    "reason_required": {
+                      "type": "boolean"
+                    }
+                  },
+                  "description": "1.11-r0: editability. Default: editable – everything an admin of the app normally changes (titles, texts, prices, images, categories …) can be edited in everydeck once the object type has its management set (objects[].manage). Locked for good: identifiers and references (role ref, person, limit), login data, money outside an app function (role amount) and fields with managed_in – `editable: true` on them is an error. The agent may lock a single field with `editable: false` and a `reason`. `risk` (default green, amber for money) and `reason_required` change how the owner operates it."
+                },
+                "managed_in": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "label"
+                  ],
+                  "properties": {
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 60
+                    },
+                    "url": {
+                      "type": "string",
+                      "maxLength": 400,
+                      "pattern": "^https://"
+                    }
+                  },
+                  "description": "1.11-r0: the field is managed in another system (e.g. the subscription in Stripe) – everydeck shows the link instead of a form"
+                }
+              },
+              "required": [
+                "name",
+                "label",
+                "kind"
+              ]
+            },
+            "description": "1.12-r0: every column of the table – up to 100 (protection). More than 24 require 1.12-r0."
+          },
+          "statuses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60
+                },
+                "meaning": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "public": {
+                  "type": "boolean"
+                },
+                "lifecycle": {
+                  "enum": [
+                    "unfinished",
+                    "finished"
+                  ],
+                  "description": "1.5-r0: proven business meaning of the status – unfinished = still to be handled, finished = done (also cancelled). Only where the code proves it; without it everydeck offers no grouping."
+                },
+                "revenue": {
+                  "enum": [
+                    "paying",
+                    "free",
+                    "ended",
+                    "requested"
+                  ],
+                  "description": "1.8-r0: what the status means for revenue – paying, free, ended, requested"
+                },
+                "outcome": {
+                  "type": "boolean",
+                  "description": "1.8-r0: the status is an outcome in the operator's sense (e.g. rented/sold) – used for reports only; everydeck does not see real deals"
+                }
+              },
+              "required": [
+                "value",
+                "label",
+                "meaning"
+              ]
+            }
+          },
+          "owner": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "person"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 60
+              }
+            },
+            "required": [
+              "kind",
+              "label"
+            ]
+          },
+          "source": {
+            "const": "read_bridge"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          },
+          "icon": {
+            "enum": [
+              "item",
+              "place",
+              "person",
+              "people",
+              "calendar",
+              "payment",
+              "message"
+            ],
+            "description": "1.6-r0: display hint for the object type's symbol in the navigation. Display only, no business meaning; without it everydeck shows a neutral symbol."
+          },
+          "area": {
+            "enum": [
+              "people",
+              "revenue",
+              "moderation"
+            ],
+            "description": "1.8-r0: universal area the object type belongs to (customer account, revenue, moderation); without it the type gets its own menu item named as in the app"
+          },
+          "messages": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "statuses": {
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  }
+                },
+                "subject": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 600
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "subject",
+                "text"
+              ]
+            },
+            "description": "1.8-r0: prepared messages to the responsible person; placeholders {name}, {title}, {field:<name>}. everydeck opens WhatsApp or e-mail, it never sends anything itself"
+          },
+          "manage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "door"
+            ],
+            "properties": {
+              "door": {
+                "$ref": "#/$defs/manage_door"
+              },
+              "create": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "risk"
+                ],
+                "properties": {
+                  "risk": {
+                    "$ref": "#/$defs/risk"
+                  },
+                  "door": {
+                    "$ref": "#/$defs/manage_door"
+                  },
+                  "fields": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                    },
+                    "description": "fields the form asks for (default: all editable fields)"
+                  }
+                }
+              },
+              "archive": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "risk",
+                  "to_status"
+                ],
+                "properties": {
+                  "risk": {
+                    "$ref": "#/$defs/risk"
+                  },
+                  "door": {
+                    "$ref": "#/$defs/manage_door"
+                  },
+                  "to_status": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  }
+                }
+              },
+              "delete": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "risk"
+                ],
+                "properties": {
+                  "risk": {
+                    "$ref": "#/$defs/risk"
+                  },
+                  "door": {
+                    "$ref": "#/$defs/manage_door"
+                  }
+                }
+              },
+              "bulk": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "risk"
+                ],
+                "properties": {
+                  "risk": {
+                    "$ref": "#/$defs/risk"
+                  },
+                  "door": {
+                    "$ref": "#/$defs/manage_door"
+                  },
+                  "fields": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                    },
+                    "description": "editable fields a bulk change may set"
+                  },
+                  "statuses": {
+                    "type": "array",
+                    "maxItems": 12,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                    },
+                    "description": "statuses a bulk change may set"
+                  },
+                  "max_items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500
+                  }
+                }
+              },
+              "export": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "risk"
+                ],
+                "properties": {
+                  "risk": {
+                    "$ref": "#/$defs/risk"
+                  },
+                  "fields": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                    },
+                    "description": "columns of the CSV (default: all declared fields)"
+                  }
+                }
+              },
+              "import": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "risk"
+                ],
+                "properties": {
+                  "risk": {
+                    "$ref": "#/$defs/risk"
+                  },
+                  "door": {
+                    "$ref": "#/$defs/manage_door"
+                  },
+                  "fields": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                    },
+                    "description": "columns the import accepts (default: create fields)"
+                  },
+                  "update": {
+                    "type": "boolean",
+                    "description": "existing records may be updated in the explicit mode \"update\" (matched by ref)"
+                  }
+                }
+              }
+            },
+            "description": "1.11-r0 (B22 Schnitt C): the management set of this object type – what the operator may do in everydeck beyond declared actions: edit fields (fields[].edit), create, archive, delete, bulk change, export, import, each with its risk level (green runs at once, amber previews and offers undo, red needs the typed name). Everything goes through the app bridge v2 with the app's own validation; the owner approves the set per object type. Declare only what makes sense for this type."
+          },
+          "technical": {
+            "type": "boolean",
+            "description": "1.12-r0 (B29 Abnahme): true when the agent's description of what users work with (Befund works_with) does not name this table – it is under 'All data': reachable and manageable, but not in the main navigation; the owner can move any object type (nav_placement)"
+          },
+          "part_of": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "1.12-r0 (B29 Abnahme, vierte Runde): the UI shows this object only as part of another object (works_with[].part_of) – no menu item, it appears on that object's detail page"
+          },
+          "title_from": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fields"],
+            "properties": {
+              "fields": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" } }
+            },
+            "description": "B31 Schnitt E: the record has no title column – everydeck composes the title from these fields (people by their name, references by the title of the referenced record, e.g. 'Anna ↔ Ben · Villa Canggu'); the identifier is never the title"
+          }
+        },
+        "required": [
+          "type",
+          "label",
+          "label_plural",
+          "statuses",
+          "source",
+          "evidence"
+        ]
+      },
+      "description": "Business object types read through the read bridge, in the order an operator thinks about them. Up to 10 (more than 10, up to 20, need 1.9-r0); objects with an area are grouped under People, Revenue and Moderation, app objects from the 7th on appear under \"More\". 1.12-r0 (B29 Abnahme): every table of the app becomes a record type – up to 200 (protection, not a product limit; the manifest body stays below 512 KiB). More than 20 require 1.12-r0."
+    },
+    "adapters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "kind": {
+            "enum": [
+              "server",
+              "browser",
+              "read_bridge"
+            ]
+          },
+          "runtime": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "package": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "capabilities": {
+            "type": "array",
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "runtime",
+          "package",
+          "evidence"
+        ]
+      }
+    },
+    "analytics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "meaning": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "not_meaning": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "kind": {
+            "enum": [
+              "inventory_count",
+              "inventory_breakdown",
+              "run_count",
+              "people_count"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "object_type": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+              },
+              "capability_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+              },
+              "with": {
+                "enum": [
+                  "errors",
+                  "runs"
+                ]
+              }
+            }
+          },
+          "filter": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                },
+                "op": {
+                  "enum": [
+                    "eq",
+                    "in",
+                    "is_true",
+                    "is_false"
+                  ]
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 64
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 12,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 64
+                      }
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "field",
+                "op"
+              ]
+            }
+          },
+          "group_by": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "created_field": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "window_days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30
+          },
+          "count": {
+            "enum": [
+              "runs",
+              "results"
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "question",
+          "title",
+          "unit",
+          "meaning",
+          "kind",
+          "source",
+          "evidence"
+        ]
+      }
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "target": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "object"
+                  },
+                  "object_type": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "object_type"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "person"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "capability": {
+            "type": "string",
+            "pattern": "^(access\\.(suspend|unsuspend)|person\\.[a-z][a-z0-9_-]{0,31}|object\\.[a-z][a-z0-9_-]{0,31}\\.[a-z][a-z0-9_-]{0,31})$",
+            "description": "object.<type>.<name> for object actions; for person actions access.suspend / access.unsuspend or, since 1.9-r0, any person.<name> (e.g. person.set_verified) – the person is then handled like an object: same risk levels, preview, protocol and undo, through the app bridge's people endpoints."
+          },
+          "from_statuses": {
+            "type": "array",
+            "maxItems": 12,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+            }
+          },
+          "to_status": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "reverses": {
+            "description": "Which declared actions this action undoes: B.reverses = [\"A\"] means \"B undoes A\" (e.g. unhide.reverses = [\"hide\"]). everydeck offers B as the undo of A within A's undo window. A list since 1.9-r0, because one reversal can undo several actions (e.g. restore undoes hide and archive); a single string is still accepted.",
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+              },
+              {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                }
+              }
+            ]
+          },
+          "effect": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "not_effect": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          },
+          "risk": {
+            "$ref": "#/$defs/risk"
+          },
+          "undo_seconds": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 3600
+          },
+          "platforms": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "web",
+                "ios",
+                "android",
+                "desktop",
+                "extension",
+                "server"
+              ]
+            },
+            "description": "1.10-r0: the platforms on which the app offers this action itself (informative; everydeck runs actions through the bridge)."
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "description",
+          "target",
+          "capability",
+          "effect",
+          "evidence"
+        ]
+      }
+    },
+    "object_rules": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "object_type": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "field": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "statuses": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+            }
+          },
+          "due_within_seconds": {
+            "type": "integer",
+            "minimum": 3600,
+            "maximum": 7776000
+          },
+          "older_than_seconds": {
+            "type": "integer",
+            "minimum": 3600,
+            "maximum": 7776000
+          },
+          "message_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "object_type",
+          "field"
+        ]
+      },
+      "description": "1.8-r0: due dates on date fields of the inventory – due within due_within_seconds or older than older_than_seconds; the engine bundles all hits of one rule into one case"
+    },
+    "jobs": {
+      "description": "1.9-r0: scheduled or long-running jobs that must keep running (cleanups, relays, imports). everydeck knows them before the first heartbeat and reports a job that has not reported for two periods. The job sends its heartbeat with the SDK: heartbeat(intervalSeconds, { job: \"<id>\" }); everydeck-check drift checks that the id appears in a heartbeat call at the evidence.",
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "every",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+            "description": "Job id; the same value the job passes as `job` to the SDK heartbeat"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "every": {
+            "type": "string",
+            "maxLength": 60,
+            "pattern": "^(\\d{1,4}(m|h|d)|[0-9*,/-]+ [0-9*,/-]+ [0-9*,/-]+ [0-9*,/-]+ [0-9*,/-]+)$",
+            "description": "Expected rhythm: a duration (15m, 1h, 3h, 1d) or a five-field cron expression (\"0 3 * * *\")"
+          },
+          "component": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$",
+            "description": "Component (components[].id) the job runs in"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "platforms": {
+      "description": "1.10-r0 (B23): the platforms the app runs on – one entry per platform (web, ios, android, desktop, extension, server) with its runtime, where its version comes from at run time and, for app stores, the store status. everydeck splits errors, flows and repairs by platform; native crashes of a declared ios/android platform are shown as not captured.",
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "runtime",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "web",
+              "ios",
+              "android",
+              "desktop",
+              "extension",
+              "server"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "runtime": {
+            "enum": [
+              "browser",
+              "capacitor",
+              "expo",
+              "react_native",
+              "flutter",
+              "chrome_mv3",
+              "electron",
+              "tauri",
+              "node",
+              "deno",
+              "python",
+              "other"
+            ]
+          },
+          "store_status": {
+            "enum": [
+              "not_submitted",
+              "in_review",
+              "live"
+            ],
+            "description": "App stores only: not submitted, in review or live."
+          },
+          "version_source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Where the version comes from at run time, e.g. \"App.getInfo() version and build\", \"Updates.updateId\", \"VERCEL_GIT_COMMIT_SHA\"."
+          },
+          "differences": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": "What only exists or behaves differently on this platform (e.g. \"push only native\", \"Apple sign-in only on iOS\")."
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "screens": {
+      "description": "1.10-r0 (B23): the page patterns of the app as its router defines them (React Router, Next.js, Expo Router, Vue Router …), written with :param for a variable segment and a final /* for a catch-all, e.g. /partner/:slug. The browser SDK maps every address to the matching pattern before it is sent as the trail before an error – a slug, a name or an id never leaves the browser; an address without a matching pattern keeps only its first segment. Pass the same patterns to the SDK (option `screens`).",
+      "type": "array",
+      "maxItems": 300,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "maxLength": 80,
+            "pattern": "^/(?:(?:[A-Za-z0-9._~-]+|:[A-Za-z_][A-Za-z0-9_]*)(?:/(?:[A-Za-z0-9._~-]+|:[A-Za-z_][A-Za-z0-9_]*))*(?:/\\*)?|\\*)?$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "platforms": {
+            "type": "array",
+            "uniqueItems": true,
+            "minItems": 1,
+            "items": {
+              "enum": [
+                "web",
+                "ios",
+                "android",
+                "desktop",
+                "extension"
+              ]
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "api_routes": {
+      "description": "1.10-r0 (B23): the API paths of the app as its server routes or functions define them, written like screens (/api/partners/:slug, :param, final /*). The browser SDK maps the path of every captured request – and paths or addresses inside error messages – to the matching pattern, and everydeck maps them again on arrival; a slug, a name or an id never leaves the browser. A path without a matching pattern keeps only its first segment. Supabase paths (/rest/v1/<table>, /rest/v1/rpc/<function>, /functions/v1/<name>, /auth/v1/…, storage up to the bucket) carry no names and need no pattern. Pass the same patterns to the SDK (option `apiRoutes`).",
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "maxLength": 80,
+            "pattern": "^/(?:(?:[A-Za-z0-9._~-]+|:[A-Za-z_][A-Za-z0-9_]*)(?:/(?:[A-Za-z0-9._~-]+|:[A-Za-z_][A-Za-z0-9_]*))*(?:/\\*)?|\\*)?$"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "relations": {
+      "type": "array",
+      "maxItems": 200,
+      "description": "1.12-r0 (B29 Abnahme): link tables of the app – a table whose columns are exactly two foreign keys plus key or system columns. everydeck reads it through the read bridge like an object type (type = id, fields = the two side fields) but never shows it as a record type of its own: it appears as a relationship on the detail pages of both sides. Derived from the Befund (column.fk, column.pk, column.computed), never declared by hand.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "sides",
+          "source",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 280
+          },
+          "sides": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "the two foreign-key columns; object_type names a declared record type or \"person\" for the identity table",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "object_type"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                },
+                "object_type": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                }
+              }
+            }
+          },
+          "source": {
+            "const": "read_bridge"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path",
+                "commit"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "release_key",
+    "capabilities",
+    "signals",
+    "rules",
+    "diagnostic_fields"
+  ],
+  "$id": "https://everydeck.local/schemas/manifest.1.2-r0.json",
+  "$defs": {
+    "manage_door": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "evidence"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "app_function",
+            "built"
+          ],
+          "description": "app_function = the app's own server function, RPC or endpoint with its own logic is used (never bypassed); built = a small admin function the agent added in the bridge for this set, following the app's rules (required fields, allowed status changes, dependent data), without changing existing logic or bypassing triggers and row rights beyond what an app admin may do today"
+        },
+        "evidence": {
+          "$ref": "#/$defs/manage_evidence"
+        },
+        "test": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "symbol": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "description": "the test in the app's repository that proves the door keeps the app's rules (at least one forbidden change is refused)"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 280
+        }
+      },
+      "description": "1.11-r0 (B22 Schnitt C): the door this set goes through – the app's existing function or one the agent built, with evidence and its test"
+    },
+    "manage_evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "commit"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n]+$"
+          },
+          "symbol": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "commit": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 64
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    },
+    "risk": {
+      "enum": [
+        "green",
+        "amber",
+        "red"
+      ]
+    }
+  }
+}

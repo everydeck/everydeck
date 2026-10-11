@@ -1,0 +1,1374 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://everydeck.local/schemas/befund-1.12-r0.json",
+ "title": "everydeck Befund 1.12-r0 – the exact technical analysis of an app: facts with evidence, nothing judged",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema_version",
+  "release_key",
+  "commit",
+  "tables",
+  "functions",
+  "flows",
+  "checklist"
+ ],
+ "$defs": {
+  "name": {
+   "type": "string",
+   "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,95}$"
+  },
+  "function_ref": {
+   "type": "string",
+   "description": "B31 (N2): a function is name + file – refer to it by its name, or as <path>#<name> when the name is not unique",
+   "pattern": "^([^#\\s][^#]{0,299}#)?[A-Za-z_][A-Za-z0-9_.-]{0,95}$"
+  },
+  "evidence": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "line"
+   ],
+   "properties": {
+    "path": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 300
+    },
+    "line": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "symbol": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 160
+    }
+   }
+  },
+  "shown": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "path",
+    "line",
+    "element"
+   ],
+   "properties": {
+    "path": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 300
+    },
+    "line": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "symbol": {
+     "type": "string",
+     "maxLength": 160
+    },
+    "label": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 80
+    },
+    "element": {
+     "enum": [
+      "heading",
+      "text",
+      "textarea",
+      "long_text",
+      "image",
+      "link",
+      "money",
+      "date",
+      "date_range_start",
+      "date_range_end",
+      "badge",
+      "input",
+      "select",
+      "number",
+      "checkbox",
+      "data"
+     ]
+    },
+    "currency": {
+     "type": "string",
+     "pattern": "^[A-Z]{3}$"
+    },
+    "currency_column": {
+     "$ref": "#/$defs/name"
+    },
+    "via": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 160,
+     "description": "element data only: how the frontend reaches the table – from, table, collection, doc, realtime postgres_changes, sql, rpc <function>, function <edge function>, view <view>, route <pattern> (the route whose handler reads the table), model <class>"
+    }
+   },
+   "description": "a display location: where the app shows a table, column or status (element = the UI element with the visible text), or – element \"data\" – where the frontend reads the table (supabase.from(x), a Firestore collection, an ORM query in a page or component, or a call of an API route whose handler reads x); a table with any display location belongs to the main navigation; the generator writes element data from the syntax tree (TypeScript compiler API, Python ast) and names the access path in via"
+  },
+  "column": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "name",
+    "type"
+   ],
+   "properties": {
+    "name": {
+     "$ref": "#/$defs/name"
+    },
+    "type": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 60
+    },
+    "nullable": {
+     "type": "boolean"
+    },
+    "pk": {
+     "type": "boolean"
+    },
+    "default": {
+     "type": "string",
+     "maxLength": 120
+    },
+    "fk": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "table"
+     ],
+     "properties": {
+      "table": {
+       "$ref": "#/$defs/name"
+      },
+      "column": {
+       "$ref": "#/$defs/name"
+      }
+     }
+    },
+    "enum": {
+     "type": "array",
+     "maxItems": 60,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "value",
+       "evidence"
+      ],
+      "properties": {
+       "value": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     }
+    },
+    "shown": {
+     "type": "array",
+     "maxItems": 12,
+     "items": {
+      "$ref": "#/$defs/shown"
+     }
+    },
+    "computed": {
+     "$ref": "#/$defs/evidence"
+    },
+    "value_labels": {
+     "type": "array",
+     "maxItems": 400,
+     "items": { "type": "object", "additionalProperties": false, "required": ["value", "label", "evidence"], "properties": { "value": { "type": "string", "minLength": 1, "maxLength": 80 }, "label": { "type": "string", "minLength": 1, "maxLength": 120 }, "lang": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Za-z]{2,4})?$" }, "evidence": { "$ref": "#/$defs/evidence" } } },
+     "description": "B35: the text the app shows for a value of this column, from a mapping in the code (an object keyed by the value, a switch, an i18n key built from the value, <option value> under a <select> bound to the column) – the place is the text itself (the line in the code or in the translation file); lang is the language of the translation file (file or folder name); without such a mapping the value has no label and stays as it is"
+    },
+    "external_id": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "component",
+      "evidence"
+     ],
+     "properties": {
+      "component": {
+       "$ref": "#/$defs/name"
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      },
+      "url": {
+       "type": "string",
+       "maxLength": 300
+      }
+     }
+    },
+    "updated": {
+     "$ref": "#/$defs/evidence",
+     "description": "B30 Schnitt A: the database sets this column on every change (a BEFORE UPDATE trigger that sets NEW.column = now() or moddatetime(column), SQLAlchemy onupdate=func.now()) – the read scope uses it as the change column for changed_since; the place is the trigger or the model column"
+    },
+    "written": {
+     "type": "array",
+     "maxItems": 5,
+     "items": { "$ref": "#/$defs/evidence" },
+     "description": "B31 E1: places where the app changes this column after the record exists (supabase .update/.upsert, UPDATE … SET, updateDoc, Prisma update data, a database function that writes a parameter) – everydeck lets the owner edit only columns the app itself changes"
+    }
+   }
+  },
+  "change": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "table"
+   ],
+   "properties": {
+    "table": {
+     "$ref": "#/$defs/name"
+    },
+    "column": {
+     "$ref": "#/$defs/name"
+    },
+    "to": {
+     "type": "string",
+     "maxLength": 80
+    },
+    "from": {
+     "type": "array",
+     "maxItems": 30,
+     "items": {
+      "type": "string",
+      "maxLength": 80
+     }
+    },
+    "insert": {
+     "const": true
+    },
+    "delete": {
+     "const": true
+    },
+    "evidence": {
+     "$ref": "#/$defs/evidence"
+    }
+   }
+  },
+  "evidenceColumn": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "column",
+    "evidence"
+   ],
+   "properties": {
+    "column": {
+     "$ref": "#/$defs/name"
+    },
+    "evidence": {
+     "$ref": "#/$defs/evidence"
+    }
+   }
+  }
+ },
+ "properties": {
+  "schema_version": {
+   "const": "1.12-r0"
+  },
+  "release_key": {
+   "type": "string",
+   "minLength": 1,
+   "maxLength": 120
+  },
+  "commit": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{40}$"
+  },
+  "app": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "production_in_code": {
+     "type": "array",
+     "maxItems": 20,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "evidence"],
+      "properties": {
+       "kind": { "enum": ["database", "error_tracking", "other"] },
+       "evidence": { "$ref": "#/$defs/evidence" }
+      }
+     },
+     "description": "B31: the address or key of a production service written into the code (database URL and key, error-tracking DSN, …) – a fact with its place; everydeck shows the owner a hint"
+    },
+    "icon": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "file",
+      "evidence",
+      "media_type",
+      "sha256",
+      "bytes"
+     ],
+     "properties": {
+      "file": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 300
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      },
+      "media_type": {
+       "enum": [
+        "image/png",
+        "image/svg+xml",
+        "image/x-icon",
+        "image/jpeg",
+        "image/webp",
+        "image/gif"
+       ]
+      },
+      "sha256": {
+       "type": "string",
+       "pattern": "^[0-9a-f]{64}$"
+      },
+      "bytes": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 98304
+      },
+      "data": {
+       "type": "string",
+       "maxLength": 131072,
+       "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+      }
+     },
+     "description": "B38: the icon the app itself serves (link rel icon / apple-touch-icon in an HTML entry, web manifest icons, Next.js app/icon.*, Expo expo.icon) with the place that names it; data = the file in base64 (at most 96 KiB). everydeck keeps a copy for the app card and never stores the data in the Befund."
+    },
+    "name": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "value",
+      "evidence"
+     ],
+     "properties": {
+      "value": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 80
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      }
+     }
+    }
+   }
+  },
+  "components": {
+   "type": "array",
+   "maxItems": 80,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "package",
+     "evidence"
+    ],
+    "properties": {
+     "id": {
+      "$ref": "#/$defs/name"
+     },
+     "package": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "call": {
+      "$ref": "#/$defs/evidence"
+     }
+    }
+   }
+  },
+  "platforms": {
+   "type": "array",
+   "maxItems": 6,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "runtime",
+     "evidence"
+    ],
+    "properties": {
+     "id": {
+      "enum": [
+       "web",
+       "ios",
+       "android",
+       "desktop",
+       "extension",
+       "server"
+      ]
+     },
+     "runtime": {
+      "enum": [
+       "browser",
+       "capacitor",
+       "expo",
+       "react_native",
+       "flutter",
+       "chrome_mv3",
+       "electron",
+       "tauri",
+       "node",
+       "deno",
+       "python",
+       "other"
+      ]
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "version": {
+      "$ref": "#/$defs/evidence"
+     },
+     "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "status",
+       "evidence"
+      ],
+      "properties": {
+       "status": {
+        "enum": [
+         "not_submitted",
+         "in_review",
+         "live"
+        ]
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     }
+    }
+   }
+  },
+  "screens": {
+   "type": "array",
+   "maxItems": 400,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "pattern",
+     "evidence"
+    ],
+    "properties": {
+     "pattern": {
+      "type": "string",
+      "pattern": "^/",
+      "maxLength": 200
+     },
+     "described": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "works_with",
+       "flows"
+      ],
+      "properties": {
+       "works_with": {
+        "type": "array",
+        "maxItems": 40,
+        "items": {
+         "$ref": "#/$defs/name"
+        }
+       },
+       "flows": {
+        "type": "array",
+        "maxItems": 40,
+        "items": {
+         "type": "string",
+         "maxLength": 120
+        }
+       }
+      },
+      "description": "B37: what the page is for, as facts – the tables the page shows or edits (each with a place in works_with or a display location) and the flows that start on it; empty lists = the page shows no records and starts no flow. Written by the coding agent for a new page; everydeck asks for it as an order."
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "platforms": {
+      "type": "array",
+      "items": {
+       "enum": [
+        "web",
+        "ios",
+        "android",
+        "desktop",
+        "extension",
+        "server"
+       ]
+      }
+     }
+    }
+   }
+  },
+  "api_routes": {
+   "type": "array",
+   "maxItems": 600,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "pattern",
+     "evidence"
+    ],
+    "properties": {
+     "pattern": {
+      "type": "string",
+      "pattern": "^/",
+      "maxLength": 200
+     },
+     "method": {
+      "enum": [
+       "GET",
+       "POST",
+       "PUT",
+       "PATCH",
+       "DELETE"
+      ]
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     }
+    }
+   }
+  },
+  "identity": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "additionalProperties": false,
+   "required": [
+    "provider",
+    "evidence"
+   ],
+   "properties": {
+    "provider": {
+     "enum": [
+      "supabase_auth",
+      "firebase_auth",
+      "authjs",
+      "clerk",
+      "own",
+      "other"
+     ]
+    },
+    "evidence": {
+     "$ref": "#/$defs/evidence"
+    },
+    "table": {
+     "$ref": "#/$defs/name"
+    },
+    "fields": {
+     "type": "object",
+     "additionalProperties": false,
+     "properties": {
+      "display_name": {
+       "$ref": "#/$defs/evidenceColumn"
+      },
+      "email": {
+       "$ref": "#/$defs/evidenceColumn"
+      },
+      "phone": {
+       "$ref": "#/$defs/evidenceColumn"
+      },
+      "whatsapp": {
+       "$ref": "#/$defs/evidenceColumn"
+      },
+      "org_name": {
+       "$ref": "#/$defs/evidenceColumn"
+      },
+      "provider_user_id": {
+       "$ref": "#/$defs/evidenceColumn"
+      },
+      "login_method": {
+       "$ref": "#/$defs/evidenceColumn"
+      }
+     }
+    },
+    "suspend": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "column",
+      "checked"
+     ],
+     "properties": {
+      "column": {
+       "$ref": "#/$defs/name"
+      },
+      "checked": {
+       "$ref": "#/$defs/evidence"
+      },
+      "set_true_by": {
+       "$ref": "#/$defs/function_ref"
+      },
+      "set_false_by": {
+       "$ref": "#/$defs/function_ref"
+      }
+     }
+    },
+    "name_rule": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": ["steps", "evidence"],
+     "properties": {
+      "steps": { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "object", "additionalProperties": false, "required": ["columns"], "properties": { "columns": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/name" } }, "separator": { "type": "string", "maxLength": 8 } } } },
+      "evidence": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "$ref": "#/$defs/evidence" } }
+     },
+     "description": "B35: how the app builds the name of a person from columns of the identity table, as the app shows it: steps in order (the first with content wins – a fallback), each step the columns joined with the separator of the app (first and last name); evidence = the places that show it; the generator writes it from the code, nothing is guessed – everydeck uses exactly this rule"
+    },
+    "memberships": {
+     "type": "array",
+     "maxItems": 10,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "table",
+       "person_column",
+       "org_table",
+       "evidence"
+      ],
+      "properties": {
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "person_column": {
+        "$ref": "#/$defs/name"
+       },
+       "org_table": {
+        "$ref": "#/$defs/name"
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     }
+    },
+    "auth_table": {
+     "type": "string",
+     "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z_][A-Za-z0-9_]*$",
+     "description": "the user table of the login provider when it is outside the app schema (Supabase: auth.users) – a foreign key or a policy comparison (auth.uid() = column) to it is a reference to the identity; fk.table may name it"
+    }
+   }
+  },
+  "tables": {
+   "type": "array",
+   "maxItems": 200,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "name",
+     "kind",
+     "defined",
+     "columns"
+    ],
+    "properties": {
+     "name": {
+      "$ref": "#/$defs/name"
+     },
+     "kind": {
+      "enum": [
+       "table",
+       "collection"
+      ]
+     },
+     "defined": {
+      "$ref": "#/$defs/evidence"
+     },
+     "columns": {
+      "type": "array",
+      "maxItems": 120,
+      "items": {
+       "$ref": "#/$defs/column"
+      }
+     },
+     "status_column": {
+      "$ref": "#/$defs/name"
+     },
+     "statuses": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "value",
+        "evidence"
+       ],
+       "properties": {
+        "value": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 80
+        },
+        "evidence": {
+         "$ref": "#/$defs/evidence"
+        },
+        "default": {
+         "const": true
+        },
+        "set_by": {
+         "type": "array",
+         "maxItems": 20,
+         "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "function"
+          ],
+          "properties": {
+           "function": {
+            "$ref": "#/$defs/function_ref"
+           },
+           "from": {
+            "type": "array",
+            "maxItems": 30,
+            "items": {
+             "type": "string",
+             "maxLength": 80
+            }
+           }
+          }
+         }
+        },
+        "shown": {
+         "type": "array",
+         "maxItems": 6,
+         "items": {
+          "$ref": "#/$defs/shown"
+         }
+        },
+        "public": {
+         "$ref": "#/$defs/evidence"
+        }
+       }
+      }
+     },
+     "owner_column": {
+      "$ref": "#/$defs/name"
+     },
+     "shown": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+       "$ref": "#/$defs/shown"
+      },
+      "description": "display locations of the table (list, heading) and – element data – every data access of the frontend; up to 60"
+     },
+     "writes": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "kind",
+        "evidence"
+       ],
+       "properties": {
+        "kind": {
+         "enum": [
+          "insert",
+          "update",
+          "delete"
+         ]
+        },
+        "evidence": {
+         "$ref": "#/$defs/evidence"
+        }
+       }
+      }
+     },
+     "bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "evidence",
+       "test"
+      ],
+      "properties": {
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       },
+       "test": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "path"
+        ],
+        "properties": {
+         "path": {
+          "type": "string",
+          "maxLength": 300
+         }
+        }
+       }
+      }
+     },
+     "schema": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "description": "schema of the table when it is not the default (public); the read scope names the table as schema.name"
+     },
+     "not_shown": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "path",
+        "line",
+        "fact"
+       ],
+       "properties": {
+        "path": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 300
+        },
+        "line": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "fact": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 200
+        }
+       }
+      },
+      "description": "only for a table without any display location: every place where a frontend source file names the table in a string (a write such as from(…).insert(…), a write request to a route, a label or key, a module no screen imports) with the fact (what the place is) that makes it no display – everydeck-check's independent cross-check refuses a table without display location whose name appears in the frontend without such an entry"
+     }
+    }
+   }
+  },
+  "functions": {
+   "type": "array",
+   "maxItems": 400,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "name",
+     "kind",
+     "evidence"
+    ],
+    "properties": {
+     "name": {
+      "$ref": "#/$defs/name"
+     },
+     "kind": {
+      "enum": [
+       "server_function",
+       "route",
+       "rpc",
+       "callable",
+       "trigger",
+       "edge_function",
+       "client_write"
+      ]
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "kind",
+       "evidence"
+      ],
+      "properties": {
+       "kind": {
+        "enum": [
+         "role",
+         "record_owner",
+         "signed_in",
+         "none"
+        ]
+       },
+       "role": {
+        "description": "B31 (A6): the role string as the code checks it, or a list when the code accepts several roles",
+        "oneOf": [
+         { "type": "string", "minLength": 1, "maxLength": 40 },
+         { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 40 } }
+        ]
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     },
+     "changes": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+       "$ref": "#/$defs/change"
+      }
+     },
+     "provider_call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "component",
+       "evidence"
+      ],
+      "properties": {
+       "component": {
+        "$ref": "#/$defs/name"
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     },
+     "shown": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+       "$ref": "#/$defs/shown"
+      }
+     }
+    }
+   }
+  },
+  "flows": {
+   "type": "array",
+   "maxItems": 120,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "start",
+     "result"
+    ],
+    "properties": {
+     "id": {
+      "$ref": "#/$defs/name"
+     },
+     "start": {
+      "$ref": "#/$defs/evidence"
+     },
+     "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "evidence"
+      ],
+      "properties": {
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       },
+       "write": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "table",
+         "kind"
+        ],
+        "properties": {
+         "table": {
+          "$ref": "#/$defs/name"
+         },
+         "kind": {
+          "enum": [
+           "insert",
+           "update",
+           "delete"
+          ]
+         }
+        }
+       },
+       "provider": {
+        "$ref": "#/$defs/name"
+       }
+      }
+     },
+     "failure": {
+      "$ref": "#/$defs/evidence"
+     },
+     "ends": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "id",
+        "evidence"
+       ],
+       "properties": {
+        "id": {
+         "$ref": "#/$defs/name"
+        },
+        "evidence": {
+         "$ref": "#/$defs/evidence"
+        }
+       }
+      }
+     },
+     "signals": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "step",
+        "name",
+        "evidence"
+       ],
+       "properties": {
+        "step": {
+         "type": "string",
+         "pattern": "^(start|result|failure|end:[A-Za-z_][A-Za-z0-9_.-]{0,95})$"
+        },
+        "name": {
+         "type": "string",
+         "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+        },
+        "evidence": {
+         "$ref": "#/$defs/evidence"
+        }
+       }
+      }
+     },
+     "platforms": {
+      "type": "array",
+      "items": {
+       "enum": [
+        "web",
+        "ios",
+        "android",
+        "desktop",
+        "extension",
+        "server"
+       ]
+      }
+     },
+     "shown": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+       "$ref": "#/$defs/shown"
+      }
+     }
+    }
+   }
+  },
+  "channels": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "email": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "component",
+      "evidence"
+     ],
+     "properties": {
+      "component": {
+       "$ref": "#/$defs/name"
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      }
+     }
+    },
+    "push": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "component",
+      "evidence"
+     ],
+     "properties": {
+      "component": {
+       "$ref": "#/$defs/name"
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      },
+      "register": {
+       "$ref": "#/$defs/evidence"
+      }
+     }
+    }
+   }
+  },
+  "jobs": {
+   "type": "array",
+   "maxItems": 60,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "every",
+     "evidence"
+    ],
+    "properties": {
+     "id": {
+      "$ref": "#/$defs/name"
+     },
+     "every": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "expression",
+       "evidence"
+      ],
+      "properties": {
+       "expression": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 60
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     }
+    }
+   }
+  },
+  "payments": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "additionalProperties": false,
+   "required": [
+    "component",
+    "evidence"
+   ],
+   "properties": {
+    "component": {
+     "$ref": "#/$defs/name"
+    },
+    "evidence": {
+     "$ref": "#/$defs/evidence"
+    },
+    "events": {
+     "type": "array",
+     "maxItems": 40,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "event",
+       "evidence"
+      ],
+      "properties": {
+       "event": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       },
+       "sets": {
+        "$ref": "#/$defs/change"
+       }
+      }
+     }
+    }
+   }
+  },
+  "adapters": {
+   "type": "array",
+   "maxItems": 6,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "kind",
+     "runtime",
+     "package",
+     "evidence"
+    ],
+    "properties": {
+     "kind": {
+      "enum": [
+       "server",
+       "browser",
+       "read_bridge"
+      ]
+     },
+     "runtime": {
+      "type": "string",
+      "maxLength": 40
+     },
+     "package": {
+      "type": "string",
+      "maxLength": 80
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "capabilities": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "maxLength": 40
+      }
+     }
+    }
+   }
+  },
+  "checklist": {
+   "type": "array",
+   "minItems": 17,
+   "maxItems": 17,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "block",
+     "present"
+    ],
+    "properties": {
+     "block": {
+      "enum": [
+       "login",
+       "people_roles",
+       "organizations",
+       "content_status",
+       "moderation",
+       "chats",
+       "uploads",
+       "search",
+       "payments",
+       "email",
+       "push",
+       "ai",
+       "jobs",
+       "imports",
+       "bookings",
+       "settings",
+       "platforms"
+      ]
+     },
+     "present": {
+      "type": "boolean"
+     },
+     "evidence": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+       "$ref": "#/$defs/evidence"
+      }
+     },
+     "tables": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+       "$ref": "#/$defs/name"
+      }
+     },
+     "flows": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+       "$ref": "#/$defs/name"
+      }
+     },
+     "functions": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+       "$ref": "#/$defs/function_ref"
+      }
+     }
+    }
+   }
+  },
+  "everydeck_tables": {
+   "type": "array",
+   "maxItems": 20,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["table", "evidence"],
+    "properties": {
+     "table": { "$ref": "#/$defs/name" },
+     "evidence": { "$ref": "#/$defs/evidence" }
+    }
+   },
+   "description": "B31: tables the everydeck installation added to the app (outbox, operator links, the request log of the app bridge) with the place that creates them – everydeck's own, never objects of the app; also tables in everydeck's schemas (everydeck_outbox, everydeck_read, everydeck_bridge) and tables defined in the file of an everydeck adapter"
+  },
+  "display_ends": {
+   "type": "array",
+   "maxItems": 200,
+   "items": { "type": "object", "additionalProperties": false, "required": ["element", "path", "line", "fact"], "properties": { "element": { "enum": ["image", "link", "textarea", "long_text", "date"] }, "path": { "type": "string", "minLength": 1, "maxLength": 300 }, "line": { "type": "integer", "minimum": 1 }, "fact": { "type": "string", "minLength": 1, "maxLength": 300 } } },
+   "description": "B35: places where the app shows a value as an image, link, textarea, text with line breaks or date, but the value cannot be followed back to a column – the fact says where the path ends (a call of a function, a property that is no column, a fixed value); the generator writes it, nothing is guessed"
+  },
+  "unreachable": {
+   "type": "array",
+   "maxItems": 500,
+   "items": { "type": "object", "additionalProperties": false, "required": ["path", "fact"], "properties": { "path": { "type": "string", "minLength": 1, "maxLength": 300 }, "fact": { "type": "string", "minLength": 1, "maxLength": 300 } } },
+   "description": "B32: frontend files no entry of the app reaches through imports (entries from facts of the project: <script src> of an HTML file, route files of a framework the package.json names, package.json main) – no page, no display location; the generator writes it, everydeck-check checks it with the same rule"
+  },
+  "works_with": {
+   "type": "array",
+   "maxItems": 200,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "table",
+     "evidence"
+    ],
+    "properties": {
+     "table": {
+      "$ref": "#/$defs/name"
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "part_of": {
+      "$ref": "#/$defs/name"
+     }
+    }
+   },
+   "description": "what the users of the app work with: the things they see, create or edit in the UI – one entry per table with the place in the UI (page or component, file:line); part_of names the table whose detail page shows it (CVs with the candidate, members with the workspace) – no menu item of its own. This list is the main navigation; every other table is under 'All data'. A description with evidence, no judgement: everydeck-check checks that the place exists and names the table (or carries a display location of the table)"
+  }
+ }
+}

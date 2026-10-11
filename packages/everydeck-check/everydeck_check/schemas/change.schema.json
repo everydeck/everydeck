@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://everydeck.local/schemas/change.1.0-r0.json",
+  "title": "Everydeck change description 1.0-r0 (everydeck-change.json)",
+  "description": "Structured description of one commit, maintained by the operator's coding agent and checked mechanically by everydeck-check change (B9).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0-r0"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{7,40}$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "affected": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "capability_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+          },
+          "change": {
+            "enum": [
+              "behavior",
+              "instrumentation",
+              "touch"
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*\\.\\.)[^\\r\\n]+$"
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        },
+        "required": [
+          "capability_id",
+          "change",
+          "evidence"
+        ]
+      }
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "sha",
+    "summary",
+    "affected"
+  ]
+}
