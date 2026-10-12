@@ -218,6 +218,13 @@
      "maxItems": 5,
      "items": { "$ref": "#/$defs/evidence" },
      "description": "B31 E1: places where the app changes this column after the record exists (supabase .update/.upsert, UPDATE … SET, updateDoc, Prisma update data, a database function that writes a parameter) – everydeck lets the owner edit only columns the app itself changes"
+    },
+    "contact": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": ["kind", "evidence"],
+     "properties": { "kind": { "enum": ["email", "phone", "ip", "message"] }, "evidence": { "$ref": "#/$defs/evidence" } },
+     "description": "B46: the column holds contact data or a message of a person – email (an e-mail address), phone (a phone or messenger number), ip (an IP address), message (a text one person writes to another or to the operators). The place is where the app itself treats the value that way: a link mailto:/tel:/sms:/https://wa.me/, an input of type email or tel, the place that writes the request IP, the form where a person writes the message. Columns of type inet/cidr are IP addresses by their type. everydeck never reads such a column in its read scope; the approval lists it under \"Only you see\"."
     }
    }
   },

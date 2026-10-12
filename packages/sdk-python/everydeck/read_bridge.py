@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import decimal
+import hashlib
 import hmac
 
 from .verify import verify_everydeck_request
@@ -78,6 +79,52 @@ def _uniq(xs: Iterable[str]) -> list[str]:
     return out
 
 
+GRANT_SIGNATURE_PREFIX = "EVERYDECK-GRANT-V1\n"
+GRANT_MAX_SECONDS = 300
+
+
+def sign_everydeck_grant(keys: Iterable[str], grant: Mapping[str, Any]) -> dict[str, str]:
+    """Gegenstück (everydeck und Tests): Query-Parameter einer Freigabe – grant = base64url(JSON), grant_sig = v1=<hex> je Schlüssel."""
+    g = base64.urlsafe_b64encode(json.dumps(grant, separators=(",", ":")).encode()).decode().rstrip("=")
+    sigs = []
+    for k in keys:
+        if k:
+            sig = "v1=" + hmac.new(k.encode(), (GRANT_SIGNATURE_PREFIX + g).encode(), hashlib.sha256).hexdigest()
+            if sig not in sigs:
+                sigs.append(sig)
+    return {"grant": g, "grant_sig": ",".join(sigs)}
+
+
+def _is_name(x: Any) -> bool:
+    return isinstance(x, str) and 0 < len(x) <= 160
+
+
+def grant_of(keys: Iterable[str], query: Mapping[str, str] | None, typ: str, ref: str) -> dict[str, Any] | str:
+    """B46 Punkt 3: Freigabe prüfen – Signatur mit einem gültigen Schlüssel, genau dieses Gespräch, Grund, nicht abgelaufen, Nachrichtentabelle vollständig.
+    Gibt das Gespräch ({messages, attachments}) zurück oder den Grund der Ablehnung."""
+    q = query or {}; g = q.get("grant"); sig = q.get("grant_sig")
+    if not g or not sig:
+        return "grant missing"
+    given = [p.strip()[3:].lower() for p in sig.split(",") if p.strip().startswith("v1=")]
+    if not any(hmac.compare_digest(x, hmac.new(k.encode(), (GRANT_SIGNATURE_PREFIX + g).encode(), hashlib.sha256).hexdigest()) for k in keys if k for x in given):
+        return "grant signature invalid"
+    try:
+        v = json.loads(base64.urlsafe_b64decode(g + "=" * (-len(g) % 4)).decode())
+    except (ValueError, UnicodeDecodeError):
+        return "grant unreadable"
+    now = int(_dt.datetime.now(_dt.timezone.utc).timestamp())
+    if not isinstance(v, dict) or v.get("v") != 1 or v.get("type") != typ or v.get("ref") != ref:
+        return "grant is for another conversation"
+    if not isinstance(v.get("reason"), str) or not v["reason"].strip():
+        return "grant without a reason"
+    if not isinstance(v.get("exp"), int) or v["exp"] < now or v["exp"] > now + GRANT_MAX_SECONDS + 30:
+        return "grant expired"
+    m = v.get("messages")
+    if not isinstance(m, dict) or not _is_name(m.get("table")) or not isinstance(m.get("ref"), list) or not all(_is_name(x) for x in m["ref"]) or not all(_is_name(m.get(k)) for k in ("conversation", "sender", "time")) or not isinstance(m.get("text"), list) or not m["text"] or not all(_is_name(x) for x in m["text"]):
+        return "grant names no message table"
+    return {"messages": m, **({"attachments": v["attachments"]} if isinstance(v.get("attachments"), dict) else {})}
+
+
 class ReadBridge:
     def __init__(self, scope: Mapping[str, Any], token: str, rows: Rows, app: str | None = None, page_limit: int = 100, rights: Mapping[str, Any] | Callable[[], Mapping[str, Any]] | None = None,
                  one: Callable[[str, Sequence[str], Sequence[str], Sequence[str]], Mapping[str, Any] | None] | None = None,
@@ -119,7 +166,7 @@ class ReadBridge:
         objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False} for r in self.scope.get("relations", [])]
         people = self.scope.get("people")
         convs = self.scope.get("conversations") or []
-        return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys())}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
+        return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys())}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), **({"messages_grant": True} if self.match is not None else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
 
     def _page(self, query: Mapping[str, str] | None) -> tuple[int, list[str] | None, bool]:
         q = query or {}
@@ -175,9 +222,12 @@ class ReadBridge:
             return 200, {"as_of": as_of, "items": items, "next_cursor": _b64([_text(kept[-1][p["ref"]])]) if len(rows) > limit else None}
         if path.startswith("/everydeck/read/messages/") and path[len("/everydeck/read/messages/"):].count("/") == 1:   # B31 Schnitt A: Nachrichten eines Gesprächs, nur auf Abruf
             typ, ref = path[len("/everydeck/read/messages/"):].split("/", 1)
-            conv = next((c for c in (self.scope.get("conversations") or []) if c["type"] == typ), None)
-            if conv is None or self.match is None:
-                return 404, {"error": f"no conversations of {typ} in the read scope"}
+            if self.match is None:
+                return 404, {"error": "this bridge reads no conversations"}
+            # B46 Punkt 3: nur mit der Freigabe von everydeck für genau dieses Gespräch (geöffnet mit Grund); Tabelle und Spalten stehen nur in ihr
+            conv = grant_of(self.keys, query, typ, ref)
+            if isinstance(conv, str):
+                return 403, {"error": f"a conversation is read only when a moderator opens it with a reason in everydeck ({conv})"}
             limit, after, bad = self._page(query)
             m = conv["messages"]; order = [m["time"], *m["ref"]]
             if bad or (after is not None and len(after) != len(order)):

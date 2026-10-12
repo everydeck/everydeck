@@ -21,6 +21,9 @@ const ARRAY_CALLBACK = new Set(['map', 'forEach', 'filter', 'find', 'findLast', 
 const DATE_METHODS = new Set(['toLocaleDateString', 'toLocaleTimeString', 'toDateString', 'toLocaleString']);
 const DATE_PACKAGES = /^(date-fns|date-fns-tz|dayjs|moment|luxon)(\/|$)/;
 const MARKDOWN_PACKAGES = /^(react-markdown|markdown-to-jsx)$/;
+// B46 Punkt 2: Adressen, mit denen die App einen Wert als Kontakt benutzt; Umformungen des Werts davor (nur Ziffern, ohne Leerzeichen) ändern das nicht
+const CONTACT_SCHEMES = [{ re: /^mailto:$/i, kind: 'contact_email' }, { re: /^(tel|sms):\+?$/i, kind: 'contact_phone' }, { re: /^(https?:\/\/)?(wa\.me\/|api\.whatsapp\.com\/send\?phone=)\+?$/i, kind: 'contact_phone' }];
+const CONTACT_PASS = new Set(['replace', 'replaceAll', 'trim', 'toLowerCase', 'toString']);
 // Bibliotheken für Datenabfragen: `data` ist das Ergebnis der Abfragefunktion (queryFn bzw. Fetcher)
 const QUERY_PACKAGES = /^(@tanstack\/react-query|@tanstack\/vue-query|react-query|swr)$/;
 
@@ -289,6 +292,9 @@ export function analyseDisplay({ ts, files, reachable, parse, rel, lineOf, unwra
       if (bg && ts.isTemplateExpression(unwrap(bg))) { const t = unwrap(bg); const i = t.templateSpans.findIndex((s, k) => /url\(\s*['"]?$/.test(k === 0 ? t.head.text : t.templateSpans[k - 1].literal.text)); if (i >= 0) record(t.templateSpans[i].expression, 'image', here('background image'), t.templateSpans[i].expression); }
       if (tag === 'a') { const x = attrExpr(attrOf(el, 'href')); const u = unwrap(x); if (u && !ts.isStringLiteral(u) && !(ts.isTemplateExpression(u) && (u.head.text || u.templateSpans.length !== 1 || u.templateSpans[0].literal.text))) record(u, 'link', here(`<${raw} href>`), u); }
       if (tag === 'textarea') for (const a of ['value', 'defaultValue']) { const x = attrExpr(attrOf(el, a)); if (x && !ts.isStringLiteral(x)) record(x, 'textarea', here(`<${raw} ${a}>`), x); }
+      // B46 Punkt 2: ein Eingabefeld type="email" / type="tel" zeigt eine Kontaktangabe
+      if (tag === 'input') { const ty = strOf(attrExpr(attrOf(el, 'type'))); const kind = ty === 'email' ? 'contact_email' : ty === 'tel' ? 'contact_phone' : null;
+        if (kind) for (const a of ['value', 'defaultValue']) { const x = attrExpr(attrOf(el, a)); if (x && !ts.isStringLiteral(x)) record(x, kind, here(`<${raw} type="${ty}" ${a}>`), x); } }
       const html = unwrap(attrExpr(attrOf(el, 'dangerouslySetInnerHTML')));
       if (html && ts.isObjectLiteralExpression(html)) { const pp = html.properties.find((q) => ts.isPropertyAssignment(q) && q.name.getText() === '__html'); let x = pp ? unwrap(pp.initializer) : null;
         // HTML aus einem Paket (Sanitizer, Markdown-Renderer: DOMPurify.sanitize(x), marked(x)) – der gezeigte Text ist dessen erstes Argument
@@ -303,6 +309,10 @@ export function analyseDisplay({ ts, files, reachable, parse, rel, lineOf, unwra
     for (const p of files) { if (!reachable.has(p)) continue; const sf = parse(p); const imps = importsOf(p);
       const dateArg = (x) => { x = unwrap(x); if (x && ts.isNewExpression(x) && ts.isIdentifier(x.expression) && x.expression.text === 'Date' && x.arguments?.[0]) return x.arguments[0]; if (x && ts.isCallExpression(x) && ts.isIdentifier(x.expression) && DATE_PACKAGES.test(imps.get(x.expression.text)?.pkg ?? '') && x.arguments[0]) return dateArg(x.arguments[0]); return x; };
       const v = (n) => {
+        // B46 Punkt 2: eine Adresse mailto: / tel: / sms: / https://wa.me/ aus dem Wert – die App behandelt ihn als Kontaktangabe (Link, Fenster, Weiterleitung)
+        if (ts.isTemplateExpression(n) && n.templateSpans.length) { const scheme = CONTACT_SCHEMES.find((x) => x.re.test(n.head.text));
+          if (scheme) { let x = unwrap(n.templateSpans[0].expression); while (x && ts.isCallExpression(x) && ts.isPropertyAccessExpression(unwrap(x.expression)) && CONTACT_PASS.has(unwrap(x.expression).name.text)) x = unwrap(unwrap(x.expression).expression);
+            if (x) record(x, scheme.kind, `${n.head.text}… at ${rel(p)}:${lineOf(sf, n)}`, x); } }
         if (ts.isCallExpression(n)) { const ex = unwrap(n.expression);
           if (ts.isPropertyAccessExpression(ex) && DATE_METHODS.has(ex.name.text)) { const rec = unwrap(ex.expression); const isDate = rec && ts.isNewExpression(rec) && ts.isIdentifier(rec.expression) && rec.expression.text === 'Date';
             const noCurrency = !(ex.name.text === 'toLocaleString' && n.arguments[1] && /currency/.test(n.arguments[1].getText()));

@@ -17,6 +17,44 @@
  */
 import { verifyEverydeckRequest, type HeadersLike, type VerifyOptions } from './verify.js';
 const headerOf = (h: HeadersLike, name: string): string | null => { if (typeof (h as { get?: unknown }).get === 'function') return (h as { get(n: string): string | null }).get(name); const v = (h as Record<string, string | string[] | undefined>)[name] ?? (h as Record<string, string | string[] | undefined>)[name.toLowerCase()]; return Array.isArray(v) ? v[0] ?? null : v ?? null; };
+/**
+ * B46 Punkt 3: ein Gespräch liest die Brücke nur mit einer Freigabe (grant) von everydeck für genau dieses Gespräch – ein Moderator hat es mit Grund
+ * geöffnet. Die Freigabe nennt Objektart, Kennung, Grund, Ablauf (Unix-Sekunden, höchstens 5 Minuten) und die Nachrichtentabelle mit ihren Spalten;
+ * der Dauer-Umfang kennt diese Tabelle nicht. Sie reist als Query (?grant=<base64url(JSON)>&grant_sig=v1=<hex>), signiert mit dem Brückenschlüssel
+ * über "EVERYDECK-GRANT-V1\n" + grant. Nichts davon wird gespeichert.
+ */
+export const GRANT_SIGNATURE_PREFIX = 'EVERYDECK-GRANT-V1\n';
+export interface ReadGrant { v: 1; id: string; type: string; ref: string; reason: string; exp: number; messages: ReadScopeConversation['messages']; attachments?: ReadScopeConversation['attachments'] }
+const GRANT_MAX_SECONDS = 300;
+async function grantHmac(key: string, grant: string): Promise<string> {
+  const k = await crypto.subtle.importKey('raw', enc.encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', k, enc.encode(GRANT_SIGNATURE_PREFIX + grant))), (x) => x.toString(16).padStart(2, '0')).join('');
+}
+/** Gegenstück für everydeck und Tests: Query-Parameter einer Freigabe */
+export async function signEverydeckGrant(keys: string[], grant: ReadGrant): Promise<{ grant: string; grant_sig: string }> {
+  const bytes = enc.encode(JSON.stringify(grant)); let bin = ''; for (const b of bytes) bin += String.fromCharCode(b);
+  const g = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const sigs: string[] = []; for (const k of keys.filter((x, i, a) => !!x && a.indexOf(x) === i)) sigs.push(`v1=${await grantHmac(k, g)}`);
+  return { grant: g, grant_sig: sigs.join(',') };
+}
+const isName = (x: unknown) => typeof x === 'string' && x.length > 0 && x.length <= 160;
+/** Freigabe prüfen: Signatur mit einem gültigen Schlüssel, genau dieses Gespräch, Grund, nicht abgelaufen, Nachrichtentabelle vollständig */
+async function grantOf(keys: string[], q: Record<string, string | undefined> | undefined, type: string, ref: string): Promise<ReadGrant | string> {
+  const g = q?.['grant']; const sig = q?.['grant_sig'];
+  if (!g || !sig) return 'grant missing';
+  const given = sig.split(',').map((p) => p.trim()).filter((p) => p.startsWith('v1=')).map((p) => p.slice(3).toLowerCase());
+  let ok = false; for (const k of keys) { const e = await grantHmac(k, g); if (given.some((x) => x.length === e.length && x === e)) ok = true; }
+  if (!ok) return 'grant signature invalid';
+  let v: ReadGrant;
+  try { const bin = atob(g.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (g.length % 4)) % 4)); v = JSON.parse(dec.decode(Uint8Array.from(bin, (ch) => ch.charCodeAt(0)))) as ReadGrant; } catch { return 'grant unreadable'; }
+  const now = Math.floor(Date.now() / 1000);
+  if (v.v !== 1 || v.type !== type || v.ref !== ref) return 'grant is for another conversation';
+  if (typeof v.reason !== 'string' || !v.reason.trim()) return 'grant without a reason';
+  if (typeof v.exp !== 'number' || v.exp < now || v.exp > now + GRANT_MAX_SECONDS + 30) return 'grant expired';
+  const m = v.messages;
+  if (!m || !isName(m.table) || !Array.isArray(m.ref) || !m.ref.every(isName) || !isName(m.conversation) || !isName(m.sender) || !isName(m.time) || !Array.isArray(m.text) || !m.text.length || !m.text.every(isName)) return 'grant names no message table';
+  return v;
+}
 export interface ReadScopeField { name: string; column: string }
 export interface ReadScopeObject { type: string; table: string; ref: string[]; title?: string; status?: string; owner?: string; fields: ReadScopeField[]; statuses?: string[]; /** B30 Schnitt A: die Spalte, die die Datenbank bei jeder Änderung setzt (Trigger/onupdate) – erlaubt `changed_since`; ohne sie nur Volllauf */ changed?: string }
 export interface ReadScopeRelation { id: string; table: string; ref: string[]; fields: ReadScopeField[] }
@@ -26,7 +64,9 @@ export interface ReadScopePeople { table: string; ref: string; fields: Record<st
 export interface ReadScopeConversation { type: string; table: string; ref: string[]; messages: { table: string; ref: string[]; conversation: string; sender: string; time: string; text: string[] }; attachments?: { table: string; message: string; url: string; name?: string; kind: 'image' | 'file' } }
 export interface ReadScope { version: '1'; objects: ReadScopeObject[]; relations: ReadScopeRelation[]; conversations?: ReadScopeConversation[]; people: ReadScopePeople | null }
 /** Rechte der Datenbankrolle – geprüft, nicht behauptet */
-export interface ReadRights { role: string; select_only: boolean; superuser?: boolean; writable?: string[]; checked_at?: string; /** B29 vierte Runde: wer außer der Leserolle an das Sichten-Schema kommt – 'supabase api' (pgrst.db_schemas des authenticator), 'anon', 'authenticated', 'public' (USAGE auf dem Schema); leer = niemand */ exposed?: string[] }
+export interface ReadRights { role: string; select_only: boolean; superuser?: boolean; writable?: string[]; checked_at?: string; /** B29 vierte Runde: wer außer der Leserolle an das Sichten-Schema kommt – 'supabase api' (pgrst.db_schemas des authenticator), 'anon', 'authenticated', 'public' (USAGE auf dem Schema); leer = niemand */ exposed?: string[];
+  /** B46 (E2): die Rolle umgeht die Zeilenrechte der App (pg_roles.rolbypassrls) – die Brücke sieht dann jede Zeile und liefert nur die freigegebenen Spalten */ bypass_rls?: boolean;
+  /** B46 (E2): jede Abfrage läuft in einer Transaktion, die die Datenbank nur lesen lässt (current_setting('transaction_read_only') = on, geprüft) */ read_only_transaction?: boolean }
 
 /** Zeilen einer Tabelle, sortiert nach den Schlüsselspalten, ab einem Cursor (Werte der Schlüsselspalten der letzten Zeile), höchstens `limit`.
  *  B30 Schnitt A: mit `changed` nur Zeilen mit changed.column ≥ since, stabil sortiert nach (changed.column, Schlüssel); der Cursor ist dann [Änderungszeit, …Schlüssel] */
@@ -78,7 +118,7 @@ export function createReadBridge(o: ReadBridgeOptions) {
   // B30 Schnitt A: die Fähigkeiten sagen je Objektart, ob `changed_since` geht (Änderungsspalte im Umfang), und ob der Einzelabruf geht
   const capabilities = async () => ({ version: '1' as const, ...(o.app ? { app: o.app } : {}), identity: 'subject_ref' as const,
     objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!x.changed })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false }))],
-    ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields) } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
+    ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields) } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
   const page = (q: Record<string, string | undefined> | undefined) => { const limit = Math.min(limitMax, Math.max(1, Number(q?.['limit'] ?? limitMax) || limitMax)); const after = q?.['cursor'] ? unb64(q['cursor']) : null; return { limit, after, bad: !!q?.['cursor'] && !after }; };
   const refOf = (row: Record<string, unknown>, keys: string[]) => keys.map((k) => text(row[k])).join('|');
   const isoOf = (v: unknown): string | null => { if (v === null || v === undefined) return null; const d = v instanceof Date ? v : new Date(text(v)); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
@@ -116,9 +156,13 @@ export function createReadBridge(o: ReadBridgeOptions) {
     // B31 Schnitt A: GET /everydeck/read/messages/{type}/{ref} – die Nachrichten eines Gesprächs, aufsteigend nach Zeit; nur auf Abruf, everydeck speichert nichts
     const mm = /^\/everydeck\/read\/messages\/([^/]+)\/([^/]+)$/.exec(path);
     if (mm) {
-      const type = decodeURIComponent(mm[1]!); const conv = (o.scope.conversations ?? []).find((c) => c.type === type);
-      if (!conv || !o.match) return { status: 404, body: { error: `no conversations of ${type} in the read scope` } };
-      const ref = decodeURIComponent(mm[2]!); const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
+      const type = decodeURIComponent(mm[1]!); if (!o.match) return { status: 404, body: { error: 'this bridge reads no conversations' } };
+      const ref = decodeURIComponent(mm[2]!);
+      // B46 Punkt 3: nur mit der Freigabe von everydeck für genau dieses Gespräch (geöffnet mit Grund); Tabelle und Spalten stehen nur in ihr
+      const grant = await grantOf(o.keys ?? [o.token], req.query, type, ref);
+      if (typeof grant === 'string') return { status: 403, body: { error: `a conversation is read only when a moderator opens it with a reason in everydeck (${grant})` } };
+      const conv = { messages: grant.messages, attachments: grant.attachments };
+      const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
       const m = conv.messages; const order = [m.time, ...m.ref]; if (after && after.length !== order.length) return { status: 400, body: { error: 'bad cursor' } };
       const rows = await o.match({ table: m.table, columns: uniq([...m.ref, m.conversation, m.sender, m.time, ...m.text]), where: { column: m.conversation, values: [ref] }, order, after, limit: limit + 1 });
       const kept = rows.slice(0, limit); const ids = kept.map((r) => refOf(r, m.ref));

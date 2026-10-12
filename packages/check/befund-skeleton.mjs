@@ -221,8 +221,8 @@ if (dbUrl) {
 //      credits_total = GREATEST(COALESCE(credits_total, 0), 100)); schreibt sie einen Parameter, ist sie eine Tür, keine Berechnung;
 //    – ein BEFORE-Trigger setzt NEW.spalte aus anderen Werten (nicht nur aus derselben Spalte, nicht now()).
 //    Die Vorgabe lock.computed sperrt sie; der Wert bleibt bei der App.
+const fnDefs = new Map(); const trigDefs = new Map();   // B46b Punkt 2: auch für die Kopien von Kontaktdaten unten
 {
-  const fnDefs = new Map(); const trigDefs = new Map();
   for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
     const src = stripSql(text(f)); const ops = [];
     for (const m of src.matchAll(/create\s+(?:or\s+replace\s+)?function\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi)) {
@@ -354,6 +354,10 @@ for (const m of reads.money) for (const [tn, t] of tables) { if (!readTables.has
 // Zeilenumbrüchen oder Markdown, Datumsformatierer), über Abbildungen, Variablen und Props bis zur Eigenschaft; die Eigenschaft gehört zur Spalte desselben
 // Namens in einer Tabelle, die das Frontend liest, mit einem Typ, der den Wert halten kann. Was sich nicht verfolgen lässt, steht in display_ends[].
 const holds = { image: /char|text|json|\[\]/i, link: /char|text/i, textarea: /char|text/i, long_text: /char|text/i, date: /date|time|char|text/i };
+// B46 Punkt 2: Kontaktangabe (mailto:/tel:/sms:/wa.me, Eingabefeld type email/tel) – Fakt columns[].contact mit der Stelle, keine Anzeigestelle
+for (const d of reads.display ?? []) { const kind = d.element === 'contact_email' ? 'email' : d.element === 'contact_phone' ? 'phone' : null; if (!kind) continue;
+  for (const [tn, t] of tables) { if (!readTables.has(tn) || (d.tables && !d.tables.includes(tn))) continue; const c = t.columns.find((x) => x.name === d.prop); if (!c || c.pk || c.fk || !/char|text/i.test(c.type) || c.contact) continue;
+    c.contact = { kind, evidence: { path: d.path, line: d.line, ...(d.symbol ? { symbol: d.symbol } : {}) } }; } }
 for (const d of reads.display ?? []) for (const [tn, t] of tables) { if (!readTables.has(tn) || (d.tables && !d.tables.includes(tn))) continue; const c = t.columns.find((x) => x.name === d.prop); if (!c || c.pk || c.fk || !holds[d.element]?.test(c.type)) continue;
   c.shown ??= []; if (c.shown.filter((x) => x.element === d.element).length >= 3 || c.shown.some((x) => x.element === d.element && x.path === d.path && x.line === d.line)) continue;
   c.shown.push({ path: d.path, line: d.line, element: d.element, symbol: d.symbol, via: d.via }); }   // Symbol: der Ausdruck an der Anzeigestelle (everydeck-check findet ihn dort)
@@ -374,7 +378,58 @@ for (const m of reads.not_shown) { const t = tables.get(m.table); if (!t) contin
 
 // B31: Tabellen des bestehenden Befunds, die das Gerüst nicht kennt (vom Agenten ergänzt), bleiben – außer die Datenbank sagt, dass es sie nicht gibt
 const keptOld = (merge?.tables ?? []).filter((x) => !tables.has(x.name) && (!catalog || catalog.tables.some((d) => d.name === x.name)));
-const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.tables?.find((x) => x.name === t.name); if (!old) return t; const keep = (old.shown ?? []).filter((x) => x.element !== 'data'); const { not_shown: _dropped, shown: _old, ...rest } = old; return { ...rest, defined: t.defined, ...(keep.length || t.shown ? { shown: [...keep, ...(t.shown ?? [])].slice(0, 60) } : {}), ...(t.not_shown ? { not_shown: t.not_shown } : {}), columns: [...t.columns.map((c) => { const oc = old.columns.find((x) => x.name === c.name); if (!oc) return c; const keepShown = (oc.shown ?? []).filter((x) => x.element !== 'data' && !(c.shown ?? []).some((y) => y.element === x.element && y.path === x.path && y.line === x.line));   /* B32: was das Gerüst selbst wieder findet (Geld), nicht doppelt */ const shownAll = [...keepShown, ...(c.shown ?? [])].slice(0, 12); return { ...c, ...(oc.external_id && !c.external_id ? { external_id: oc.external_id } : {}), ...(shownAll.length ? { shown: shownAll } : {}) }; }), ...old.columns.filter((x) => !t.columns.some((c) => c.name === x.name) && !(catalog && t.kind === 'table'))] }; }), ...keptOld];   // B31: Spalten-Anzeigestellen des Agenten (heading, money …) bleiben, data-Stellen erneuert das Gerüst; mit --db zählen nur die Spalten der Datenbank   // Gerüstteile (data-Anzeigestellen, not_shown) werden erneuert; Agenten-Einträge und vom Agenten ergänzte Spalten (z. B. Firestore) bleiben
+const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.tables?.find((x) => x.name === t.name); if (!old) return t; const keep = (old.shown ?? []).filter((x) => x.element !== 'data'); const { not_shown: _dropped, shown: _old, ...rest } = old; return { ...rest, defined: t.defined, ...(keep.length || t.shown ? { shown: [...keep, ...(t.shown ?? [])].slice(0, 60) } : {}), ...(t.not_shown ? { not_shown: t.not_shown } : {}), columns: [...t.columns.map((c) => { const oc = old.columns.find((x) => x.name === c.name); if (!oc) return c; const keepShown = (oc.shown ?? []).filter((x) => x.element !== 'data' && !(c.shown ?? []).some((y) => y.element === x.element && y.path === x.path && y.line === x.line));   /* B32: was das Gerüst selbst wieder findet (Geld), nicht doppelt */ const shownAll = [...keepShown, ...(c.shown ?? [])].slice(0, 12); return { ...c, ...(oc.external_id && !c.external_id ? { external_id: oc.external_id } : {}), ...(oc.contact && !c.contact ? { contact: oc.contact } : {}), ...(shownAll.length ? { shown: shownAll } : {}) };   /* B46b: der Fakt contact des Agenten bleibt */ }), ...old.columns.filter((x) => !t.columns.some((c) => c.name === x.name) && !(catalog && t.kind === 'table'))] }; }), ...keptOld];   // B31: Spalten-Anzeigestellen des Agenten (heading, money …) bleiben, data-Stellen erneuert das Gerüst; mit --db zählen nur die Spalten der Datenbank   // Gerüstteile (data-Anzeigestellen, not_shown) werden erneuert; Agenten-Einträge und vom Agenten ergänzte Spalten (z. B. Firestore) bleiben
+// ── B46b Punkt 2 (B46 Fund 2): Kopien von Kontaktdaten und Nachrichten. Schreibt eine SQL-Funktion der App einen als contact belegten Wert – auch gekürzt
+//    oder umgeformt (left(NEW.content, 140)) – in eine andere Spalte, ist diese Spalte derselbe Fakt: NEW./OLD. der Tabelle eines Triggers, lokale Variablen
+//    daraus, und INSERT … SELECT aus der Tabelle selbst. Fundstelle ist die Stelle, an der die Funktion die Spalte schreibt (die Spalte steht dort). Kopien
+//    von Kopien zählen auch (bis drei Stufen). Der Agent belegt die Quelle (z. B. messages.content als message), das Gerüst folgt mit --merge.
+{
+  const byName = new Map(mergedTables.map((t) => [t.name, t]));
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const word = (x) => new RegExp(`(^|[^A-Za-z0-9_."])"?${esc(x)}"?(?![A-Za-z0-9_])`, 'i');
+  // Teile auf oberster Ebene (Kommas außerhalb von Klammern und Zeichenketten), je mit Versatz
+  const splitTop = (str) => { const out = []; let depth = 0, q = false, start = 0; for (let i = 0; i <= str.length; i++) { const ch = str[i]; if (q) { if (ch === "'") q = false; continue; } if (ch === "'") { q = true; continue; } if (ch === '(') depth++; else if (ch === ')') depth--; else if ((ch === ',' && depth === 0) || i === str.length) { out.push([str.slice(start, i), start]); start = i + 1; } } return out; };
+  const masked = (str) => { let out = '', depth = 0, q = false; for (const ch of str) { if (q) { out += ' '; if (ch === "'") q = false; continue; } if (ch === "'") { q = true; out += ' '; continue; } if (ch === '(') { depth++; out += ' '; continue; } if (ch === ')') { depth = Math.max(0, depth - 1); out += ' '; continue; } out += depth > 0 ? ' ' : ch; } return out; };
+  const closeOf = (str, open) => { let depth = 0, q = false; for (let i = open; i < str.length; i++) { const ch = str[i]; if (q) { if (ch === "'") q = false; continue; } if (ch === "'") q = true; else if (ch === '(') depth++; else if (ch === ')' && --depth === 0) return i; } return -1; };
+  const contactCols = (tn) => (byName.get(tn)?.columns ?? []).filter((c) => c.contact);
+  const place = (fd, at) => (fd.file === 'database' ? { path: 'database', line: 1, symbol: `function ${fd.name}` } : { path: fd.file, line: lineOf(fd.src, fd.bodyAt + at) });
+  const setContact = (tn, cn, kind, ev, from) => { const t = byName.get(tn); const c = t?.columns.find((x) => x.name === cn); if (!c || c.contact || c.pk || c.fk || (tn === from.table && cn === from.column)) return false; c.contact = { kind, evidence: ev }; return true; };
+  for (let round = 0, changed = true; round < 3 && changed; round++) {
+    changed = false;
+    for (const fd of fnDefs.values()) {
+      const body = fd.body;
+      // Quellen: { re, kind, table, column } – NEW./OLD. der Tabellen, deren Trigger diese Funktion aufrufen
+      const refs = [];
+      for (const td of trigDefs.values()) if (td.fn === fd.name.toLowerCase()) for (const c of contactCols(td.table)) refs.push({ re: new RegExp(`\\b(?:new|old)\\s*\\.\\s*"?${esc(c.name)}"?(?![A-Za-z0-9_])`, 'i'), kind: c.contact.kind, table: td.table, column: c.name });
+      const taint = (expr, extra = []) => [...refs, ...extra].find((r) => r.re.test(expr)) ?? null;
+      // lokale Variablen aus einer Quelle (v := lower(NEW.email))
+      for (let i = 0; i < 3; i++) for (const a of body.matchAll(/(?:^|[;\s])([A-Za-z_]\w*)\s*:=\s*([^;]+);/g)) { if (/^new$|^old$/i.test(a[1])) continue; const r = taint(a[2]); if (r && !refs.some((x) => x.local === a[1].toLowerCase())) refs.push({ ...r, re: word(a[1]), local: a[1].toLowerCase() }); }
+      // BEFORE-Trigger: NEW.andere_spalte := Ausdruck aus der Quelle (dieselbe Tabelle)
+      for (const td of trigDefs.values()) if (td.fn === fd.name.toLowerCase()) for (const a of body.matchAll(/\bnew\s*\.\s*"?([A-Za-z_]\w*)"?\s*:=\s*([^;]+);/gi)) { const r = taint(a[2]); if (r && setContact(td.table, a[1], r.kind, place(fd, a.index + a[0].indexOf(a[1])), r)) changed = true; }
+      // INSERT INTO x (spalten) VALUES (…) | SELECT … FROM quelle
+      for (const m of body.matchAll(/\binsert\s+into\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi)) {
+        const open = m.index + m[0].length - 1; const close = closeOf(body, open); if (close < 0) continue;
+        const cols = splitTop(body.slice(open + 1, close)); const rest = body.slice(close + 1); let exprs = null; const extra = [];
+        const v = /^\s*values\s*\(/i.exec(rest);
+        if (v) { const o = close + 1 + v[0].length - 1; const e = closeOf(body, o); if (e > 0) exprs = splitTop(body.slice(o + 1, e)); }
+        const sel = /^\s*select\b/i.exec(rest);
+        if (sel) {
+          const seg = rest.slice(sel[0].length).split(';')[0]; const at = /\bfrom\b/i.exec(masked(seg)); if (!at) continue;
+          exprs = splitTop(seg.slice(0, at.index));
+          for (const f of masked(seg.slice(at.index)).matchAll(/\b(?:from|join)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?(?:\s+(?:as\s+)?(?!where\b|join\b|left\b|right\b|inner\b|on\b|group\b|order\b|limit\b)([A-Za-z_]\w*))?/gi))
+            for (const c of contactCols(f[1])) for (const q of [f[1], f[2]].filter(Boolean)) extra.push({ re: new RegExp(`\\b${esc(q)}\\s*\\.\\s*"?${esc(c.name)}"?(?![A-Za-z0-9_])`, 'i'), kind: c.contact.kind, table: f[1], column: c.name });
+        }
+        if (!exprs || exprs.length !== cols.length) continue;
+        cols.forEach(([cname, off], i) => { const r = taint(exprs[i][0], extra); if (!r) return; const name = cname.trim().replace(/"/g, ''); if (setContact(m[1], name, r.kind, place(fd, open + 1 + off + cname.indexOf(cname.trim())), r)) changed = true; });
+      }
+      // UPDATE x SET spalte = Ausdruck aus der Quelle
+      for (const u of body.matchAll(/\bupdate\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+set\s+/gi)) {
+        const start = u.index + u[0].length; const seg = body.slice(start).split(';')[0]; const end = /\b(?:where|returning|from)\b/i.exec(masked(seg));
+        for (const [part, off] of splitTop(seg.slice(0, end ? end.index : seg.length))) { const a = /^\s*"?([A-Za-z_]\w*)"?\s*=\s*([\s\S]+)$/.exec(part); if (!a) continue; const r = taint(a[2]); if (r && setContact(u[1], a[1], r.kind, place(fd, start + off + part.indexOf(a[1])), r)) changed = true; }
+      }
+    }
+  }
+}
 // B38 Punkt 1: das Icon, das die App selbst ausliefert (Gerüstteil, bei jedem Lauf neu; Beschreibungen des Agenten unter `app` bleiben)
 const icon = findIcon(repo, files);
 const appOut = (() => { const { icon: _old, ...rest } = merge?.app ?? {}; const a = { ...rest, ...(icon ? { icon } : {}) }; return Object.keys(a).length ? a : null; })();
@@ -383,7 +438,7 @@ const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git
     // vom Agenten ergänzte Komponenten (z. B. ein Paket in einer Edge Function) bleiben
   // B31: vom Agenten genannte Tabellen der everydeck-Installation bleiben (solange es die Tabelle gibt)
   ...(reads.reach.unreachable.length ? { unreachable: reads.reach.unreachable.slice(0, 500) } : {}),
-  ...((reads.display_ends ?? []).length ? { display_ends: reads.display_ends } : {}),   // B35 Punkt 1: Anzeigestellen, deren Wert sich nicht bis zu einer Spalte verfolgen lässt (Fakt, nie geraten)   // B32 (O4): Dateien, die kein Einstieg der App erreicht – keine Seite, keine Anzeigestelle
+  ...((reads.display_ends ?? []).filter((e) => !e.element.startsWith('contact_')).length ? { display_ends: reads.display_ends.filter((e) => !e.element.startsWith('contact_')) } : {}),   // B46: eine Kontaktstelle ohne Spalte ist kein Fakt der Anzeige   // B35 Punkt 1: Anzeigestellen, deren Wert sich nicht bis zu einer Spalte verfolgen lässt (Fakt, nie geraten)   // B32 (O4): Dateien, die kein Einstieg der App erreicht – keine Seite, keine Anzeigestelle
   ...(merge?.everydeck_tables ? { everydeck_tables: merge.everydeck_tables.filter((y) => mergedTables.some((t) => t.name === y.table)) } : {}),
   ...(merge?.works_with ? { works_with: merge.works_with.filter((w) => tables.has(w.table) && (!w.part_of || tables.has(w.part_of))) } : {}),   // Beschreibung des Agenten bleibt; Einträge zu Tabellen, die es im Endzustand nicht mehr gibt, fallen weg
   identity: (() => { const id = merge?.identity ?? null; if (!id) return null; const { name_rule: _old, ...rest } = id; const rule = nameRuleOf(id); return rule ? { ...rest, name_rule: rule } : rest; })(), tables: mergedTables, functions: merge?.functions ?? [], flows: merge?.flows ?? [], ...(merge?.channels ? { channels: merge.channels } : {}), ...(merge?.jobs ? { jobs: merge.jobs } : {}), ...(merge?.payments !== undefined ? { payments: merge.payments } : {}), ...(merge?.adapters ? { adapters: merge.adapters } : {}),

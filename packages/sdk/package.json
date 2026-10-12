@@ -1,6 +1,6 @@
 {
   "name": "@everydeck/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "everydeck SDK for TypeScript: server (Node ≥ 22, Deno / Supabase Edge) and browser adapters, transport contract 1.1-r0",
   "license": "MIT",
   "homepage": "https://everydeck.ai",
@@ -20,6 +20,10 @@
     "./browser": {
       "types": "./dist/browser.d.ts",
       "import": "./dist/browser.js"
+    },
+    "./read-bridge": {
+      "types": "./dist/read-route.d.ts",
+      "import": "./dist/read-route.js"
     },
     "./dist": {
       "types": "./dist/index.d.ts",

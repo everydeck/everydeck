@@ -370,6 +370,7 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
             if c.get("updated"): _check_evidence(files, c["updated"], f"{at}.columns[{j}] {c['name']}.updated", [c["name"], t["name"]], errs)   # Trigger nennt die Tabelle, onupdate die Spalte
             if c.get("external_id"): _check_evidence(files, c["external_id"]["evidence"], f"{at}.columns[{j}] {c['name']}.external_id", [c["name"]], errs)
             for k, ev in enumerate(c.get("written", []) or []): _check_evidence(files, ev, f"{at}.columns[{j}] {c['name']}.written[{k}]", [c["name"]], errs)   # B31 E1: die Setzstelle nennt die Spalte
+            if c.get("contact"): _check_evidence(files, c["contact"]["evidence"], f"{at}.columns[{j}] {c['name']}.contact", [c["name"]], errs)   # B46: die Stelle, an der die App den Wert als Kontakt behandelt, nennt die Spalte (oder ihr Symbol)
         for j, s in enumerate(t.get("statuses", []) or []):
             _check_evidence(files, s["evidence"], f"{at}.statuses[{j}] {s['value']}", [s["value"]], errs)
             for k, sh in enumerate(s.get("shown", []) or []): _check_evidence(files, sh, f"{at}.statuses[{j}] {s['value']}.shown[{k}]", [s["value"]] + ([sh["label"]] if sh.get("label") else []), errs)
@@ -688,6 +689,151 @@ def database_errors(b: dict[str, Any], db: set[str]) -> list[str]:
     return [f"tables[]: {t} is in the database but not in the Befund – add it with its columns (the generator reads it with --db)" for t in sorted(db) if t not in declared and t.split(".")[0] not in everydeck]
 
 
+# ── B46b Punkt 2 (B46 Fund 2): Kopien von Kontaktdaten und Nachrichten. Schreibt eine SQL-Funktion der App (Trigger: NEW./OLD., lokale Variablen daraus;
+#    INSERT … SELECT aus der Tabelle selbst) einen als contact belegten Wert – auch gekürzt oder umgeformt – in eine andere Spalte, verlangt everydeck-check
+#    dort denselben Fakt. Endzustand der Migrationen in Dateireihenfolge (CREATE OR REPLACE: die letzte Fassung, DROP FUNCTION/TRIGGER entfernen). Dieselbe
+#    Regel wie das Gerüst (befund-skeleton.mjs), eigene Umsetzung.
+_FN_DEF = re.compile(r'create\s+(?:or\s+replace\s+)?function\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(', re.I)
+_FN_DROP = re.compile(r'drop\s+function\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?', re.I)
+_TRG_DEF = re.compile(r'create\s+(?:or\s+replace\s+)?trigger\s+"?(\w+)"?\s+(?:before|after|instead\s+of)\s+[\s\S]*?\bon\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?[\s\S]*?execute\s+(?:function|procedure)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?', re.I)
+_TRG_DROP = re.compile(r'drop\s+trigger\s+(?:if\s+exists\s+)?"?(\w+)"?\s+on\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?', re.I)
+
+
+def _close_of(s: str, open_: int) -> int:
+    depth, q = 0, False
+    for i in range(open_, len(s)):
+        ch = s[i]
+        if q:
+            if ch == "'": q = False
+            continue
+        if ch == "'": q = True
+        elif ch == "(": depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0: return i
+    return -1
+
+
+def _split_top(s: str) -> list[tuple[str, int]]:
+    out: list[tuple[str, int]] = []; depth, q, start = 0, False, 0
+    for i in range(len(s) + 1):
+        ch = s[i] if i < len(s) else None
+        if q:
+            if ch == "'": q = False
+            continue
+        if ch == "'": q = True
+        elif ch == "(": depth += 1
+        elif ch == ")": depth -= 1
+        elif (ch == "," and depth == 0) or ch is None: out.append((s[start:i], start)); start = i + 1
+    return out
+
+
+def _masked(s: str) -> str:
+    out, depth, q = [], 0, False
+    for ch in s:
+        if q:
+            out.append(" ")
+            if ch == "'": q = False
+            continue
+        if ch == "'": q = True; out.append(" "); continue
+        if ch == "(": depth += 1; out.append(" "); continue
+        if ch == ")": depth = max(0, depth - 1); out.append(" "); continue
+        out.append(" " if depth > 0 else ch)
+    return "".join(out)
+
+
+def _sql_functions(repo: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]]]:
+    fns: dict[str, dict[str, Any]] = {}; trgs: dict[str, dict[str, str]] = {}
+    for rel, text in _files_of(repo, {".sql"}):
+        src = re.sub(r"--[^\n]*", lambda m: " " * len(m.group(0)), text); ops: list[tuple[int, Any]] = []
+        for m in _FN_DEF.finditer(src):
+            close = _close_of(src, m.end() - 1)
+            if close < 0: continue
+            tag = re.search(r"\bas\s+(\$[A-Za-z_]*\$)", src[close:], re.I)
+            if not tag: continue
+            b0 = close + tag.end(); b1 = src.find(tag.group(1), b0)
+            if b1 < 0: continue
+            ops.append((m.start(), lambda m=m, b0=b0, b1=b1: fns.__setitem__(m.group(1).lower(), {"name": m.group(1), "body": src[b0:b1], "at": b0, "src": src, "rel": str(rel)})))
+        for m in _FN_DROP.finditer(src): ops.append((m.start(), lambda m=m: fns.pop(m.group(1).lower(), None)))
+        for m in _TRG_DEF.finditer(src): ops.append((m.start(), lambda m=m: trgs.__setitem__(f"{m.group(2)}:{m.group(1)}".lower(), {"table": m.group(2), "fn": m.group(3).lower()})))
+        for m in _TRG_DROP.finditer(src): ops.append((m.start(), lambda m=m: trgs.pop(f"{m.group(2)}:{m.group(1)}".lower(), None)))
+        for _, op in sorted(ops, key=lambda x: x[0]): op()
+    return fns, trgs
+
+
+def contact_copy_errors(b: dict[str, Any], repo: Path) -> list[str]:
+    tables = {t["name"]: t for t in b.get("tables", [])}
+    kinds: dict[tuple[str, str], str] = {(t["name"], c["name"]): c["contact"]["kind"] for t in b.get("tables", []) for c in t.get("columns", []) if c.get("contact")}
+    fns, trgs = _sql_functions(repo)
+    need: dict[tuple[str, str], tuple[str, str, str, int, str]] = {}   # Ziel → (Art, Quelle, Funktion, Zeile, Datei)
+
+    def col_ok(tn: str, cn: str) -> bool:
+        c = next((x for x in tables.get(tn, {}).get("columns", []) if x["name"] == cn), None)
+        return bool(c) and not c.get("pk") and not c.get("fk")
+
+    for _ in range(3):
+        added = False
+        for fd in fns.values():
+            body = fd["body"]; line = lambda off: fd["src"][:fd["at"] + off].count("\n") + 1
+            refs: list[tuple[re.Pattern[str], str, str]] = []   # (Muster, Art, Quelle)
+            src_tables = [g["table"] for g in trgs.values() if g["fn"] == fd["name"].lower()]
+            for st in src_tables:
+                for (tn, cn), k in list(kinds.items()):
+                    if tn == st: refs.append((re.compile(rf'\b(?:new|old)\s*\.\s*"?{re.escape(cn)}"?(?![A-Za-z0-9_])', re.I), k, f"{tn}.{cn}"))
+            def taint(expr: str, extra: list[tuple[re.Pattern[str], str, str]] = []) -> tuple[re.Pattern[str], str, str] | None:
+                return next((r for r in refs + extra if r[0].search(expr)), None)
+            for _ in range(3):
+                for a in re.finditer(r"(?:^|[;\s])([A-Za-z_]\w*)\s*:=\s*([^;]+);", body):
+                    if a.group(1).lower() in ("new", "old"): continue
+                    r = taint(a.group(2))
+                    if r: refs.append((re.compile(rf'(^|[^A-Za-z0-9_."]){re.escape(a.group(1))}(?![A-Za-z0-9_])', re.I), r[1], r[2]))
+            hits: list[tuple[str, str, tuple[re.Pattern[str], str, str], int]] = []
+            for st in src_tables:
+                for a in re.finditer(r'\bnew\s*\.\s*"?([A-Za-z_]\w*)"?\s*:=\s*([^;]+);', body, re.I):
+                    r = taint(a.group(2))
+                    if r: hits.append((st, a.group(1), r, a.start() + a.group(0).index(a.group(1))))
+            for m in re.finditer(r'\binsert\s+into\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(', body, re.I):
+                open_ = m.end() - 1; close = _close_of(body, open_)
+                if close < 0: continue
+                cols = _split_top(body[open_ + 1:close]); rest = body[close + 1:]; exprs = None; extra: list[tuple[re.Pattern[str], str, str]] = []
+                v = re.match(r"\s*values\s*\(", rest, re.I)
+                if v:
+                    o = close + 1 + v.end() - 1; e = _close_of(body, o)
+                    if e > 0: exprs = _split_top(body[o + 1:e])
+                sel = re.match(r"\s*select\b", rest, re.I)
+                if sel:
+                    seg = rest[sel.end():].split(";")[0]; at = re.search(r"\bfrom\b", _masked(seg), re.I)
+                    if not at: continue
+                    exprs = _split_top(seg[:at.start()])
+                    for f in re.finditer(r'\b(?:from|join)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?(?:\s+(?:as\s+)?(?!where\b|join\b|left\b|right\b|inner\b|on\b|group\b|order\b|limit\b)([A-Za-z_]\w*))?', _masked(seg[at.start():]), re.I):
+                        for (tn, cn), k in list(kinds.items()):
+                            if tn == f.group(1):
+                                for q in [x for x in (f.group(1), f.group(2)) if x]: extra.append((re.compile(rf'\b{re.escape(q)}\s*\.\s*"?{re.escape(cn)}"?(?![A-Za-z0-9_])', re.I), k, f"{tn}.{cn}"))
+                if not exprs or len(exprs) != len(cols): continue
+                for (cname, off), (expr, _) in zip(cols, exprs):
+                    r = taint(expr, extra)
+                    if r: hits.append((m.group(1), cname.strip().strip('"'), r, open_ + 1 + off + cname.index(cname.strip())))
+            for u in re.finditer(r'\bupdate\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+set\s+', body, re.I):
+                seg = body[u.end():].split(";")[0]; end = re.search(r"\b(?:where|returning|from)\b", _masked(seg), re.I)
+                for part, off in _split_top(seg[:end.start() if end else len(seg)]):
+                    a = re.match(r'\s*"?([A-Za-z_]\w*)"?\s*=\s*([\s\S]+)$', part)
+                    if not a: continue
+                    r = taint(a.group(2))
+                    if r: hits.append((u.group(1), a.group(1), r, u.end() + off + part.index(a.group(1))))
+            for tn, cn, r, off in hits:
+                key = (tn, cn)
+                if f"{tn}.{cn}" == r[2] or key in need or not col_ok(tn, cn): continue
+                need[key] = (r[1], r[2], fd["name"], line(off), fd["rel"])
+                if key not in kinds: kinds[key] = r[1]; added = True
+        if not added: break
+    errs = []
+    for (tn, cn), (kind, src, fn, ln, rel) in sorted(need.items()):
+        c = next(x for x in tables[tn]["columns"] if x["name"] == cn)
+        if not c.get("contact"):
+            errs.append(f'tables[] {tn}.{cn}: function {fn} copies {src} ({kind}) into it at {rel}:{ln} – add columns[].contact {{ "kind": "{kind}", "evidence": {{ "path": "{rel}", "line": {ln} }} }} (npx everydeck-scaffold . --merge everydeck/everydeck-befund.json writes it); everydeck never reads it then')
+    return errs
+
+
 def validate_befund(doc: dict[str, Any], repo: Path | None, db: str | None = None) -> list[str]:
     global DB_TABLES
     errs = schema_errors(doc)
@@ -702,7 +848,7 @@ def validate_befund(doc: dict[str, Any], repo: Path | None, db: str | None = Non
         except RuntimeError as e: return [f"--db: {e}"]
         errs += database_errors(doc, DB_TABLES)
     if repo and not errs:
-        errs = evidence_errors(doc, repo) + completeness_errors(doc, repo)
+        errs = evidence_errors(doc, repo) + completeness_errors(doc, repo) + contact_copy_errors(doc, repo)   # B46b Punkt 2
     return errs
 
 

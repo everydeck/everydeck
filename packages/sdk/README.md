@@ -37,3 +37,17 @@ everydeck distributes a reproducible bundle via `/guide/installer.json` (build: 
 - Signed bridge calls, like Stripe: everydeck signs every call to a read or app bridge (`X-Everydeck-Timestamp`, `X-Everydeck-Request-Id`, `X-Everydeck-Signature: v1=…[,v1=…]`; HMAC-SHA256 over method, path from `/everydeck/` with query, timestamp, request id and the SHA-256 of the body). `verifyEverydeckRequest({ method, url, headers, body }, { keys })` is the one line for the app's door (Web Crypto; Node, Deno, browsers): rejects calls older than 5 minutes and repeated request ids (`memorySeen` per process, `seen` for several instances). `createReadBridge` verifies by itself (`signatures: "required"` by default, `"optional"` for older everydeck instances, `"off"`), reports `signed: true`. Key rotation: register the new key with everydeck, then switch the app – everydeck signs with both keys for 24 hours. `signEverydeckRequest` produces the same headers for the app's own tests. The Python SDK (0.1.2) behaves the same (`everydeck.verify`).
 
 Version 0.1.8 (B31): every failed request to `captureHosts` (default: the page's own host) is reported without an action – network errors, 4xx (401 only while `setSubject` names a person), 5xx – as `page.request_failed` with the page (`trail`), the route pattern and the status, never with contents; the SDK wraps `globalThis.fetch` once for that (`captureBackground: false` switches it off, `uninstall()` removes the wrapper). `everydeck.fetch` captures the same way again – an update never switches capture off silently. Requests inside an action are reported by `ctx.fetch` exactly as before (no double report); everydeck's own sending is never captured. The generic read bridge serves `GET /everydeck/read/messages/{type}/{ref}` from `scope.conversations` when you pass `match: pgMatch(client, { schema })`.
+
+## 0.3.0 (B46)
+
+- The read bridge is a ready-made route: `everydeckReadBridge({ endpoint, key, db })` from `@everydeck/sdk/read-bridge` (no `node:` module, runs in Deno / Supabase Edge Functions and Node). `db` is the connection the app already has (postgres.js, a pg `Pool`, or an object with `readOnly(fn)`); every query runs in its own read-only transaction, so the database refuses any write (SQLSTATE 25006). No read role, no views, no copied files.
+- The read scope is no longer a file in the repository: the route fetches it from everydeck (`GET <endpoint>/v1/read-scope` with the bridge key) and uses it only when everydeck's signature (`EVERYDECK-SCOPE-V1`, HMAC-SHA256 with the bridge key) is valid; otherwise it reads nothing and answers 503.
+- The rights it reports are checked: the role of the connection, `superuser`, `bypass_rls` (the role skips the app's row-level security and sees every row) and `read_only_transaction`.
+- Supabase Edge Function (`supabase/functions/everydeck-read-bridge/index.ts`), environment `EVERYDECK_URL` and `EVERYDECK_READ_BRIDGE_TOKEN`; `SUPABASE_DB_URL` is provided by Supabase. The function keeps its JWT check: everydeck sends the app's public key (registered as `gateway_key`) as `apikey`:
+
+```ts
+import postgres from 'npm:postgres@3.4.5';
+import { everydeckReadBridge } from 'npm:@everydeck/sdk@0.3.0/read-bridge';
+const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2, idle_timeout: 20 });
+Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
+```
