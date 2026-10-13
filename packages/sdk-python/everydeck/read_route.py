@@ -1,6 +1,14 @@
 """The read bridge as a ready-made route: Python version of @everydeck/sdk/read-bridge, same behavior.
 
-The app mounts it with the connection it already has; no reader role, no views, no read scope file in the repo:
+FastAPI or Starlette: two lines in the module that creates `app`, with the connection the app already has (no helper module, no reader role,
+no views, no read scope file in the repo):
+
+    # everydeck read bridge: everydeck reads only the data the owner approved, read-only, and only with everydeck's signature
+    from everydeck.read_route import mount_read_bridge, SupabaseReadOnly
+    mount_read_bridge(app, SupabaseReadOnly(supabase_admin))   # or PsycopgReadOnly(os.environ["DATABASE_URL"])
+
+It adds the route /everydeck/read/{rest:path} (not in the API schema) and reads EVERYDECK_URL and EVERYDECK_READ_BRIDGE_TOKEN from the environment
+when the first call arrives. Other frameworks call the bridge themselves:
 
     from everydeck.read_route import EverydeckReadBridge, SupabaseReadOnly   # or PsycopgReadOnly(os.environ["DATABASE_URL"])
     bridge = EverydeckReadBridge(os.environ["EVERYDECK_URL"], os.environ["EVERYDECK_READ_BRIDGE_TOKEN"], SupabaseReadOnly(supabase_admin))
@@ -233,3 +241,39 @@ class EverydeckReadBridge:
         if isinstance(out, str):
             return 503, {"error": out}
         return out[1].handle(method, path, query, authorization, headers=headers, body=body, url=url)
+
+
+READ_ROUTE = "/everydeck/read/{rest:path}"
+
+
+def mount_read_bridge(app: Any, db: Any, **options: Any) -> None:
+    """Mounts everydeck's read bridge on a FastAPI or Starlette app at /everydeck/read/{rest:path}, outside the API schema.
+
+    `db` is the connection the app already has: SupabaseReadOnly(<the app's Supabase client>) or PsycopgReadOnly(<database URL>). The route only
+    answers calls signed by everydeck, reads only the approved columns and never writes (see EverydeckReadBridge). EVERYDECK_URL and
+    EVERYDECK_READ_BRIDGE_TOKEN come from the environment when the first call arrives; `options` go to EverydeckReadBridge."""
+    import os
+
+    from starlette.concurrency import run_in_threadpool
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    holder: list[EverydeckReadBridge] = []
+    lock = threading.Lock()
+
+    def bridge() -> EverydeckReadBridge:
+        with lock:
+            key = os.environ.get("EVERYDECK_READ_BRIDGE_TOKEN")
+            if not holder or (key and key not in holder[0].keys):
+                holder[:] = [EverydeckReadBridge(os.environ.get("EVERYDECK_URL"), key, db, **options)]
+            return holder[0]
+
+    async def everydeck_read(request: Request) -> JSONResponse:
+        b = bridge()
+        status, body = await run_in_threadpool(b.handle, request.method, request.url.path, dict(request.query_params),
+                                               request.headers.get("authorization"), request.headers, await request.body(), str(request.url))
+        return JSONResponse(body, status_code=status)
+
+    # a plain Starlette route (FastAPI takes it as well): the handler gets the request itself, FastAPI resolves no parameters for it
+    from starlette.routing import Route
+    app.router.routes.append(Route(READ_ROUTE, everydeck_read, methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False))

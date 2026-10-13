@@ -172,7 +172,7 @@ def coverage_errors(m: dict[str, Any], entries: list[dict[str, Any]], detected: 
                 errs.append(f"{at}: push needs the flow `{PUSH_REGISTER_CAPABILITY}` (register a device, with a result step); without it everydeck cannot verify a push repair")
             elif not any(s.get("role") == "result" and s.get("signal") for s in (reg.get("steps") or [])):
                 errs.append(f"{at}: flow `{PUSH_REGISTER_CAPABILITY}` needs a result step with a server signal")
-        elif b == "payments":
+        elif b == "payments" and e["kind"] != "flow":   # a measured payment flow is no revenue claim
             rev = [o for o in objects if o.get("area") == "revenue"]
             if not any(any(f.get("role") == "amount" for f in (o.get("fields") or [])) and any(s.get("revenue") == "paying" for s in (o.get("statuses") or [])) for o in rev):
                 errs.append(f"{at}: payments measured need a revenue object with role amount and a status with revenue paying, or outcome hint (then everydeck shows the revenue prompt)")

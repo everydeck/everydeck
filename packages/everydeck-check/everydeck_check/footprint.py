@@ -49,7 +49,32 @@ def fix_npm_lock(repo: Path, base: str, rel: str) -> None:
     (repo / rel).write_text(json.dumps(old, indent=2) + "\n", encoding="utf-8")
 
 
-def footprint(repo: Path, base: str, fix_lock: bool = False) -> dict[str, Any]:
+def _rows(url: str, sql: str) -> list[list[str]]:
+    """Rows of a query through psycopg or psql (tab-separated), like database_tables in app_map."""
+    import shutil
+    try:
+        import psycopg  # type: ignore
+        with psycopg.connect(url) as conn: return [[str(v) for v in r] for r in conn.execute(sql).fetchall()]
+    except ImportError:
+        pass
+    if not shutil.which("psql"): raise RuntimeError("--db needs psql or the psycopg package")
+    out = subprocess.run(["psql", url, "-X", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", sql], capture_output=True, text=True)
+    if out.returncode != 0: raise RuntimeError(f"cannot read the database: {out.stderr.strip().splitlines()[0] if out.stderr.strip() else out.returncode}")
+    return [l.split("\t") for l in out.stdout.splitlines() if l.strip()]
+
+
+def outside_writes(repo: Path, base: str, url: str) -> list[dict[str, str]]:
+    """What footprint can see of writes outside the repository: a migration the database applied during the setup (version from the
+    date of the commit before the setup on) that is not a file of this repository. Rows written by hand are not visible here."""
+    since = _git(repo, "show", "-s", "--format=%cd", "--date=format-local:%Y%m%d%H%M%S", base).strip()
+    known = _rows(url, "SELECT to_regclass('supabase_migrations.schema_migrations') IS NOT NULL")[0][0] in ("t", "True")
+    rows = _rows(url, "SELECT version, coalesce(name, '') FROM supabase_migrations.schema_migrations ORDER BY version") if known else []
+    files = {p.name.split("_", 1)[0] for p in repo.rglob("migrations/*.sql") if "node_modules" not in p.parts}
+    return [{"what": f"migration {v} {n}".strip(), "fact": "applied to the database during the setup, but not in this repository: it was written outside the repository"}
+            for v, n in rows if v >= since and v not in files]
+
+
+def footprint(repo: Path, base: str, fix_lock: bool = False, db: str | None = None) -> dict[str, Any]:
     status = [l.split("\t") for l in _git(repo, "diff", "--name-status", "-M", base).strip().split("\n") if l]
     untracked = [l for l in _git(repo, "ls-files", "--others", "--exclude-standard").strip().split("\n") if l]
     added = [s[-1] for s in status if s[0].startswith("A")]
@@ -71,5 +96,6 @@ def footprint(repo: Path, base: str, fix_lock: bool = False) -> dict[str, Any]:
             if d not in dirs: dirs.add(d); left.append({"path": d, "fact": "a folder of browser automation, not part of the app"})
         elif MEDIA.search(rel): left.append({"path": rel, "fact": "a screenshot, video or trace"})
         elif (repo / rel).is_file() and re.search(r"\.(m?[jt]sx?|py|sh)$", rel) and PROBE.search((repo / rel).read_text(encoding="utf-8", errors="replace")): left.append({"path": rel, "fact": "a script that uses the probe run, only for verifying the setup"})
-    return {"status": "ok" if not locks and not left else "refused", "base": base, "files_added": len(added), "files_changed": len(changed),
-            "added": added[:200], "changed": changed[:200], "untracked": untracked[:200], "lockfiles": locks, "leftovers": left}
+    outside = outside_writes(repo, base, db) if db else None
+    return {"status": "ok" if not locks and not left and not outside else "refused", "base": base, "files_added": len(added), "files_changed": len(changed),
+            "added": added[:200], "changed": changed[:200], "untracked": untracked[:200], "lockfiles": locks, "leftovers": left, **({"outside": outside} if outside is not None else {})}

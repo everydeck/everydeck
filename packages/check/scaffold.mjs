@@ -11,8 +11,8 @@
 // What the tool cannot read (visible elements, write places, functions with rights, flows, identity, channels), the agent adds
 // with places; `--merge` keeps these parts from an existing app map and renews only the skeleton parts.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative, dirname } from 'node:path';
 import { analyseReads } from './scaffold-reads.mjs';
 import { findIcon } from './scaffold-icon.mjs';
 import { profileTables, shownNameColumn } from './rules/everydeck-rules.mjs';
@@ -613,5 +613,6 @@ if (args.includes('--types')) {
 }
 // Never write into the repo unasked: without --out the app map goes to stdout
 const outPath = opt('--out');
-if (outPath) writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n'); else process.stdout.write(JSON.stringify(out, null, 1) + '\n');
+// --out creates its folder (everydeck/ does not exist before the first run)
+if (outPath) { mkdirSync(dirname(outPath), { recursive: true }); writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n'); } else process.stdout.write(JSON.stringify(out, null, 1) + '\n');
 console.error(JSON.stringify({ out: outPath, tables: out.tables.length, columns: out.tables.reduce((n, t) => n + t.columns.length, 0), shown: out.tables.filter((t) => (t.shown ?? []).length || t.columns.some((c) => (c.shown ?? []).length)).length, not_shown: out.tables.reduce((n, t) => n + (t.not_shown ?? []).length, 0), components: out.components.length, api_routes: api_routes.length, screens: screens.length, platforms: out.platforms.length, routes_with_reads: reads.routes.filter((r) => r.reads.length).length, views: reads.views.length, sql_functions: reads.sql_functions.length, merged: !!merge }));

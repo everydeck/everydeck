@@ -261,7 +261,7 @@ def cmd_change(a: argparse.Namespace) -> int:
 def cmd_footprint(a: argparse.Namespace) -> int:
     """The footprint of the setup against the commit before it: new and changed files, a lockfile rewritten beyond the new packages, leftovers."""
     from .footprint import footprint
-    out = footprint(Path(a.repo).resolve(), a.base, fix_lock=a.fix_lock)
+    out = footprint(Path(a.repo).resolve(), a.base, fix_lock=a.fix_lock, db=a.db)
     print(json.dumps(out, indent=1))
     return 0 if out["status"] == "ok" else 2
 
@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     rd = sub.add_parser("reads", help="the cross-check of display locations: every table named in a frontend string: main navigation (with access path), technical (with reason) or open"); rd.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); rd.add_argument("--repo", required=True); rd.add_argument("--markdown", action="store_true"); rd.set_defaults(fn=cmd_reads)
     pub = sub.add_parser("publish"); pub.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list; use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: an app map goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of an app map against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
     fp = sub.add_parser("footprint", help="what the setup added and changed in the repository against --base (the commit before the setup); refuses a rewritten lockfile and leftovers")
-    fp.add_argument("--base", required=True); fp.add_argument("--repo", default="."); fp.add_argument("--fix-lock", action="store_true", help="restore package-lock.json from --base and add only the new packages"); fp.set_defaults(fn=cmd_footprint)
+    fp.add_argument("--base", required=True); fp.add_argument("--repo", default="."); fp.add_argument("--fix-lock", action="store_true", help="restore package-lock.json from --base and add only the new packages"); fp.add_argument("--db", default=None, help="local database URL: also report migrations the database applied during the setup that are not in this repository (written outside it)"); fp.set_defaults(fn=cmd_footprint)
     ch = sub.add_parser("change", help="check everydeck-change.json against manifest, repo and HEAD; optionally publish it")
     ch.add_argument("change"); ch.add_argument("--manifest", required=True); ch.add_argument("--repo", default="."); ch.add_argument("--sha", default=None)
     ch.add_argument("--url"); ch.add_argument("--project"); ch.add_argument("--token"); ch.set_defaults(fn=cmd_change)
