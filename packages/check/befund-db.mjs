@@ -1,13 +1,13 @@
-// B31 Schnitt D – das Schema aus der Datenbank selbst: Tabellen, Spalten (Typ, Pflicht, Standardwert, berechnet), Schlüssel, Fremdschlüssel,
-// CHECK-Wertelisten, Zeilenrechte (Policies), Trigger und SQL-Funktionen aus pg_catalog. Die Datenbank ist die Wahrheit; die Migrationen im Repo
-// sind die Fundstelle. pg_catalog darf jede Rolle lesen – auch die Leserolle everydeck_reader, die keine Tabelle der App selbst lesen darf.
-// Verbindung: das Paket `pg` oder `postgres` aus dem Repo der App (oder neben diesem Werkzeug), sonst `psql`. Fehlt alles, bricht das Gerüst mit der
-// Meldung ab – es fällt nichts still weg.
+// The schema from the database itself: tables, columns (type, required, default, generated), keys, foreign keys,
+// CHECK value lists, row-level policies, triggers and SQL functions from pg_catalog. The database is the truth; the migrations in the repo
+// are the places in the code. Every role may read pg_catalog, including the read role everydeck_reader, which may not read any table of the app itself.
+// Connection: the package `pg` or `postgres` from the app's repo (or next to this tool), otherwise `psql`. If none is available, the skeleton stops with
+// a message; nothing is dropped silently.
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 
-/** Schemata der Plattform (Postgres, Supabase), keine Tabellen der App */
+/** Platform schemas (Postgres, Supabase), not tables of the app */
 export const PLATFORM_SCHEMAS = ['information_schema', 'pg_catalog', 'pg_toast', 'auth', 'storage', 'realtime', '_realtime', 'extensions', 'graphql', 'graphql_public', 'pgbouncer', 'vault', 'net', 'supabase_functions', 'supabase_migrations', 'cron', 'pgsodium', 'pgsodium_masks', '_analytics', 'topology', 'tiger', 'tiger_data', 'pgtle', 'repack', 'everydeck_read'];
 
 export const CATALOG_SQL = `WITH s AS (SELECT oid, nspname FROM pg_namespace WHERE nspname <> ALL($1::text[]) AND nspname NOT LIKE 'pg\\_%'),
@@ -27,17 +27,17 @@ SELECT json_build_object(
  'functions', coalesce((SELECT json_agg(json_build_object('schema', n.nspname, 'name', p.proname, 'args', pg_get_function_arguments(p.oid), 'returns_trigger', p.prorettype = 'trigger'::regtype, 'src', p.prosrc))
    FROM pg_proc p JOIN s n ON n.oid = p.pronamespace WHERE p.prokind = 'f'), '[]')) AS catalog`;
 
-/** Liest den Katalog: { tables, policies, functions } – oder wirft mit einer verständlichen Meldung */
+/** Reads the catalog: { tables, policies, functions }, or throws with a clear message */
 export async function readCatalog(url, repo, files = []) {
   const roots = [repo, ...files.filter((f) => f.endsWith('package.json')).map((f) => dirname(f))].map((d) => join(d, 'package.json'));
   for (const r of [...roots, import.meta.url]) {
     let mod = null; let kind = null;
-    try { mod = createRequire(r)('pg'); kind = 'pg'; } catch { try { mod = createRequire(r)('postgres'); kind = 'postgres'; } catch { /* weiter */ } }
+    try { mod = createRequire(r)('pg'); kind = 'pg'; } catch { try { mod = createRequire(r)('postgres'); kind = 'postgres'; } catch { /* next */ } }
     if (!mod) continue;
     if (kind === 'pg') { const c = new (mod.Client ?? mod.default.Client)({ connectionString: url }); await c.connect(); try { return (await c.query(CATALOG_SQL, [PLATFORM_SCHEMAS])).rows[0].catalog; } finally { await c.end(); } }
     const sql = (mod.default ?? mod)(url, { max: 1, prepare: false }); try { return (await sql.unsafe(CATALOG_SQL, [PLATFORM_SCHEMAS]))[0].catalog; } finally { await sql.end(); }
   }
-  // psql: der Parameter als Literal (feste Liste, keine Eingabe von außen)
+  // psql: the parameter as a literal (fixed list, no outside input)
   const lit = `ARRAY[${PLATFORM_SCHEMAS.map((x) => `'${x}'`).join(',')}]`;
   try { return JSON.parse(execFileSync('psql', [url, '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', CATALOG_SQL.replace('$1::text[]', `${lit}::text[]`)], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })); }
   catch (e) { throw new Error(`cannot read the database schema at the given URL: no pg/postgres package and psql failed (${String(e.stderr ?? e.message ?? e).split('\n')[0]})`); }

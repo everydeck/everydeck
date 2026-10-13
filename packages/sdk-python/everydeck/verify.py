@@ -1,13 +1,13 @@
-"""B30 Schnitt E – Prüfhilfe für Brücken: everydeck signiert jeden Aufruf an eine Lese- oder App-Brücke (wie Stripe).
+"""Verification helper for bridges: everydeck signs every call to a read or app bridge (like Stripe).
 
-Kopfzeilen: X-Everydeck-Timestamp (Unix-Sekunden), X-Everydeck-Request-Id (UUID), X-Everydeck-Signature (v1=<hex>[,v1=<hex>] – eine je gültigem Schlüssel).
-Signatur = HMAC-SHA256(Schlüssel, "EVERYDECK-V1\\n" + METHOD + "\\n" + Pfad ab /everydeck/ mit Query + "\\n" + Zeitstempel + "\\n" + request_id + "\\n" + SHA-256(Körper) hex).
-Die App lehnt ab, wenn der Zeitstempel mehr als 5 Minuten abweicht oder die request_id in dieser Zeit schon gesehen wurde.
-B31 Abnahme (A8): Die request_id der Signatur (X-Everydeck-Request-Id) ist je HTTP-Aufruf neu, auch wenn everydeck denselben Auftrag wiederholt – der
-Replay-Schutz trifft nur eine wörtlich wiederholte Anfrage. Die Idempotenz einer Aktion trägt `request_id` im Körper und `Idempotency-Key`;
-eine Wiederholung beantwortet die Tür mit dem festgehaltenen Ergebnis, nie mit 401.
+Headers: X-Everydeck-Timestamp (Unix seconds), X-Everydeck-Request-Id (UUID), X-Everydeck-Signature (v1=<hex>[,v1=<hex>], one per valid key).
+Signature = HMAC-SHA256(key, "EVERYDECK-V1\\n" + METHOD + "\\n" + path from /everydeck/ with query + "\\n" + timestamp + "\\n" + request_id + "\\n" + SHA-256(body) hex).
+The app rejects the call when the timestamp is off by more than 5 minutes or the request_id was already seen within that window.
+The signature's request_id (X-Everydeck-Request-Id) is new for every HTTP call, even when everydeck retries the same job; replay
+protection only catches a literally repeated request. Idempotency of an action is carried by `request_id` in the body and `Idempotency-Key`;
+the bridge route answers a retry with the recorded result, never with 401.
 
-Eine Zeile in der Tür der App (FastAPI):
+One line in the app's bridge route (FastAPI):
     v = verify_everydeck_request(request.method, str(request.url), request.headers, await request.body(), keys=[os.environ["EVERYDECK_BRIDGE_KEY"]])
     if not v.ok: raise HTTPException(401)
 """
@@ -42,7 +42,7 @@ def signature_for(key: str, canonical: str) -> str:
 
 
 class MemorySeen:
-    """Replay-Speicher je Prozess: request_id → Zeitstempel, aufgeräumt nach dem Fenster (mehrere Instanzen: eigene Prüfung, z. B. Redis/Postgres)."""
+    """Per-process replay store: request_id → timestamp, pruned after the window (several instances: use your own check, e.g. Redis/Postgres)."""
 
     def __init__(self, window_seconds: int = SIGNATURE_WINDOW_SECONDS, now: Callable[[], float] = time.time) -> None:
         self._m: dict[str, float] = {}; self._lock = threading.Lock(); self.window = window_seconds; self.now = now
@@ -109,7 +109,7 @@ def verify_everydeck_request(method: str, url_or_path: str, headers: Mapping[str
 
 
 def sign_everydeck_request(keys: Iterable[str], method: str, url_or_path: str, body: bytes | str | None = None, request_id: str | None = None, now: float | None = None) -> dict[str, str]:
-    """Gegenstück für Tests und Prüfskripte der App: Kopfzeilen, wie everydeck sie schickt (erster Schlüssel aktuell, weitere vorige). Im Produkt signiert nur everydeck."""
+    """Counterpart for the app's tests and check scripts: headers as everydeck sends them (first key current, further keys previous). In production only everydeck signs."""
     import uuid
     timestamp = int((time.time() if now is None else now))
     rid = request_id or str(uuid.uuid4())

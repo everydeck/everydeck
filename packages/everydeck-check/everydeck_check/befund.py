@@ -1,12 +1,12 @@
-"""B29 – Befund (1.12-r0): die exakte technische Analyse einer App, Fakten mit Fundstelle, nichts Beurteiltes.
+"""Befund (1.12-r0): the exact technical analysis of an app, facts with places, nothing judged.
 
-everydeck-check prüft hier maschinell, was everydeck nicht prüfen kann, weil everydeck das Repo nicht sieht:
-  1. Form (JSON-Schema) und Verweise (Tabellen, Spalten, Funktionen, Komponenten, Abläufe, Checkliste genau einmal je Baustein).
-  2. Jede Fundstelle: die Datei existiert, die Zeile existiert, und das Genannte (Symbol, Spalte, Statuswert, Muster, Paket) steht dort
-     (in der Zeile selbst oder höchstens drei Zeilen daneben). Ohne Beleg oder mit falschem Beleg wird der Befund abgelehnt – mit der Stelle.
-  3. Vollständigkeit gegen das Repo: jede im Repo erkannte Tabelle/Collection, jede erkannte Route und jedes erkannte Anbieterpaket muss im
-     Befund stehen (tables[], screens[]/api_routes[], components[]) – sonst Ablehnung mit dem Namen und der Fundstelle. Nichts fällt still weg.
-Keine Wortlisten über die App: was eine Tabelle bedeutet, entscheidet everydeck aus den Belegen (Anzeigestelle, Setzstelle, Fremdschlüssel).
+everydeck-check checks here mechanically what everydeck cannot check, because everydeck does not see the repo:
+  1. Shape (JSON schema) and references (tables, columns, functions, components, flows, checklist exactly once per block).
+  2. Every place: the file exists, the line exists, and what is named (symbol, column, status value, pattern, package) is there
+     (in the line itself or at most three lines next to it). Without evidence or with wrong evidence the Befund is rejected, with the place.
+  3. Completeness against the repo: every table/collection, every route and every provider package detected in the repo must be in the
+     Befund (tables[], screens[]/api_routes[], components[]); otherwise rejection with the name and the place. Nothing silently drops out.
+No word lists about the app: what a table means, everydeck decides from the evidence (display location, place that sets it, foreign key).
 """
 from __future__ import annotations
 
@@ -51,19 +51,19 @@ def schema_errors(b: dict[str, Any]) -> list[str]:
 
 
 def reference_errors(b: dict[str, Any]) -> list[str]:
-    """Spiegel von befundReferenceErrors (packages/contracts): dieselben Meldungen, lokal vor dem Einreichen."""
+    """Mirror of befundReferenceErrors in the contracts: the same messages, locally before submitting."""
     errs: list[str] = []
     tables = {t["name"]: t for t in b.get("tables", [])}
     funcs = b.get("functions", []) or []
 
     def fn_ref(ref: str, what: str) -> None:
-        # B31 Abnahme (N2): eine Funktion ist Name + Datei – Verweis über den Namen, bei Mehrdeutigkeit <path>#<name>
+        # a function is name + file; referenced by name, if ambiguous by <path>#<name>
         if "#" in ref:
             if not any(f"{f['evidence']['path']}#{f['name']}" == ref for f in funcs): errs.append(f"{what}: function {ref} is not in functions")
             return
         n = sum(1 for f in funcs if f["name"] == ref)
         if n == 0: errs.append(f"{what}: function {ref} is not in functions")
-        elif n > 1: errs.append(f"{what}: function {ref} is ambiguous – name it as <path>#{ref}")
+        elif n > 1: errs.append(f"{what}: function {ref} is ambiguous; name it as <path>#{ref}")
     comps = {c["id"] for c in b.get("components", []) or []}
     flows = {f["id"] for f in b.get("flows", [])}
 
@@ -141,11 +141,11 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         for f in e.get("functions", []) or []:
             fn_ref(f, f"checklist {e['block']}")
     for blk in BLOCKS:
-        if blk not in seen: errs.append(f"checklist: block {blk} is missing – answer every block with present true (evidence) or false")
-    # B31: everydeck_tables – Tabellen, die die everydeck-Installation angelegt hat; jede muss im Befund stehen
+        if blk not in seen: errs.append(f"checklist: block {blk} is missing; answer every block with present true (evidence) or false")
+    # everydeck_tables: tables the everydeck installation created; each must be in the Befund
     for i, y in enumerate(b.get("everydeck_tables") or []):
         if y["table"] not in {t["name"] for t in b.get("tables", [])}: errs.append(f"everydeck_tables[{i}] {y['table']}: table {y['table']} is not in the Befund")
-    # B37: eine beschriebene Seite nennt nur Tabellen und Abläufe des Befunds (Spiegel von befundReferenceErrors)
+    # a described screen names only tables and flows of the Befund (mirror of befundReferenceErrors)
     for i, sc in enumerate(b.get("screens") or []):
         d = sc.get("described")
         if not d: continue
@@ -154,7 +154,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
             if t not in tables: errs.append(f"{at}: table {t} is not in the Befund")
         for f in d.get("flows", []):
             if f not in flows: errs.append(f"{at}: flow {f} is not in flows")
-    # B29 vierte Runde: works_with – womit die Nutzer arbeiten; jede Tabelle einmal, part_of eine andere Tabelle des Befunds
+    # works_with: what the users work with; each table once, part_of another table of the Befund
     ww = b.get("works_with") or []
     for i, w in enumerate(ww):
         at = f"works_with[{i}] {w['table']}"
@@ -167,11 +167,11 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
     return errs
 
 
-# ── Fundstellen: Datei, Zeile, Symbol ──
+# ── places: file, line, symbol ──
 class _Files:
     def __init__(self, repo: Path) -> None:
         self.repo = repo; self.cache: dict[str, list[str] | None] = {}
-        self.functions: dict[str, list[dict[str, Any]] | str] = {}   # B32 (A4): Funktionen je Datei aus dem Syntaxbaum
+        self.functions: dict[str, list[dict[str, Any]] | str] = {}   # functions per file from the syntax tree
 
     def lines(self, rel: str) -> list[str] | None:
         if rel not in self.cache:
@@ -183,7 +183,7 @@ class _Files:
         return self.cache[rel]
 
 
-# B31 Schnitt D: Fundstelle „database“ (das Schema aus der Datenbank) – geprüft nur mit `--db`, gegen den Katalog
+# place "database" (the schema from the database): checked only with `--db`, against the catalog
 DB_TABLES: set[str] | None = None
 
 
@@ -193,13 +193,13 @@ def _roles(req: dict[str, Any]) -> list[str]:
 
 
 def _check_evidence(files: _Files, ev: dict[str, Any], at: str, expect: list[str], errs: list[str]) -> None:
-    """Datei da, Zeile da, und mindestens eines der erwarteten Wörter steht in der Zeile ± LINE_SLACK."""
+    """File there, line there, and at least one of the expected words is in the line ± LINE_SLACK."""
     rel = ev["path"]; ln = int(ev["line"])
     if rel == "database":
-        if DB_TABLES is None: errs.append(f"{at}: evidence from the database – run everydeck-check validate with --db <url> (the read role is enough) to confirm it"); return
+        if DB_TABLES is None: errs.append(f"{at}: evidence from the database; run everydeck-check validate with --db <url> (the read role is enough) to confirm it"); return
         sym = str(ev.get("symbol") or "")
         name = sym.split(" ")[-1]; tbl = name.split(".")[0] if name.count(".") == 1 and not name.startswith("public.") and name.split(".")[0] not in {t.split(".")[0] for t in DB_TABLES} else name
-        if sym.startswith("function ") or sym.startswith("trigger "): return   # Funktionen und Trigger: im Katalog gelesen, die Tabelle prüft der Vergleich
+        if sym.startswith("function ") or sym.startswith("trigger "): return   # functions and triggers: read in the catalog, the comparison checks the table
         if not any(t == name or t.endswith("." + name) or t == "public." + name or t.split(".")[-1] == tbl.split(".")[-1] for t in DB_TABLES): errs.append(f"{at}: {sym} is not in the database")
         return
     lines = files.lines(rel)
@@ -210,11 +210,11 @@ def _check_evidence(files: _Files, ev: dict[str, Any], at: str, expect: list[str
     lo = max(0, ln - 1 - LINE_SLACK); hi = min(len(lines), ln + LINE_SLACK)
     window = "\n".join(lines[lo:hi])
     missing = [w for w in words if w not in window]
-    if ev.get("symbol"):   # das Symbol ist der Anker: in der Zeile ± 3, oder die Zeile liegt im Körper genau dieser Funktion (nächste Definition darüber)
+    if ev.get("symbol"):   # the symbol is the anchor: in the line ± 3, or the line is inside the body of exactly this function (next definition above)
         if ev["symbol"] not in missing: return
         chain = _enclosing_chain(files, rel, ln)
-        if isinstance(chain, str): errs.append(f"{at}: {rel}:{ln} – cannot read the functions of {rel}: {chain}"); return
-        # B32 (A4): die Zeile liegt im Körper der genannten Funktion (oder einer, die sie umschließt) – Name oder Klasse.Methode
+        if isinstance(chain, str): errs.append(f"{at}: {rel}:{ln}: cannot read the functions of {rel}: {chain}"); return
+        # the line is inside the body of the named function (or one that encloses it): name or Class.method
         if any(ev["symbol"] in (f["name"], f["qualified"]) for f in chain): return
         owner = chain[-1]["qualified"] if chain else None
         errs.append(f"{at}: {rel}:{ln} is not inside {ev['symbol']} ({'inside ' + owner if owner else 'no definition around it'}; ±{LINE_SLACK} lines checked too)")
@@ -227,7 +227,7 @@ JS_FILE = re.compile(r"\.(?:[cm]?[jt]sx?|vue|svelte)$")
 
 
 def _py_functions(text: str) -> list[dict[str, Any]] | str:
-    """B32 (A4): Funktionen und Klassen einer Python-Datei mit Zeilenbereich (Dekoratoren gehören dazu), aus `ast`."""
+    """Functions and classes of a Python file with their line range (decorators included), from `ast`."""
     import ast
     try: tree = ast.parse(text)
     except SyntaxError as e: return f"syntax error at line {e.lineno}"
@@ -247,8 +247,8 @@ def _py_functions(text: str) -> list[dict[str, Any]] | str:
 
 
 def _enclosing_chain(files: "_Files", rel: str, ln: int) -> list[dict[str, Any]] | str:
-    """Die Funktionen, deren Zeilenbereich die Zeile enthält, von außen nach innen – aus dem Syntaxbaum (Python `ast`, TS/JS über die
-    TypeScript-Compiler-API der App, packages/domain source-functions.ts). Andere Dateien (SQL, …): die nächste Definition darüber."""
+    """The functions whose line range contains the line, from outside to inside, from the syntax tree (Python `ast`, TS/JS through the
+    app's TypeScript compiler API). Other files (SQL, …): the next definition above."""
     if rel not in files.functions:
         if PY_FILE.search(rel): files.functions[rel] = _py_functions("\n".join(files.lines(rel) or []))
         elif JS_FILE.search(rel):
@@ -268,7 +268,7 @@ DEF_LINE = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:functio
 
 
 def _enclosing_definition(lines: list[str], ln: int, span: int = 600) -> str | None:
-    """Nur noch für Dateien ohne Parser (SQL u. a.): Name der nächsten Funktions-/Klassendefinition über der Zeile."""
+    """Only for files without a parser (SQL and others): name of the next function/class definition above the line."""
     for k in range(ln - 1, max(-1, ln - 1 - span), -1):
         m = DEF_LINE.match(lines[k])
         if m:
@@ -280,7 +280,7 @@ PATH_LITERAL = re.compile(r"""(['"`])((?:(?!\1).)*?)\1""")
 
 
 def _client_path(raw: str) -> tuple[str, bool] | None:
-    """→ (Pfadmuster, hat eine Basis): ${…} wird :p; eine führende Basis (${API_BASE}, http://host) fällt weg und erlaubt, dass die Route länger ist als der Pfad."""
+    """→ (path pattern, has a base): ${…} becomes :p; a leading base (${API_BASE}, http://host) is dropped and allows the route to be longer than the path."""
     s = re.sub(r"\$\{[^}]*\}", ":p", raw)
     base = bool(re.match(r"^:p/|^https?://", s))
     s = re.sub(r"^:p(?=/)", "", s); s = re.sub(r"^https?://[^/]*", "", s); s = re.sub(r"[?#].*$", "", s); s = re.sub(r"([^/]):p", r"\1", s)   # `/guests${qs}` → /guests
@@ -290,7 +290,7 @@ def _client_path(raw: str) -> tuple[str, bool] | None:
 def _route_matches(route: str, client: str, base: bool = False) -> bool:
     rs = [x for x in route.split("/") if x]; cs = [x for x in client.split("/") if x]
     if not rs or (len(rs) > len(cs) and not base): return False
-    off_c = max(0, len(cs) - len(rs)); off_r = max(0, len(rs) - len(cs))   # am Ende ausgerichtet: Proxy-Präfix im Client oder Präfix in der Basis
+    off_c = max(0, len(cs) - len(rs)); off_r = max(0, len(rs) - len(cs))   # aligned at the end: proxy prefix in the client or prefix in the base
     literal = 0
     for i in range(min(len(rs), len(cs))):
         r = rs[off_r + i]; c = cs[off_c + i]
@@ -305,7 +305,7 @@ def _route_in_window(lines: list[str], ln: int, route: str) -> bool:
     from .reads import path_strings
     lo = max(0, ln - 1 - LINE_SLACK); hi = min(len(lines), ln + LINE_SLACK)
     window = "\n".join(lines[lo:hi])
-    for raw in path_strings(window):   # Zeichenketten, Vorlagen (auch verschachtelt, ${…} → :p) und Verkettungen
+    for raw in path_strings(window):   # strings, templates (also nested, ${…} → :p) and concatenations
         p = _client_path(raw)
         if p and _route_matches(route, p[0], p[1]): return True
     return False
@@ -337,20 +337,20 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
             if v: _check_evidence(files, v["evidence"], f"identity.fields.{k}", [v["column"]], errs)
         if ident.get("suspend"): _check_evidence(files, ident["suspend"]["checked"], "identity.suspend.checked", [ident["suspend"]["column"]], errs)
         for j, m in enumerate(ident.get("memberships", []) or []): _check_evidence(files, m["evidence"], f"identity.memberships[{j}]", [m["table"]], errs)
-    # B29 vierte Runde: die Fundstelle der Beschreibung „womit die Nutzer arbeiten“ liegt in der Oberfläche und nennt die Tabelle – oder sie fällt mit einer
-    # Anzeigestelle der Tabelle zusammen (z. B. ein Routenaufruf, dessen Handler die Tabelle liefert, oder ein sichtbares Element mit Beschriftung)
+    # the place of the description "what the users work with" is in the UI and names the table, or it coincides with a
+    # display location of the table (e.g. a route call whose handler returns the table, or a visible element with a label)
     tables_by_name = {t["name"]: t for t in b.get("tables", [])}
     for i, w in enumerate(b.get("works_with") or []):
         at = f"works_with[{i}] {w['table']}"; ev = w["evidence"]; t = tables_by_name.get(w["table"])
         shown_near = t is not None and any(sh["path"] == ev["path"] and abs(int(sh["line"]) - int(ev["line"])) <= LINE_SLACK for sh in list(t.get("shown") or []) + [sh for c in t["columns"] for sh in (c.get("shown") or [])])
         probe: list[str] = []
         _check_evidence(files, ev, at, [w["table"]], probe)
-        if probe and not (shown_near and files.lines(ev["path"]) is not None and int(ev["line"]) <= len(files.lines(ev["path"]) or [])): errs.append(probe[0] + " – name the place in the UI (page or component) that shows the table, or a place that carries a display location of it")
-        elif not probe and _is_backend(ev["path"]): errs.append(f"{at}: {ev['path']} is no UI file (backend folder) – works_with names the page or component where the users see, create or edit it")
+        if probe and not (shown_near and files.lines(ev["path"]) is not None and int(ev["line"]) <= len(files.lines(ev["path"]) or [])): errs.append(probe[0] + "; name the place in the UI (page or component) that shows the table, or a place that carries a display location of it")
+        elif not probe and _is_backend(ev["path"]): errs.append(f"{at}: {ev['path']} is no UI file (backend folder); works_with names the page or component where the users see, create or edit it")
     for i, y in enumerate(b.get("everydeck_tables") or []): _check_evidence(files, y["evidence"], f"everydeck_tables[{i}] {y['table']}", [y["table"]], errs)
     for i, pc in enumerate((b.get("app") or {}).get("production_in_code") or []): _check_evidence(files, pc["evidence"], f"app.production_in_code[{i}] {pc['kind']}", [], errs)
     ic = (b.get("app") or {}).get("icon")
-    if ic:   # B38: das Icon, das die App ausliefert – Datei da, Inhalt = Prüfsumme, die Fundstelle nennt die Datei (oder ist sie selbst)
+    if ic:   # the icon the app ships: file there, content = checksum, the place names the file (or is the file itself)
         import hashlib, base64
         f = repo / ic["file"]
         if not f.is_file(): errs.append(f"app.icon: file {ic['file']} does not exist")
@@ -365,18 +365,18 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         for j, c in enumerate(t["columns"]):
             for k, sh in enumerate(c.get("shown", []) or []): _check_evidence(files, sh, f"{at}.columns[{j}] {c['name']}.shown[{k}]", [c["name"]] + ([sh["label"]] if sh.get("label") else []), errs)
             for k, ev in enumerate(c.get("enum", []) or []): _check_evidence(files, ev["evidence"], f"{at}.columns[{j}] {c['name']}.enum[{k}]", [ev["value"]], errs)
-            for k, vl in enumerate(c.get("value_labels", []) or []): _check_evidence(files, vl["evidence"], f"{at}.columns[{j}] {c['name']}.value_labels[{k}] {vl['value']}", [vl["label"]], errs)   # B35: der Text steht an der Fundstelle (Code oder Übersetzungsdatei)
+            for k, vl in enumerate(c.get("value_labels", []) or []): _check_evidence(files, vl["evidence"], f"{at}.columns[{j}] {c['name']}.value_labels[{k}] {vl['value']}", [vl["label"]], errs)   # the text is at the place (code or translation file)
             if c.get("computed"): _check_evidence(files, c["computed"], f"{at}.columns[{j}] {c['name']}.computed", [c["name"]], errs)
-            if c.get("updated"): _check_evidence(files, c["updated"], f"{at}.columns[{j}] {c['name']}.updated", [c["name"], t["name"]], errs)   # Trigger nennt die Tabelle, onupdate die Spalte
+            if c.get("updated"): _check_evidence(files, c["updated"], f"{at}.columns[{j}] {c['name']}.updated", [c["name"], t["name"]], errs)   # a trigger names the table, onupdate the column
             if c.get("external_id"): _check_evidence(files, c["external_id"]["evidence"], f"{at}.columns[{j}] {c['name']}.external_id", [c["name"]], errs)
-            for k, ev in enumerate(c.get("written", []) or []): _check_evidence(files, ev, f"{at}.columns[{j}] {c['name']}.written[{k}]", [c["name"]], errs)   # B31 E1: die Setzstelle nennt die Spalte
-            if c.get("contact"): _check_evidence(files, c["contact"]["evidence"], f"{at}.columns[{j}] {c['name']}.contact", [c["name"]], errs)   # B46: die Stelle, an der die App den Wert als Kontakt behandelt, nennt die Spalte (oder ihr Symbol)
+            for k, ev in enumerate(c.get("written", []) or []): _check_evidence(files, ev, f"{at}.columns[{j}] {c['name']}.written[{k}]", [c["name"]], errs)   # the place that sets it names the column
+            if c.get("contact"): _check_evidence(files, c["contact"]["evidence"], f"{at}.columns[{j}] {c['name']}.contact", [c["name"]], errs)   # the place where the app treats the value as a contact names the column (or its symbol)
         for j, s in enumerate(t.get("statuses", []) or []):
             _check_evidence(files, s["evidence"], f"{at}.statuses[{j}] {s['value']}", [s["value"]], errs)
             for k, sh in enumerate(s.get("shown", []) or []): _check_evidence(files, sh, f"{at}.statuses[{j}] {s['value']}.shown[{k}]", [s["value"]] + ([sh["label"]] if sh.get("label") else []), errs)
             if s.get("public"): _check_evidence(files, s["public"], f"{at}.statuses[{j}] {s['value']}.public", [s["value"]], errs)
         for k, sh in enumerate(t.get("shown", []) or []):
-            if sh.get("element") == "data" and sh.get("symbol", "").startswith("/"):   # Routenmuster: ein Pfadliteral in der Zeile ± 3 muss darauf passen (auch `${API_BASE}/persons/${id}`)
+            if sh.get("element") == "data" and sh.get("symbol", "").startswith("/"):   # route pattern: a path literal in the line ± 3 must match it (also `${API_BASE}/persons/${id}`)
                 lines = files.lines(sh["path"])
                 if lines is None: errs.append(f"{at}.shown[{k}]: file {sh['path']} does not exist")
                 elif int(sh["line"]) > len(lines): errs.append(f"{at}.shown[{k}]: {sh['path']} has {len(lines)} lines, evidence names line {sh['line']}")
@@ -391,7 +391,7 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
     for i, f in enumerate(b.get("functions", [])):
         at = f"functions[{i}] {f['name']}"
         _check_evidence(files, f["evidence"], at, [f["name"]], errs)
-        if f.get("requires"):   # B31 Abnahme (A6): jede genannte Rolle steht an der Fundstelle
+        if f.get("requires"):   # every named role is at the place
             for role in (_roles(f["requires"]) or [None]): _check_evidence(files, f["requires"]["evidence"], at + ".requires", [role] if role else [], errs)
         for j, ch in enumerate(f.get("changes", []) or []):
             if ch.get("evidence"): _check_evidence(files, ch["evidence"], f"{at}.changes[{j}]", [x for x in (ch.get("to"), ch.get("column"), ch["table"]) if x], errs)
@@ -415,13 +415,13 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
     if pay:
         _check_evidence(files, pay["evidence"], "payments", [], errs)
         for i, e in enumerate(pay.get("events", []) or []): _check_evidence(files, e["evidence"], f"payments.events[{i}] {e['event']}", [e["event"]], errs)
-    for i, a in enumerate(b.get("adapters", []) or []): _check_evidence(files, a["evidence"], f"adapters[{i}] {a['kind']}", [] if a["kind"] == "read_bridge" else [a["package"]], errs)   # eine eigene Lese-Bridge hat kein Paket
+    for i, a in enumerate(b.get("adapters", []) or []): _check_evidence(files, a["evidence"], f"adapters[{i}] {a['kind']}", [] if a["kind"] == "read_bridge" else [a["package"]], errs)   # an own read bridge has no package
     for e in b.get("checklist", []):
         for j, ev in enumerate(e.get("evidence", []) or []): _check_evidence(files, ev, f"checklist {e['block']}.evidence[{j}]", [], errs)
     return errs
 
 
-# ── Vollständigkeit gegen das Repo ──
+# ── completeness against the repo ──
 def _files_of(repo: Path, suffixes: set[str]):
     for p in sorted(repo.rglob("*")):
         rel = p.relative_to(repo)
@@ -441,16 +441,16 @@ def _upgrade_body(text: str) -> str:
 
 
 def detect_tables(repo: Path) -> dict[str, str]:
-    """Alle Tabellen-/Collection-Namen mit erster Fundstelle (nicht nur je Baustein die erste wie detect_schema)."""
+    """All table/collection names with their first place (not only the first per block like detect_schema)."""
     found: dict[str, str] = {}
     for rel, text in _files_of(repo, {".sql", ".prisma", ".rules", ".py", ".ts", ".tsx", ".js", ".mjs", ".cjs"}):
         def add(name: str, kind: str) -> None:
             if name not in found: found[name] = f"{kind} {name} in {rel}"
         suf = rel.suffix
-        if suf == ".sql":   # Endzustand des Schemas: Migrationen in Dateireihenfolge, DROP TABLE entfernt (B29 Abnahme)
+        if suf == ".sql":   # final state of the schema: migrations in file order, DROP TABLE removes
             for n in SQL_CREATE.findall(text): add(n, "table")
             for n in SQL_DROP.findall(text): found.pop(n, None)
-            for old, new in SQL_RENAME.findall(text):   # B36: umbenannt – der neue Name steht in dieser Datei
+            for old, new in SQL_RENAME.findall(text):   # renamed: the new name is in this file
                 if found.pop(old, None) is not None: add(new, "table")
         elif suf == ".prisma":
             for a, c in PRISMA_MODEL.findall(text): add(a or c, "model")
@@ -459,10 +459,10 @@ def detect_tables(repo: Path) -> dict[str, str]:
                 if n not in ("databases", "documents"): add(n, "collection")
         elif suf == ".py":
             for n in SQLALCHEMY_TABLE.findall(text): add(n, "table")
-            # Alembic: op.create_table("x") / op.drop_table("x") in der Reihenfolge der Datei – wie das Gerüst (B29 vierte Runde; vorher fehlten solche Tabellen in der Vollständigkeitsprüfung)
-            for m in ALEMBIC_OP.finditer(_upgrade_body(text)):   # nur upgrade(); downgrade() nimmt alles zurück
+            # Alembic: op.create_table("x") / op.drop_table("x") in file order, like the skeleton
+            for m in ALEMBIC_OP.finditer(_upgrade_body(text)):   # only upgrade(); downgrade() reverts everything
                 if m.group(1) == "create_table": add(m.group(2), "table")
-                else: found.pop(m.group(2) or m.group(4), None)   # op.drop_table("x") oder op.execute("DROP TABLE x")
+                else: found.pop(m.group(2) or m.group(4), None)   # op.drop_table("x") or op.execute("DROP TABLE x")
         else:
             for n in DRIZZLE_TABLE.findall(text): add(n, "table")
             if "Tables:" in text:
@@ -472,7 +472,7 @@ def detect_tables(repo: Path) -> dict[str, str]:
 
 
 def detect_routes(repo: Path) -> dict[str, str]:
-    """API-Pfade der App: Express/Fastify/Hono-Aufrufe, FastAPI-Dekoratoren, Next.js app/api/**/route.ts."""
+    """API paths of the app: Express/Fastify/Hono calls, FastAPI decorators, Next.js app/api/**/route.ts."""
     found: dict[str, str] = {}
     for rel, text in _files_of(repo, {".ts", ".tsx", ".js", ".mjs", ".cjs", ".py"}):
         parts = rel.parts
@@ -480,7 +480,7 @@ def detect_routes(repo: Path) -> dict[str, str]:
             for m, path in ROUTE_PY.findall(text): found.setdefault(_pattern(path), f"{m.upper()} {path} in {rel}")
         else:
             for m, path in ROUTE_JS.findall(text):
-                if "${" in path: continue   # Vorlagenstrings sind Client-Aufrufe, keine Routen
+                if "${" in path: continue   # template strings are client calls, not routes
                 found.setdefault(_pattern(path), f"{m.upper()} {path} in {rel}")
             if "api" in parts and rel.name in ("route.ts", "route.js"):
                 i = parts.index("api"); seg = "/" + "/".join(parts[i:-1])
@@ -490,12 +490,12 @@ def detect_routes(repo: Path) -> dict[str, str]:
 
 def _pattern(path: str) -> str:
     p = re.sub(r"\[\.\.\.[^\]]+\]", "*", path); p = re.sub(r"\[([^\]]+)\]", r":\1", p); p = re.sub(r"\{(\w+):path\}", "*", p); p = re.sub(r"\{(\w+)(?::[^}]*)?\}", r":\1", p)
-    p = re.sub(r"\((?:[^)]*)\)/?", "", p)   # Route-Gruppen
+    p = re.sub(r"\((?:[^)]*)\)/?", "", p)   # route groups
     return p.rstrip("/") or "/"
 
 
 def detect_providers(repo: Path) -> dict[str, str]:
-    """Anbieterpakete aus package.json (auch Unterordner) und requirements/pyproject – die everydeck-check kennt (NPM/PY-Tabellen)."""
+    """Provider packages from package.json (also subfolders) and requirements/pyproject that everydeck-check knows (NPM/PY tables)."""
     found: dict[str, str] = {}
     for rel, text in _files_of(repo, {".json", ".txt", ".toml"}):
         if rel.name == "package.json":
@@ -520,11 +520,11 @@ def _known_npm(dep: str) -> bool:
 
 
 BACKEND_DIR = re.compile(r"(^|/)(backend|server|api|functions|supabase|migrations|scripts|prisma|db|database|test|tests|__tests__|e2e|cypress)(/|$)")
-FRONTEND_READ = [re.compile(r"""\.from\(\s*['"`]([A-Za-z_]\w*)['"`]"""), re.compile(r"""\bcollection\(\s*(?:[A-Za-z_]\w*\s*,\s*)?['"]([A-Za-z_]\w*)['"]"""), re.compile(r"""\b(?:prisma|db)\.([a-z]\w*)\.(?:find\w*|count|aggregate|groupBy)\(""")]   # .from auch in der Cast-Form .from("x" as never)
+FRONTEND_READ = [re.compile(r"""\.from\(\s*['"`]([A-Za-z_]\w*)['"`]"""), re.compile(r"""\bcollection\(\s*(?:[A-Za-z_]\w*\s*,\s*)?['"]([A-Za-z_]\w*)['"]"""), re.compile(r"""\b(?:prisma|db)\.([a-z]\w*)\.(?:find\w*|count|aggregate|groupBy)\(""")]   # .from also in the cast form .from("x" as never)
 HANDLER_READ = FRONTEND_READ + [re.compile(r"""\.table\(\s*['"]([A-Za-z_]\w*)['"]\s*\)"""), re.compile(r"""\bFROM\s+(?:public\.)?"?([A-Za-z_]\w*)"?""", re.I)]
 WRITE_CHAIN = re.compile(r"\.(insert|update|delete|upsert)\(")
 ROUTE_ANY = re.compile(r"""(?:@(?:app|router|api|[a-z_]+_router)|\b(?:app|router|server|fastify|api))\.(get|post|put|patch|delete)\(\s*['"`](/[^'"`\s]*)['"`]""")
-STRING_PATH = re.compile(r"""['"`]((?:https?://[^'"`\s]+|\$\{[^}`]*\})?/[A-Za-z0-9_\-/:${}.]+)['"`]""")   # B32: auch `${API}/api/x` (Basis als Platzhalter, wie im Gerüst)
+STRING_PATH = re.compile(r"""['"`]((?:https?://[^'"`\s]+|\$\{[^}`]*\})?/[A-Za-z0-9_\-/:${}.]+)['"`]""")   # also `${API}/api/x` (base as a placeholder, as in the skeleton)
 
 
 def _is_frontend(rel: Path) -> bool:
@@ -537,7 +537,7 @@ _REACH: dict[str, dict[str, Any]] = {}
 
 
 def app_reach(repo: Path) -> dict[str, Any]:
-    """B32 (O4): Erreichbarkeit vom Einstieg der App – dieselbe Regel wie das Befund-Gerüst (packages/domain reachability.ts, Regel reachable)."""
+    """Reachability from the entry of the app; the same rule as the Befund skeleton (rule reachable)."""
     key = str(repo.resolve())
     if key not in _REACH:
         from .rules import RulesUnavailable, run_rule
@@ -553,7 +553,7 @@ def _entries_of(reach: dict[str, Any]) -> str:
 
 
 def reachability_errors(b: dict[str, Any], repo: Path) -> list[str]:
-    """B32 (O4): eine Anzeigestelle oder Seite in einer Datei, die kein Einstieg der App erreicht, ist keine; unreachable[] muss stimmen."""
+    """A display location or screen in a file that no entry of the app reaches is none; unreachable[] must be correct."""
     reach = app_reach(repo)
     if reach.get("errors"): return [f"unreachable: everydeck rules: {e}" for e in reach["errors"]]
     reachable = set(reach.get("reachable", [])); entries = _entries_of(reach)
@@ -562,23 +562,23 @@ def reachability_errors(b: dict[str, Any], repo: Path) -> list[str]:
         p = repo / path
         return path not in reachable and p.suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte") and p.is_file() and is_frontend_source(path, p.read_text(encoding="utf-8", errors="replace"))
     errs: list[str] = []
-    what = "– it is no display location; leave it out (the generator lists the file in unreachable[])"
+    what = ": it is no display location; leave it out (the generator lists the file in unreachable[])"
     for i, t in enumerate(b.get("tables", [])):
         for k, sh in enumerate(t.get("shown") or []):
-            if unreachable(sh["path"]): errs.append(f"tables[{i}] {t['name']}.shown[{k}]: {sh['path']} is not reachable from the entry of the app (entries {entries}) {what}")
+            if unreachable(sh["path"]): errs.append(f"tables[{i}] {t['name']}.shown[{k}]: {sh['path']} is not reachable from the entry of the app (entries {entries}){what}")
         for j, c in enumerate(t.get("columns", [])):
             for k, sh in enumerate(c.get("shown") or []):
-                if unreachable(sh["path"]): errs.append(f"tables[{i}] {t['name']}.columns[{j}] {c['name']}.shown[{k}]: {sh['path']} is not reachable from the entry of the app (entries {entries}) {what}")
+                if unreachable(sh["path"]): errs.append(f"tables[{i}] {t['name']}.columns[{j}] {c['name']}.shown[{k}]: {sh['path']} is not reachable from the entry of the app (entries {entries}){what}")
     for i, s in enumerate(b.get("screens") or []):
-        if unreachable(s["evidence"]["path"]): errs.append(f"screens[{i}] {s['pattern']}: {s['evidence']['path']} is not reachable from the entry of the app (entries {entries}) – it is no screen; leave it out (the generator lists the file in unreachable[])")
+        if unreachable(s["evidence"]["path"]): errs.append(f"screens[{i}] {s['pattern']}: {s['evidence']['path']} is not reachable from the entry of the app (entries {entries}): it is no screen; leave it out (the generator lists the file in unreachable[])")
     for i, u in enumerate(b.get("unreachable") or []):
-        if u["path"] in reachable: errs.append(f"unreachable[{i}] {u['path']}: the entry of the app reaches this file (entries {entries}) – it is not unreachable")
+        if u["path"] in reachable: errs.append(f"unreachable[{i}] {u['path']}: the entry of the app reaches this file (entries {entries}); it is not unreachable")
     return errs
 
 
 def detect_frontend_reads(repo: Path, tables: set[str]) -> dict[str, str]:
-    """B29 Abnahme: jede Tabelle, die das Frontend liest, mit der ersten Fundstelle – direkt (supabase.from, Firestore, ORM) oder über eine API-Route,
-    deren Handler sie liest. Eine solche Tabelle braucht eine Anzeigestelle im Befund; sonst gilt sie fälschlich als technische Daten."""
+    """Every table the frontend reads, with its first place: directly (supabase.from, Firestore, ORM) or through an API route
+    whose handler reads it. Such a table needs a display location in the Befund; otherwise it wrongly counts as technical data."""
     lower = {t.lower(): t for t in tables}
     key = lambda n: lower.get(n.lower())
     route_tables: dict[str, set[str]] = {}
@@ -587,9 +587,9 @@ def detect_frontend_reads(repo: Path, tables: set[str]) -> dict[str, str]:
         if not (BACKEND_DIR.search(r) or r.endswith(("/route.ts", "/route.js"))) or re.search(r"\.(test|spec|d)\.[tj]sx?$", r): continue
         hits = list(ROUTE_ANY.finditer(text))
         for i, h in enumerate(hits):
-            if h.group(1).lower() != "get": continue   # nur Routen, die liefern (GET)
+            if h.group(1).lower() != "get": continue   # only routes that return data (GET)
             end = hits[i + 1].start() if i + 1 < len(hits) else len(text)
-            if rel.suffix == ".py":   # der Handler endet mit seinem def-Block: die nächste Zeile ohne Einrückung – auch ein weiteres def (B29 vierte Runde)
+            if rel.suffix == ".py":   # the handler ends with its def block: the next line without indentation, also another def
                 d = re.search(r"\n(?:async )?def ", text[h.start():end])
                 if d:
                     e2 = re.search(r"\n(?=\S)", text[h.start() + d.start() + 1:end])
@@ -602,13 +602,13 @@ def detect_frontend_reads(repo: Path, tables: set[str]) -> dict[str, str]:
     reach = app_reach(repo); reachable = set(reach.get("reachable", [])) if not reach.get("errors") else None
     for rel, text in _files_of(repo, {".tsx", ".jsx", ".vue", ".svelte", ".ts", ".js", ".mjs"}):
         if not _is_frontend(rel): continue
-        if reachable is not None and rel.as_posix() not in reachable: continue   # B32 (O4): kein Einstieg der App erreicht die Datei – dort liest die App nichts
+        if reachable is not None and rel.as_posix() not in reachable: continue   # no entry of the app reaches the file; the app reads nothing there
         lines = text.split("\n")
         at = lambda pos: f"{rel.as_posix()}:{text.count(chr(10), 0, pos) + 1}"
         for re_ in FRONTEND_READ:
             for m in re_.finditer(text):
                 t = key(m.group(1))
-                if t and t not in out and not WRITE_CHAIN.search(text[m.end():m.end() + 400].split(";")[0]): out[t] = at(m.start())   # .from('x').insert/update/delete/upsert ist kein Lesen
+                if t and t not in out and not WRITE_CHAIN.search(text[m.end():m.end() + 400].split(";")[0]): out[t] = at(m.start())   # .from('x').insert/update/delete/upsert is not a read
         for m in STRING_PATH.finditer(text):
             p = _pattern(re.sub(r"([^/]):p", r"\1", re.sub(r"\$\{[^}]*\}", ":p", re.sub(r"^https?://[^/]+", "", m.group(1)))))
             rp = next((x for x in patterns if x == p or p.endswith(x)), None)
@@ -623,13 +623,13 @@ def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
     errs: list[str] = []
     declared_tables = {t["name"] for t in b.get("tables", [])}
     for name, where in detect_tables(repo).items():
-        if name not in declared_tables: errs.append(f"tables[]: {where} is not in the Befund – add it with its columns, or it is lost silently")
-    # B29 Abnahme: liest das Frontend eine Tabelle, braucht sie eine Anzeigestelle (shown an Tabelle oder Spalte) – sonst Ablehnung
+        if name not in declared_tables: errs.append(f"tables[]: {where} is not in the Befund; add it with its columns, or it is lost silently")
+    # if the frontend reads a table, it needs a display location (shown on the table or a column); otherwise rejection
     shown = {t["name"] for t in b.get("tables", []) if t.get("shown") or any(c.get("shown") for c in t.get("columns", []))}
     for name, where in detect_frontend_reads(repo, declared_tables).items():
-        if name not in shown: errs.append(f"tables[] {name}: the frontend reads this table at {where} but the Befund has no display location (shown) for it – add the place, or it counts as technical data wrongly")
-    # B29 vierte Runde – Gegenprobe, unabhängig von der Erkennung des Gerüsts: jede Nennung einer Tabelle ohne Anzeigestelle in einer Zeichenkette
-    # des Frontends braucht einen belegten Grund (not_shown mit Datei und Zeile ± 3); sonst Ablehnung mit der Stelle
+        if name not in shown: errs.append(f"tables[] {name}: the frontend reads this table at {where} but the Befund has no display location (shown) for it; add the place, or it counts as technical data wrongly")
+    # cross-check, independent of the skeleton's detection: every mention of a table without a display location in a string
+    # of the frontend needs a documented reason (not_shown with file and line ± 3); otherwise rejection with the place
     not_shown = {t["name"]: t.get("not_shown") or [] for t in b.get("tables", [])}
     seen_open: set[tuple[str, str]] = set()
     for m in frontend_mentions(repo, declared_tables - shown):
@@ -637,11 +637,11 @@ def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
         key = (m["table"], f"{m['path']}:{m['line']}")
         if key in seen_open: continue
         seen_open.add(key)
-        errs.append(f"tables[] {m['table']}: the frontend names this table at {m['path']}:{m['line']} ({m['text'][:60]!r}) but the Befund has neither a display location (shown) nor a fact about the place (not_shown) for it – add the place with what it is (write, label, route of a write request, module no screen imports)")
-    errs += reachability_errors(b, repo)   # B32 (O4)
+        errs.append(f"tables[] {m['table']}: the frontend names this table at {m['path']}:{m['line']} ({m['text'][:60]!r}) but the Befund has neither a display location (shown) nor a fact about the place (not_shown) for it; add the place with what it is (write, label, route of a write request, module no screen imports)")
+    errs += reachability_errors(b, repo)
     errs += exposure_errors(repo)
     declared_routes = {r["pattern"].rstrip("/") or "/" for r in (b.get("api_routes") or [])} | {s["pattern"].rstrip("/") or "/" for s in (b.get("screens") or [])}
-    for pat, where in detect_routes(repo).items():   # ein Befund darf das volle Muster tragen (Router-Präfix + include_router-Präfix + Pfad), die Fundstelle hier ist nur der Pfad des Dekorators
+    for pat, where in detect_routes(repo).items():   # a Befund may carry the full pattern (router prefix + include_router prefix + path); the place here is only the decorator's path
         if pat not in declared_routes and not any(d.endswith(pat) and pat != "/" for d in declared_routes): errs.append(f"api_routes[]: {where} is not in the Befund (pattern {pat})")
     declared_pkgs = {c["package"].lower() for c in (b.get("components") or [])}
     for name, where in detect_providers(repo).items():
@@ -650,7 +650,7 @@ def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
 
 
 def exposure_errors(repo: Path) -> list[str]:
-    """B29 vierte Runde: das Leser-Schema everydeck_read darf nicht über die Supabase-API erreichbar sein (supabase/config.toml [api] schemas)."""
+    """The reader schema everydeck_read must not be reachable through the Supabase API (supabase/config.toml [api] schemas)."""
     errs: list[str] = []
     for cfg in sorted(repo.rglob("config.toml")):
         rel = cfg.relative_to(repo).as_posix()
@@ -662,12 +662,12 @@ def exposure_errors(repo: Path) -> list[str]:
         m = re.search(r"^\s*schemas\s*=\s*\[([^\]]*)\]", api.group(1), re.M)
         if m and re.search(r"""['"]everydeck_read['"]""", m.group(1)):
             ln = text[:api.start(1) + m.start()].count("\n") + 1
-            errs.append(f"{rel}:{ln}: schema everydeck_read is exposed through the Supabase API ([api] schemas) – remove it; everydeck reads everydeck_read only through the bridge as everydeck_reader, anon and authenticated must not reach it")
+            errs.append(f"{rel}:{ln}: schema everydeck_read is exposed through the Supabase API ([api] schemas); remove it; everydeck reads everydeck_read only through the bridge as everydeck_reader, anon and authenticated must not reach it")
     return errs
 
 
 def database_tables(url: str) -> set[str]:
-    """B31 Schnitt D: Tabellen der App laut Datenbank (schema.name), ohne die Schemata der Plattform – über psql oder psycopg (Leserolle genügt)."""
+    """Tables of the app according to the database (schema.name), without the platform schemas; through psql or psycopg (the read role is enough)."""
     import shutil, subprocess
     platform = ['information_schema', 'pg_catalog', 'pg_toast', 'auth', 'storage', 'realtime', '_realtime', 'extensions', 'graphql', 'graphql_public', 'pgbouncer', 'vault', 'net', 'supabase_functions', 'supabase_migrations', 'cron', 'pgsodium', 'pgsodium_masks', '_analytics', 'topology', 'tiger', 'tiger_data', 'pgtle', 'repack', 'everydeck_read']
     sql = "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p') AND NOT c.relispartition AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> ALL(ARRAY[" + ",".join(f"'{x}'" for x in platform) + "])"
@@ -683,16 +683,16 @@ def database_tables(url: str) -> set[str]:
 
 
 def database_errors(b: dict[str, Any], db: set[str]) -> list[str]:
-    """B31 Schnitt D: jede Tabelle der Datenbank steht im Befund (sonst fällt sie still weg); everydeck’s eigene Schemata zählen nicht."""
+    """Every table of the database is in the Befund (otherwise it drops out silently); everydeck's own schemas do not count."""
     declared = {(t.get("schema") or "public") + "." + t["name"] for t in b.get("tables", [])}
     everydeck = {"everydeck", "everydeck_outbox", "everydeck_bridge"}
-    return [f"tables[]: {t} is in the database but not in the Befund – add it with its columns (the generator reads it with --db)" for t in sorted(db) if t not in declared and t.split(".")[0] not in everydeck]
+    return [f"tables[]: {t} is in the database but not in the Befund; add it with its columns (the generator reads it with --db)" for t in sorted(db) if t not in declared and t.split(".")[0] not in everydeck]
 
 
-# ── B46b Punkt 2 (B46 Fund 2): Kopien von Kontaktdaten und Nachrichten. Schreibt eine SQL-Funktion der App (Trigger: NEW./OLD., lokale Variablen daraus;
-#    INSERT … SELECT aus der Tabelle selbst) einen als contact belegten Wert – auch gekürzt oder umgeformt – in eine andere Spalte, verlangt everydeck-check
-#    dort denselben Fakt. Endzustand der Migrationen in Dateireihenfolge (CREATE OR REPLACE: die letzte Fassung, DROP FUNCTION/TRIGGER entfernen). Dieselbe
-#    Regel wie das Gerüst (befund-skeleton.mjs), eigene Umsetzung.
+# ── Copies of contact data and messages. If an SQL function of the app (trigger: NEW./OLD., local variables from them;
+#    INSERT … SELECT from the table itself) writes a value documented as contact (also shortened or transformed) into another column, everydeck-check
+#    requires the same fact there. Final state of the migrations in file order (CREATE OR REPLACE: the last version, DROP FUNCTION/TRIGGER remove). The same
+#    rule as the skeleton (befund-skeleton.mjs), separate implementation.
 _FN_DEF = re.compile(r'create\s+(?:or\s+replace\s+)?function\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(', re.I)
 _FN_DROP = re.compile(r'drop\s+function\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?', re.I)
 _TRG_DEF = re.compile(r'create\s+(?:or\s+replace\s+)?trigger\s+"?(\w+)"?\s+(?:before|after|instead\s+of)\s+[\s\S]*?\bon\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?[\s\S]*?execute\s+(?:function|procedure)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?', re.I)
@@ -765,7 +765,7 @@ def contact_copy_errors(b: dict[str, Any], repo: Path) -> list[str]:
     tables = {t["name"]: t for t in b.get("tables", [])}
     kinds: dict[tuple[str, str], str] = {(t["name"], c["name"]): c["contact"]["kind"] for t in b.get("tables", []) for c in t.get("columns", []) if c.get("contact")}
     fns, trgs = _sql_functions(repo)
-    need: dict[tuple[str, str], tuple[str, str, str, int, str]] = {}   # Ziel → (Art, Quelle, Funktion, Zeile, Datei)
+    need: dict[tuple[str, str], tuple[str, str, str, int, str]] = {}   # target → (kind, source, function, line, file)
 
     def col_ok(tn: str, cn: str) -> bool:
         c = next((x for x in tables.get(tn, {}).get("columns", []) if x["name"] == cn), None)
@@ -775,7 +775,7 @@ def contact_copy_errors(b: dict[str, Any], repo: Path) -> list[str]:
         added = False
         for fd in fns.values():
             body = fd["body"]; line = lambda off: fd["src"][:fd["at"] + off].count("\n") + 1
-            refs: list[tuple[re.Pattern[str], str, str]] = []   # (Muster, Art, Quelle)
+            refs: list[tuple[re.Pattern[str], str, str]] = []   # (pattern, kind, source)
             src_tables = [g["table"] for g in trgs.values() if g["fn"] == fd["name"].lower()]
             for st in src_tables:
                 for (tn, cn), k in list(kinds.items()):
@@ -830,7 +830,7 @@ def contact_copy_errors(b: dict[str, Any], repo: Path) -> list[str]:
     for (tn, cn), (kind, src, fn, ln, rel) in sorted(need.items()):
         c = next(x for x in tables[tn]["columns"] if x["name"] == cn)
         if not c.get("contact"):
-            errs.append(f'tables[] {tn}.{cn}: function {fn} copies {src} ({kind}) into it at {rel}:{ln} – add columns[].contact {{ "kind": "{kind}", "evidence": {{ "path": "{rel}", "line": {ln} }} }} (npx everydeck-scaffold . --merge everydeck/everydeck-befund.json writes it); everydeck never reads it then')
+            errs.append(f'tables[] {tn}.{cn}: function {fn} copies {src} ({kind}) into it at {rel}:{ln}; add columns[].contact {{ "kind": "{kind}", "evidence": {{ "path": "{rel}", "line": {ln} }} }} (npx everydeck-scaffold . --merge everydeck/everydeck-befund.json writes it); everydeck never reads it then')
     return errs
 
 
@@ -839,7 +839,7 @@ def validate_befund(doc: dict[str, Any], repo: Path | None, db: str | None = Non
     errs = schema_errors(doc)
     if errs: return errs
     errs = reference_errors(doc)
-    # B32: dieselbe Prüfung wie everydeck beim Einreichen (packages/domain checkBefund, gebündelt) – Ableitung und abgeleitetes Manifest eingeschlossen
+    # the same check as everydeck on submission (checkBefund, bundled), derivation and derived manifest included
     if not errs:
         from .rules import befund_rule_errors
         errs = befund_rule_errors(doc)
@@ -848,12 +848,12 @@ def validate_befund(doc: dict[str, Any], repo: Path | None, db: str | None = Non
         except RuntimeError as e: return [f"--db: {e}"]
         errs += database_errors(doc, DB_TABLES)
     if repo and not errs:
-        errs = evidence_errors(doc, repo) + completeness_errors(doc, repo) + contact_copy_errors(doc, repo)   # B46b Punkt 2
+        errs = evidence_errors(doc, repo) + completeness_errors(doc, repo) + contact_copy_errors(doc, repo)
     return errs
 
 
 def drift_manifest(b: dict[str, Any]) -> dict[str, Any]:
-    """Für `everydeck-check drift`: die Signale, Seiten, Routen und Jobs des Befunds in der Form, die der Drift-Vergleich kennt (keine Ableitung)."""
+    """For `everydeck-check drift`: the signals, screens, routes and jobs of the Befund in the form the drift comparison knows (no derivation)."""
     signals = [{"name": s["name"], "capability_id": f["id"], "label": s["name"], "allowed_source": "server", "location": {"path": s["evidence"]["path"], "symbol": s["evidence"].get("symbol") or s["name"], "commit": b["commit"]}}
                for f in b.get("flows", []) for s in (f.get("signals") or [])]
     return {"schema_version": "1.11-r0", "release_key": b.get("release_key", ""), "capabilities": [{"id": f["id"], "label": f["id"], "kind": "flow", "observation": "instrumented" if f.get("signals") else "proposed"} for f in b.get("flows", [])],

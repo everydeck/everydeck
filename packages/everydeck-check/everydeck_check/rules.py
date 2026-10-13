@@ -1,7 +1,7 @@
-"""B32 – die Regeln von everydeck an einer Stelle (packages/domain), hier nur aufgerufen.
+"""everydeck's rules live in one place; here they are only called.
 
-`rules/everydeck-rules.mjs` ist aus packages/domain gebündelt (scripts/build-rules.mjs) und läuft mit `node` (≥ 18, dasselbe Node wie `everydeck-agent`).
-everydeck-check baut keine Regel von everydeck in Python nach: was everydeck beim Einreichen ablehnt, lehnt everydeck-check mit derselben Meldung ab.
+`rules/everydeck-rules.mjs` is bundled from everydeck's rules and runs with `node` (18 or newer, the same Node as `everydeck-agent`).
+everydeck-check rebuilds none of everydeck's rules in Python: what everydeck rejects on submission, everydeck-check rejects with the same message.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def run_rule(rule: str, payload: dict[str, Any], timeout: float = 120) -> dict[s
 
 
 def befund_rule_errors(doc: dict[str, Any]) -> list[str]:
-    """Die Prüfung, die everydeck beim Einreichen eines Befunds macht (checkBefund): Form, Verweise, Ergebnis-Signal, Ableitung, abgeleitetes Manifest."""
+    """The check everydeck runs when a Befund is submitted (checkBefund): shape, references, result signal, derivation, derived manifest."""
     try:
         return list(run_rule("befund", {"input": doc}).get("errors", []))
     except RulesUnavailable as e:

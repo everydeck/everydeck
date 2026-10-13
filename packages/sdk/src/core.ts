@@ -1,15 +1,15 @@
 /**
- * @everydeck/sdk – Kern (Transportvertrag 1.1-r0, docs/03/04/05). Läuft in Node ≥ 22, Deno (Supabase Edge Functions) und Browsern; keine
- * Abhängigkeiten, nur `fetch`, `setTimeout`, `AbortController`, `crypto.randomUUID`.
+ * @everydeck/sdk core (transport contract 1.1-r0). Runs in Node >= 22, Deno (Supabase Edge Functions) and browsers; no
+ * dependencies, only `fetch`, `setTimeout`, `AbortController`, `crypto.randomUUID`.
  *
- * Zusagen (wie das Python-SDK, ohne Threads):
- * - `signal()/error()/log()/breadcrumb()/identify()` werfen nie und blockieren nie: O(1) Einreihen in einen begrenzten Puffer (Standard 500).
- * - Übertragung in Batches (≤ 50 Ereignisse, ≤ 64 KiB) mit drei Ergebnissen: angenommen (202) · erneut versuchen (429, 5xx, Timeout,
- *   Netz; derselbe Batch mit derselben batch_id, begrenzter Backoff) · endgültig abgewiesen (400/401/403/409/413/422: Batch verworfen und
- *   gezählt; 401/403 pausieren den Versand). Abgewiesene Batches zählen nie als gesendet.
- * - Pufferüberlauf wird als Ereignis `gap` (buffer_overflow, dropped n) gemeldet – eine erkennbare Datenlücke, keine stille.
- * - Kein Hintergrundthread: der Versand wird per Timer angestoßen, solange Ereignisse anstehen. In kurzlebigen Laufzeiten (Edge Function)
- *   wartet der Aufrufer vor der Antwort auf `flush()`; ohne dieses Warten kann die Laufzeit den Versand unbemerkt abbrechen; dauerhafte Outbox separat verwenden. Das SDK kennt keine Datenbank von everydeck und fällt keine Engine-Urteile.
+ * Guarantees (like the Python SDK, without threads):
+ * - `signal()/error()/log()/breadcrumb()/identify()` never throw and never block: O(1) enqueue into a bounded buffer (default 500).
+ * - Delivery in batches (<= 50 events, <= 64 KiB) with three outcomes: accepted (202) · retry (429, 5xx, timeout,
+ *   network; the same batch with the same batch_id, bounded backoff) · finally rejected (400/401/403/409/413/422: batch dropped and
+ *   counted; 401/403 pause sending). Rejected batches never count as sent.
+ * - Buffer overflow is reported as a `gap` event (buffer_overflow, dropped n): a visible data gap, not a silent one.
+ * - No background thread: sending is triggered by a timer while events are pending. In short-lived runtimes (Edge Function)
+ *   the caller awaits `flush()` before responding; without that wait the runtime can cut sending off unnoticed; use the durable outbox separately. The SDK knows no everydeck database and makes no engine judgements.
  */
 export const SCHEMA_VERSION = '1.4-r0';
 export const BATCH_MAX = 50;
@@ -19,12 +19,12 @@ const REJECT = new Set([400, 401, 403, 409, 413, 422]);
 const AUTH = new Set([401, 403]);
 
 export type LoginMethod = 'password' | 'sso' | 'magic_link';
-export interface HttpContext { method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'; route: string; status?: number; durationMs: number; /** 1.4-r0 (B33b): Anfrage an einen anderen Host als die Seite */ crossOrigin?: boolean }
-export interface Frame { function: string; file?: string; line?: number; /** 1.3-r0: im Code der App */ in_app?: boolean; /** 1.3-r0 (B33): Code-Zeilen um die Zeile */ context?: FrameContext }
+export interface HttpContext { method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'; route: string; status?: number; durationMs: number; /** 1.4-r0: request to a host other than the page */ crossOrigin?: boolean }
+export interface Frame { function: string; file?: string; line?: number; /** 1.3-r0: in the app's code */ in_app?: boolean; /** 1.3-r0: code lines around the line */ context?: FrameContext }
 export interface FrameContext { first_line: number; pre: string[]; line: string; post: string[] }
 export type ContextStatus = 'sent' | 'partial' | 'disabled' | 'unreadable' | 'library_only' | 'frames_without_source' | 'browser_no_source_maps' | 'bundled_runtime';
 
-// ── B33: Code-Zeilen aus dem SDK (wie Sentry). Dieselbe Bereinigung wie Fehlermeldungen in everydeck (packages/contracts scrubText; ein Test prüft die Gleichheit) ──
+// ── Code lines from the SDK (like Sentry). The same scrubbing as error messages in everydeck (scrubText; a test checks they are equal) ──
 const SECRET_PATTERNS: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b/g,
@@ -35,24 +35,24 @@ const SECRET_PATTERNS: RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g,
   /((?:password|passwd|secret|token|api[_-]?key|service[_-]?role[_-]?key)\s*[:=]\s*["']?)(?!\[redacted\])[^\s"']{6,}/gi,
 ];
-/** Geheimnisse, Bearer-Token und E-Mail-Adressen entfernen (Fehlermeldung oder Code-Zeile) */
+/** Removes secrets, Bearer tokens and e-mail addresses (error message or code line) */
 export function scrubText(text: string): string {
   let out = String(text).replace(/\bbearer\s+(?!\[redacted\])[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]');
   for (const re of SECRET_PATTERNS) out = out.replace(re, (m: string, keep?: string) => (typeof keep === 'string' && m.startsWith(keep) ? `${keep}[redacted]` : '[redacted]'));
   return out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]');
 }
 export const CONTEXT_FRAMES = 5; export const CONTEXT_LINES = 5; export const CONTEXT_LINE_MAX = 200;
-/** Bibliothek, Laufzeit oder Standardbibliothek – kein Code der App */
-/** Supabase Edge Functions laufen als kompiliertes Bündel unter diesem Pfad; die Quelldateien sind zur Laufzeit nicht lesbar (B33 Teil E, geprüft) */
+/** Library, runtime or standard library: not the app's code */
+/** Supabase Edge Functions run as a compiled bundle under this path; the source files are not readable at runtime (checked) */
 const BUNDLED_RUNTIME = /^\/var\/tmp\/sb-compile-edge-runtime\//;
 const LIBRARY = /(^|[\\/])node_modules[\\/]|^node:|^internal[\\/]|^ext:|^deno:|^https?:|^<anonymous>|^native$/;
-/** Frames aus dem Stack einer Ausnahme (Node, Deno): innerste zuerst; der volle Pfad bleibt nur intern (`_abs`) für die Code-Zeilen */
+/** Frames from an exception's stack (Node, Deno): innermost first; the full path stays internal only (`_abs`) for the code lines */
 export function serverFramesOf(err: unknown, max = 20): (Frame & { _abs?: string })[] | undefined {
   const st = err instanceof Error ? err.stack : undefined; if (!st) return undefined;
   const out: (Frame & { _abs?: string })[] = [];
   for (const raw of st.split('\n').slice(1)) {
     const m = /^\s*at\s+(?:(.+?)\s+\()?(.+?):(\d+):\d+\)?\s*$/.exec(raw); if (!m) continue;
-    let path = m[2]!; if (path.startsWith('file://')) { try { path = decodeURIComponent(new URL(path).pathname); } catch { /* bleibt */ } }
+    let path = m[2]!; if (path.startsWith('file://')) { try { path = decodeURIComponent(new URL(path).pathname); } catch { /* keep as is */ } }
     const inApp = !LIBRARY.test(path) && /^(\/|[A-Za-z]:[\\/])/.test(path);
     const file = path.replace(/\\/g, '/').split('/').slice(-2).join('/');
     out.push({ function: (m[1] ?? 'anonymous').replace(/^async\s+/, '').slice(0, 128) || 'anonymous', ...(file ? { file: file.slice(0, 240) } : {}), line: Number(m[3]), in_app: inApp, ...(inApp ? { _abs: path } : {}) });
@@ -60,18 +60,18 @@ export function serverFramesOf(err: unknown, max = 20): (Frame & { _abs?: string
   }
   return out.length ? out : undefined;
 }
-/** Fundzeile und je CONTEXT_LINES davor und danach; null, wenn die Zeile nicht in der Datei liegt (nichts raten) */
+/** The line plus CONTEXT_LINES before and after it; null when the line is not in the file (no guessing) */
 export function contextOf(text: string, line: number): FrameContext | null {
   const lines = text.split(/\r?\n/); if (line < 1 || line > lines.length) return null;
   const cut = (x: string) => scrubText(x.length > CONTEXT_LINE_MAX ? x.slice(0, CONTEXT_LINE_MAX) : x).slice(0, CONTEXT_LINE_MAX);
   const from = Math.max(1, line - CONTEXT_LINES);
   return { first_line: from, pre: lines.slice(from - 1, line - 1).map(cut), line: cut(lines[line - 1]!), post: lines.slice(line, line + CONTEXT_LINES).map(cut) };
 }
-/** B23: Herkunft jedes Ereignisses – Plattform, Laufzeit, Version je Plattform, grobes Gerät; nie Gerätemodell oder Kennungen */
-export interface ClientInfo { platform: 'web' | 'ios' | 'android' | 'desktop' | 'extension' | 'server'; runtime?: 'browser' | 'capacitor' | 'expo' | 'react_native' | 'flutter' | 'chrome_mv3' | 'electron' | 'tauri' | 'node' | 'deno' | 'python' | 'other'; app_version?: string; build?: string; update_id?: string; channel?: string; os?: 'ios' | 'android' | 'windows' | 'macos' | 'linux' | 'chromeos' | 'other'; os_major?: number; device_class?: 'phone' | 'tablet' | 'desktop'; /** B38: Herkunft im Browser (Schema, Host, Port, kein Pfad) – daraus nennt everydeck die Domain der App */ origin?: string }
+/** Origin of every event: platform, runtime, version per platform, rough device class; never device model or identifiers */
+export interface ClientInfo { platform: 'web' | 'ios' | 'android' | 'desktop' | 'extension' | 'server'; runtime?: 'browser' | 'capacitor' | 'expo' | 'react_native' | 'flutter' | 'chrome_mv3' | 'electron' | 'tauri' | 'node' | 'deno' | 'python' | 'other'; app_version?: string; build?: string; update_id?: string; channel?: string; os?: 'ios' | 'android' | 'windows' | 'macos' | 'linux' | 'chromeos' | 'other'; os_major?: number; device_class?: 'phone' | 'tablet' | 'desktop'; /** origin in the browser (scheme, host, port, no path); everydeck derives the app's domain from it */ origin?: string }
 const CLIENT_KEYS = ['platform', 'runtime', 'app_version', 'build', 'update_id', 'channel', 'os', 'os_major', 'device_class', 'origin'] as const;
 const PATTERNS: Partial<Record<(typeof CLIENT_KEYS)[number], RegExp>> = { platform: /^(?:web|ios|android|desktop|extension|server)$/, runtime: /^(?:browser|capacitor|expo|react_native|flutter|chrome_mv3|electron|tauri|node|deno|python|other)$/, os: /^(?:ios|android|macos|windows|linux|chromeos|other)$/, device_class: /^(?:phone|tablet|desktop)$/, origin: /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/, app_version: /^[A-Za-z0-9][A-Za-z0-9._+-]{0,39}$/, build: /^[A-Za-z0-9._-]{1,20}$/, update_id: /^[A-Za-z0-9._:-]{1,64}$/, channel: /^[a-z0-9][a-z0-9._-]{0,31}$/ };
-/** Nur bekannte Schlüssel und gültige Werte – was nicht passt, fällt weg (lieber keine Angabe als eine falsche) */
+/** Known keys and valid values only; anything else is dropped (better no value than a wrong one) */
 export function cleanClient(c: Partial<ClientInfo> | null | undefined): ClientInfo | undefined {
   if (!c || !c.platform) return undefined;
   const out: Record<string, unknown> = {};
@@ -82,33 +82,33 @@ export function cleanClient(c: Partial<ClientInfo> | null | undefined): ClientIn
   }
   return out['platform'] ? out as unknown as ClientInfo : undefined;
 }
-/** B23: Bildschirm-/Routennamen für den Weg vor einem Fehler – ohne Parameter, ohne Eingaben, höchstens 10 */
+/** Screen or route names for the path before an error: no parameters, no input, at most 10 */
 export function cleanTrail(t: string[] | undefined): string[] | undefined {
   const out = (t ?? []).map((x) => String(x).replace(/[?#\s].*$/, '').slice(0, 80)).filter(Boolean).slice(-10);
   return out.length ? out : undefined;
 }
-export interface Refs { /** B23: Weg vor dem Fehler */ trail?: string[]; eventId?: string; occurredAt?: string; operationId?: string; attemptId?: string; subjectRef?: string; accountRef?: string; sessionId?: string; requestId?: string; objectType?: string; objectRef?: string; businessKey?: string; fields?: Record<string, string | number | boolean> }
+export interface Refs { /** path before the error */ trail?: string[]; eventId?: string; occurredAt?: string; operationId?: string; attemptId?: string; subjectRef?: string; accountRef?: string; sessionId?: string; requestId?: string; objectType?: string; objectRef?: string; businessKey?: string; fields?: Record<string, string | number | boolean> }
 export interface EverydeckOptions {
   endpoint: string; credential: string; releaseKey: string; manifestDigest: string;
-  /** B15/C7: Prüflauf der Einrichtung – alle Batches dieses Clients tragen die Kennung (nur für Verifikationsskripte, nie im App-Betrieb) */
+  /** setup check run: all batches of this client carry the id (only for verification scripts, never in app operation) */
   probeId?: string;
-  /** B19: Nutzungszahlen (`usage()`, `search()`) ohne Personenbezug (Standard, cookielos und anonym) oder mit Personenbezug nur nach Einwilligung der Person */
+  /** usage counts (`usage()`, `search()`) without personal reference (default, cookieless and anonymous), or with personal reference only after the person's consent */
   usageConsent?: 'anonymous' | 'consented';
   enabled?: boolean; maxBuffer?: number; flushIntervalMs?: number; httpTimeoutMs?: number; maxBackoffMs?: number; authPauseMs?: number;
-  /** B30 Schnitt D: Batches gzip-komprimiert senden, wo die Laufzeit `CompressionStream` hat (Node ≥ 18, Deno, moderne Browser); Standard an */
+  /** send batches gzip-compressed where the runtime has `CompressionStream` (Node >= 18, Deno, modern browsers); on by default */
   compress?: boolean;
-  onWarning?: (message: string) => void; fetch?: typeof fetch; /** Browser: keepalive-Requests beim Verlassen der Seite */ keepalive?: boolean;
+  onWarning?: (message: string) => void; fetch?: typeof fetch; /** browser: keepalive requests when leaving the page */ keepalive?: boolean;
   instanceId?: string;
-  /** B23: Herkunft der Ereignisse (Browser-SDK erkennt sie selbst; Server-Standard: platform `server`) */
+  /** origin of the events (the browser SDK detects it itself; server default: platform `server`) */
   client?: Partial<ClientInfo>;
-  /** B23: Ergebnis jedes Sendevorgangs (`retry` = Netz/5xx, Ereignisse bleiben im Puffer) – das Browser-SDK sichert danach den Puffer */
+  /** result of every send (`retry` = network/5xx, events stay in the buffer); the browser SDK saves the buffer afterwards */
   onSendResult?: (result: 'accepted' | 'retry' | 'rejected' | 'paused' | 'idle', pending: number) => void;
-  /** B33: Code-Zeilen zu den Frames im Code der App mitschicken (Standard an); `false` schaltet es ab */
+  /** send code lines for frames in the app's code (on by default); `false` turns it off */
   sourceContext?: boolean;
-  /** B33: liest eine Datei der laufenden App (Node: node:fs, Deno: Deno.readTextFile); null = nicht lesbar. Gelesen wird beim Senden, nie im Aufruf */
+  /** reads a file of the running app (Node: node:fs, Deno: Deno.readTextFile); null = not readable. Read when sending, never during the call */
   readSource?: (path: string) => Promise<string | null>;
 }
-export interface EverydeckStats { enqueued: number; accepted: number; retries: number; dropped_overflow: number; dropped_rejected: number; dropped_oversize: number; batches_accepted: number; batches_retried: number; batches_rejected: number; send_errors: number; unreported_loss: number; last_error: string | null; /** B30 Schnitt D */ batches_compressed: number; bytes_raw: number; bytes_sent: number; retry_after_waits: number }
+export interface EverydeckStats { enqueued: number; accepted: number; retries: number; dropped_overflow: number; dropped_rejected: number; dropped_oversize: number; batches_accepted: number; batches_retried: number; batches_rejected: number; send_errors: number; unreported_loss: number; last_error: string | null; /** compression */ batches_compressed: number; bytes_raw: number; bytes_sent: number; retry_after_waits: number }
 interface Event { event_id: string; kind: 'signal' | 'error' | 'breadcrumb' | 'log' | 'gap'; name: string; occurred_at: string; [k: string]: unknown }
 interface Batch { schema_version: string; batch_id: string; release_key: string; manifest_digest: string; probe_id?: string; events: Event[] }
 
@@ -118,15 +118,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const NAME = /^[a-z][a-z0-9_.-]{0,95}$/;
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) : s);
 
-/** 1.4-r0 (B33b): Fehlercode und Meldung aus dem Körper einer fehlgeschlagenen Antwort */
+/** 1.4-r0: error code and message from the body of a failed response */
 export interface ErrorAnswer { code?: string; message?: string }
 const ANSWER_CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
-/** Größte Antwort, deren Körper das SDK liest (danach keine Fakten aus dem Körper) */
+/** Largest response whose body the SDK reads (beyond it, no facts from the body) */
 export const ANSWER_MAX_BYTES = 65536;
 /**
- * B33b: Fakten aus dem Körper einer fehlgeschlagenen Antwort, nur aus bekannten Fehlerformaten (Feldnamen der Formate, keine Deutung von Wörtern):
+ * Facts from the body of a failed response, only from known error formats (the formats' field names, no interpretation of words):
  * PostgREST/Supabase `{code, message}`, Supabase Auth `{error_code, msg}`, `{error: {code, message}}`, RFC 9457 `{title, detail}`, FastAPI `{detail}`.
- * Nur JSON; die Meldung bereinigt wie Fehlermeldungen (scrubText) und höchstens 300 Zeichen. Nichts Erkennbares → undefined.
+ * JSON only; the message is scrubbed like error messages (scrubText) and at most 300 characters. Nothing recognizable → undefined.
  */
 export function answerOf(body: string, contentType: string | null | undefined): ErrorAnswer | undefined {
   if (!body || !/json/i.test(contentType ?? '') || body.length > ANSWER_MAX_BYTES) return undefined;
@@ -142,12 +142,12 @@ export function answerOf(body: string, contentType: string | null | undefined): 
 }
 const uuid = () => (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
 const utf8Length = (t: string) => new TextEncoder().encode(t).byteLength;
-/** B30 Schnitt D: Backoff mit vollem Zufallsanteil („full jitter“, wie Sentry/PostHog): gleichverteilt in [0, min(cap, 500 ms · 2^n)]. */
+/** Backoff with full jitter (like Sentry/PostHog): uniformly distributed in [0, min(cap, 500 ms · 2^n)]. */
 export function fullJitterMs(failures: number, capMs: number, random: () => number = Math.random): number {
   const ceiling = Math.min(capMs, 500 * 2 ** Math.max(0, Math.min(6, failures)));
   return Math.floor(random() * ceiling);
 }
-/** `Retry-After` als Sekunden oder HTTP-Datum → Millisekunden, begrenzt auf eine Stunde; null, wenn fehlt oder unlesbar. */
+/** `Retry-After` as seconds or HTTP date → milliseconds, capped at one hour; null when missing or unreadable. */
 export function parseRetryAfter(value: string | null | undefined, nowMs: number = Date.now()): number | null {
   if (!value) return null;
   const v = value.trim();
@@ -156,7 +156,7 @@ export function parseRetryAfter(value: string | null | undefined, nowMs: number 
   else { const t = Date.parse(v); if (Number.isNaN(t)) return null; ms = t - nowMs; }
   return Math.max(0, Math.min(3_600_000, ms));
 }
-/** gzip über CompressionStream (Node ≥ 18, Deno, Browser); null, wenn die Laufzeit es nicht kann oder die Kompression scheitert. */
+/** gzip via CompressionStream (Node >= 18, Deno, browsers); null when the runtime cannot do it or compression fails. */
 export async function gzipText(text: string): Promise<Uint8Array | null> {
   const CS = (globalThis as { CompressionStream?: new (format: string) => { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> } }).CompressionStream;
   if (!CS) return null;
@@ -196,11 +196,11 @@ export class EverydeckClient {
   private pausedUntil = 0;
   private failures = 0;
   private closed = false;
-  /** B15/C7 */
+  /** setup check run id */
   readonly probeId: string | undefined;
-  /** B23 */
+  /** origin of the events */
   private client: ClientInfo | undefined;
-  /** B23: erkannte Herkunft ergänzen (z. B. App-Version, sobald die native Abfrage antwortet); gilt für alle folgenden Ereignisse */
+  /** Adds detected origin details (e.g. the app version once the native query answers); applies to all following events */
   setClient(c: Partial<ClientInfo>): void { this.client = cleanClient({ ...(this.client ?? {}), ...c }); }
   getClient(): ClientInfo | undefined { return this.client; }
 
@@ -208,9 +208,9 @@ export class EverydeckClient {
     this.probeId = o.probeId && /^[0-9a-f-]{36}$/i.test(o.probeId) ? o.probeId : undefined;
     this.opts = { endpoint: (o.endpoint ?? '').replace(/\/$/, ''), credential: o.credential ?? '', releaseKey: o.releaseKey, manifestDigest: o.manifestDigest ?? '', enabled: o.enabled ?? true, maxBuffer: o.maxBuffer ?? 500, flushIntervalMs: o.flushIntervalMs ?? 1000, httpTimeoutMs: o.httpTimeoutMs ?? 2000, maxBackoffMs: o.maxBackoffMs ?? 30_000, authPauseMs: o.authPauseMs ?? 30_000, keepalive: o.keepalive ?? false, compress: o.compress ?? true, usageConsent: o.usageConsent ?? 'anonymous',
       fetch: o.fetch ?? ((...a: Parameters<typeof fetch>) => globalThis.fetch(...a)), onWarning: (m) => { try { if (o.onWarning) o.onWarning(m); else console.warn(`[everydeck] ${m}`); } catch { /* diagnostics never break delivery */ } }, instanceId: o.instanceId ?? `js-${uuid().slice(0, 8)}` };
-    // B36: fehlt Adresse oder Schlüssel (z. B. nach einem Update mit neuen Variablennamen), schaltet das SDK ab – aber laut, nie still
-    if (this.opts.enabled && (!this.opts.endpoint || !this.opts.credential || !this.opts.manifestDigest)) { this.opts.enabled = false; this.opts.onWarning(`disabled: ${!this.opts.endpoint ? 'no endpoint' : !this.opts.credential ? 'no key' : 'no manifest digest'} – nothing is sent to everydeck until the app passes endpoint, key and manifest digest`); }
-    // B23: ohne Browser ist der Absender ein Server (Node oder Deno); das Browser-SDK setzt die erkannte App-Plattform
+    // if the address or key is missing (e.g. after an update with new variable names), the SDK turns itself off, but loudly, never silently
+    if (this.opts.enabled && (!this.opts.endpoint || !this.opts.credential || !this.opts.manifestDigest)) { this.opts.enabled = false; this.opts.onWarning(`disabled: ${!this.opts.endpoint ? 'no endpoint' : !this.opts.credential ? 'no key' : 'no manifest digest'}; nothing is sent to everydeck until the app passes endpoint, key and manifest digest`); }
+    // without a browser the sender is a server (Node or Deno); the browser SDK sets the detected app platform
     const g = globalThis as { document?: unknown; Deno?: unknown };
     this.client = cleanClient(o.client ?? (g.document ? undefined : { platform: 'server', runtime: g.Deno ? 'deno' : 'node' }));
     this.onSendResult = o.onSendResult;
@@ -222,8 +222,8 @@ export class EverydeckClient {
   private readonly readSource: ((path: string) => Promise<string | null>) | null;
   private readonly sourceCache = new Map<string, Promise<string | null>>();
   /**
-   * B33: Code-Zeilen beim Senden ergänzen (nie im Aufruf). Höchstens CONTEXT_FRAMES Frames im Code der App; das Ereignis bleibt unter
-   * EVENT_MAX_BYTES (was nicht passt, bleibt ohne Zeilen: partial). Der volle Pfad (`_abs`) verlässt das SDK nie.
+   * Adds code lines when sending (never during the call). At most CONTEXT_FRAMES frames in the app's code; the event stays under
+   * EVENT_MAX_BYTES (what does not fit stays without lines: partial). The full path (`_abs`) never leaves the SDK.
    */
   private async withSourceContext(events: Event[]): Promise<void> {
     for (const ev of events) {
@@ -247,47 +247,47 @@ export class EverydeckClient {
     }
   }
 
-  /** Fachliches Signal (nur Server-Schlüssel; Browser-Schlüssel werden vom Server mit 403 abgewiesen). */
+  /** Business signal (server key only; the server rejects browser keys with 403). */
   signal(name: string, operationId: string, r: Omit<Refs, 'operationId'> = {}): void { this.enqueue({ event_id: uuid(), kind: 'signal', name, occurred_at: now(), ...refs({ ...r, operationId }) }); }
   /**
-   * Fehler. B33: mit `exc` (die abgefangene Ausnahme) bildet das SDK die Frames selbst und schickt beim Senden zu bis zu 5 Frames im Code der App
-   * die Code-Zeilen mit (gelesen aus der laufenden Datei, bereinigt); `frames` übergibt sie fertig (dann ohne Code-Zeilen).
+   * Error. With `exc` (the caught exception) the SDK builds the frames itself and, when sending, adds the code lines for up to 5 frames in the app's code
+   * (read from the running file, scrubbed); `frames` passes them ready-made (then without code lines).
    */
   error(name: string, errorClass: string, o: Refs & { message?: string; http?: HttpContext; frames?: Frame[]; exc?: unknown; contextStatus?: ContextStatus; response?: ErrorAnswer } = {}): void {
     const { message, http, frames: given, exc, contextStatus, response, ...r } = o;
     const parsed = given ? undefined : exc !== undefined ? serverFramesOf(exc) : undefined;
     const frames = (given ?? parsed)?.slice(0, 20).map((f) => compact({ function: clip(f.function || 'anonymous', 128), file: f.file ? clip(f.file, 240) : undefined, line: f.line && f.line >= 1 ? Math.round(f.line) : undefined, in_app: typeof f.in_app === 'boolean' ? f.in_app : undefined, _abs: (f as { _abs?: string })._abs }));
     const status: ContextStatus | undefined = !frames?.length ? undefined : contextStatus ?? (!this.sourceContext ? 'disabled' : given ? 'frames_without_source' : undefined);
-    // B33b: Fakten aus der Antwort (Code nur im erlaubten Muster, Meldung bereinigt), sonst weggelassen
+    // facts from the response (code only in the allowed pattern, message scrubbed), otherwise left out
     const answer = response ? compact({ code: response.code && ANSWER_CODE.test(response.code) ? response.code : undefined, message: response.message ? clip(scrubText(response.message), 300) : undefined }) : {};
     const err = compact({ class: NAME.test(errorClass) ? errorClass : 'error', message: message ? clip(message, 1024) : undefined, frames, context_status: status, response: Object.keys(answer).length ? answer : undefined });
     if (status) for (const f of frames ?? []) delete (f as { _abs?: string })._abs;
     this.enqueue({ event_id: uuid(), kind: 'error', name, occurred_at: now(), error: err, ...compact({ http: httpField(http) }), ...refs(r) });
   }
   log(templateId: string, name: string, r: Refs = {}): void { this.enqueue({ event_id: uuid(), kind: 'log', name, occurred_at: now(), template_id: templateId, ...refs(r) }); }
-  /** Browser-Schritt (Behauptung): braucht eine Sitzung; nie Formularwerte, Tokens oder Texte in `fields`. */
+  /** Browser step (a claim): needs a session; never form values, tokens or texts in `fields`. */
   breadcrumb(name: string, sessionId: string, o: Omit<Refs, 'sessionId'> & { http?: HttpContext } = {}): void { const { http, ...r } = o; this.enqueue({ event_id: uuid(), kind: 'breadcrumb', name, occurred_at: now(), session_id: sessionId, ...compact({ http: httpField(http) }), ...refs(r) }); }
-  /** Identitätsquelle (nur serverseitig sinnvoll; nur Felder aus `people.fields` des freigegebenen Manifests werden gespeichert). */
+  /** Identity source (only meaningful on the server; only fields from `people.fields` of the approved manifest are stored). */
   identify(subjectRef: string, o: { accountRef?: string; displayName?: string; email?: string; loginMethod?: LoginMethod; providerUserId?: string; orgName?: string; phone?: string; whatsapp?: string } = {}): void {
     const fields = compact({ display_name: o.displayName, email: o.email, login_method: o.loginMethod, provider_user_id: o.providerUserId, org_name: o.orgName, phone: o.phone, whatsapp: o.whatsapp }) as Record<string, string>;
     this.enqueue({ event_id: uuid(), kind: 'signal', name: 'everydeck.sdk.identity', occurred_at: now(), operation_id: `everydeck.sdk:identity:${subjectRef}`, subject_ref: subjectRef, ...compact({ account_ref: o.accountRef }), ...(Object.keys(fields).length ? { fields } : {}) });
   }
   /**
-   * B19: objektbezogene Nutzung – Aufruf, Merken, Kontakt, Erscheinen in Suchergebnissen, Klick aus einer Suche. everydeck zählt Tageszahlen je Objekt.
-   * Ohne `usageConsent: 'consented'` wird keine Person mitgeschickt (anonym, ohne Cookie); auch mit Einwilligung nie Text oder Suchbegriffe.
+   * Object usage: view, save, contact, appearing in search results, click from a search. everydeck counts daily numbers per object.
+   * Without `usageConsent: 'consented'` no person is sent (anonymous, no cookie); even with consent never text or search terms.
    */
   usage(kind: 'view' | 'save' | 'contact' | 'impression' | 'click', objectType: string, objectRef: string, o: { subjectRef?: string } = {}): void {
     const who = this.opts.usageConsent === 'consented' && o.subjectRef ? { subjectRef: o.subjectRef } : {};
     this.enqueue({ event_id: uuid(), kind: 'signal', name: `everydeck.usage.${kind}`, occurred_at: now(), ...refs({ ...who, operationId: `everydeck.usage:${objectType}`, objectType, objectRef }) });
   }
-  /** B19: eine Suche mit ihrer Gruppe (z. B. `area:Sanur`, keine Freitexte) und der Zahl der Treffer – Grundlage für „Suchen ohne Treffer“. */
+  /** A search with its group (e.g. `area:downtown`, no free text) and the number of results; the basis for "searches without results". */
   search(group: string, results: number, o: { subjectRef?: string } = {}): void {
     const who = this.opts.usageConsent === 'consented' && o.subjectRef ? { subjectRef: o.subjectRef } : {};
     this.enqueue({ event_id: uuid(), kind: 'signal', name: 'everydeck.usage.search', occurred_at: now(), ...refs({ ...who, operationId: 'everydeck.usage:search', fields: { group: clip(group, 120), results: Math.max(0, Math.floor(results)) } }) });
   }
   /**
-   * B19 (Moderation, nur Server): Eckdaten einer gesendeten Nachricht – wer, in welchem Gespräch, ob Nummer/Link/Zahlungsbitte enthalten und eine
-   * Prüfsumme des Texts (gleiche Nachricht an viele erkennen). Der Text selbst verlässt die App nie.
+   * Moderation (server only): key facts of a sent message: who, in which conversation, whether it contains a number, link or payment request, and a
+   * checksum of the text (to spot the same message sent to many). The text itself never leaves the app.
    */
   messageSent(o: { conversationType: string; conversationRef: string; senderRef: string; text: string; appHosts?: string[] }): void {
     const t = o.text.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -297,17 +297,17 @@ export class EverydeckClient {
         asks_payment: /\b(?:deposit|down\s?payment|advance payment|pay (?:first|upfront)|bank transfer|wire transfer|western union|uang muka|transfer dulu|tanda jadi|bayar dulu)\b|anzahlung|überweisung|vorkasse/i.test(o.text) } }) });
   }
   /**
-   * Lebenszeichen. Ohne `job`: diese Prozessinstanz läuft (instanceId). Mit `job` (1.9-r0, `jobs[].id` im Manifest): dieser Job ist gelaufen –
-   * am Ende jedes erfolgreichen Laufs senden; everydeck meldet einen Job, der zwei Takte schweigt. Job-Schläge zählen nicht als Instanz.
+   * Heartbeat. Without `job`: this process instance is running (instanceId). With `job` (1.9-r0, `jobs[].id` in the manifest): this job has run;
+   * send it at the end of every successful run; everydeck reports a job that stays silent for two intervals. Job heartbeats do not count as an instance.
    */
   heartbeat(intervalSeconds: number, opts: { job?: string } = {}): void {
     if (opts.job !== undefined && !/^[a-z][a-z0-9_.-]{0,63}$/.test(opts.job)) { this.opts.onWarning(`heartbeat job id rejected: ${opts.job}`); return; }
     this.enqueue({ event_id: uuid(), kind: 'signal', name: 'everydeck.sdk.heartbeat', occurred_at: now(), operation_id: opts.job ? `everydeck.job:${opts.job}` : `everydeck.sdk:${this.opts.instanceId}`, fields: { instance_id: this.opts.instanceId, interval_seconds: intervalSeconds, ...(opts.job ? { job: opts.job } : {}) } });
   }
 
-  /** B23: noch nicht angenommene Ereignisse (zum Zwischenspeichern, wenn eine mobile App beendet wird) */
+  /** Events not yet accepted (for saving when a mobile app is closed) */
   exportPending(max = 300): Record<string, unknown>[] { return [...(this.inflight?.events ?? []), ...this.q].slice(0, max).map((e) => ({ ...e })); }
-  /** B23: zwischengespeicherte Ereignisse wieder einreihen (mit ihrer ursprünglichen Zeit und Kennung; everydeck dedupliziert über event_id) */
+  /** Re-enqueues saved events (with their original time and id; everydeck deduplicates by event_id) */
   importPending(events: unknown): number {
     if (!Array.isArray(events)) return 0; let n = 0;
     for (const e of events.slice(0, this.opts.maxBuffer)) if (e && typeof e === 'object' && typeof (e as Event).event_id === 'string' && typeof (e as Event).name === 'string') { this.enqueue(e as Event); n++; }
@@ -330,7 +330,7 @@ export class EverydeckClient {
   private schedule(ms: number): void {
     if (this.timer || this.closed) return;
     this.timer = setTimeout(() => { this.timer = null; void this.pump(); }, Math.max(0, ms));
-    // Node: der Timer soll den Prozess nicht am Ende hindern
+    // Node: the timer must not keep the process from exiting
     (this.timer as unknown as { unref?: () => void }).unref?.();
   }
   private nextBatch(): Batch | null {
@@ -352,10 +352,10 @@ export class EverydeckClient {
     this.inflight = batch.events.length ? batch : null;
     return this.inflight;
   }
-  /** Ein Sendevorgang; Ergebnis: accepted | retry | rejected | paused | idle. */
+  /** One send; result: accepted | retry | rejected | paused | idle. */
   private sendOnce(keepalive = false, deadline = Infinity): Promise<'accepted' | 'retry' | 'rejected' | 'paused' | 'idle'> {
     if (this.request) return this.request;
-    const request = this.transmit(keepalive, deadline).then((r) => { if (this.onSendResult && r !== 'idle') { try { this.onSendResult(r, this.q.length + (this.inflight?.events.length ?? 0)); } catch { /* nie die Zustellung stören */ } } return r; }).finally(() => { if (this.request === request) this.request = null; });
+    const request = this.transmit(keepalive, deadline).then((r) => { if (this.onSendResult && r !== 'idle') { try { this.onSendResult(r, this.q.length + (this.inflight?.events.length ?? 0)); } catch { /* never disturb delivery */ } } return r; }).finally(() => { if (this.request === request) this.request = null; });
     this.request = request;
     return request;
   }
@@ -363,13 +363,13 @@ export class EverydeckClient {
     if (Date.now() < this.pausedUntil) return 'paused';
     const batch = this.nextBatch();
     if (!batch) return 'idle';
-    try { await this.withSourceContext(batch.events); } catch { /* Code-Zeilen sind nie ein Grund, nicht zu senden */ for (const ev of batch.events) { const e = ev['error'] as { frames?: { _abs?: string }[] } | undefined; for (const f of e?.frames ?? []) delete f._abs; } }
+    try { await this.withSourceContext(batch.events); } catch { /* code lines are never a reason not to send */ for (const ev of batch.events) { const e = ev['error'] as { frames?: { _abs?: string }[] } | undefined; for (const f of e?.frames ?? []) delete f._abs; } }
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), Math.max(1, Math.min(this.opts.httpTimeoutMs, deadline - Date.now())));
     let status: number | null = null;
     let retryAfterMs: number | null = null;
     try {
-      // B30 Schnitt D: gzip, wo die Laufzeit es kann (CompressionStream); sonst unverändert JSON
+      // gzip where the runtime can (CompressionStream); otherwise plain JSON
       const text = JSON.stringify(batch);
       const gz = this.opts.compress ? await gzipText(text) : null;
       this.stats.bytes_raw += utf8Length(text); this.stats.bytes_sent += gz ? gz.byteLength : utf8Length(text);
@@ -377,7 +377,7 @@ export class EverydeckClient {
       const res = await this.opts.fetch(`${this.opts.endpoint}/v1/events`, { method: 'POST', headers: { authorization: `Bearer ${this.opts.credential}`, 'content-type': 'application/json', ...(gz ? { 'content-encoding': 'gzip' } : {}) }, body: (gz ?? text) as NonNullable<NonNullable<Parameters<typeof fetch>[1]>['body']>, signal: ctl.signal, ...(keepalive ? { keepalive: true } : {}) });
       status = res.status;
       if (status === 429 || status === 503) retryAfterMs = parseRetryAfter(res.headers.get('retry-after'));
-      try { await res.arrayBuffer(); } catch { /* Körper egal */ }
+      try { await res.arrayBuffer(); } catch { /* body does not matter */ }
     } catch (e) {
       this.stats.last_error = (e as Error).name === 'AbortError' ? 'timeout' : `network: ${(e as Error).message}`;
     } finally { clearTimeout(t); }
@@ -390,7 +390,7 @@ export class EverydeckClient {
     }
     this.stats.retries++; this.stats.batches_retried++; this.failures++;
     if (status !== null) this.stats.last_error = `retry after ${status}`;
-    // B30 Schnitt D: Retry-After von everydeck (429 Budget/Kontingent, 503 Schutz) wird befolgt – bis dahin kein Versuch, auch nicht aus flush()
+    // Retry-After from everydeck (429 budget/quota, 503 protection) is honored: no attempt until then, not even from flush()
     if (retryAfterMs !== null) { this.pausedUntil = Math.max(this.pausedUntil, Date.now() + retryAfterMs); this.stats.retry_after_waits++; }
     return 'retry';
   }
@@ -422,14 +422,14 @@ export class EverydeckClient {
     }
     return this.pending === 0 && rejected === this.stats.dropped_rejected + this.stats.dropped_oversize;
   }
-  /** Browser: letzter Versuch beim Verlassen der Seite (keepalive, ohne Warten). */
+  /** Browser: last attempt when leaving the page (keepalive, no waiting). */
   flushKeepalive(): void { if (this.pending > 0) void this.sendOnce(true); }
   async close(timeoutMs = 3000): Promise<boolean> { const ok = await this.flush(timeoutMs); this.closed = true; if (this.timer) { clearTimeout(this.timer); this.timer = null; } return ok; }
 }
 
 export function createEverydeck(o: EverydeckOptions): EverydeckClient { return new EverydeckClient(o); }
 
-/** B19: Prüfsumme eines normalisierten Texts (FNV-1a, 2 × 32 Bit, hex) – erkennt gleiche Nachrichten, verrät den Text nicht im Klartext */
+/** Checksum of a normalized text (FNV-1a, 2 × 32 bit, hex): spots identical messages without revealing the text in plain form */
 export function textHash(t: string): string {
   let a = 0x811c9dc5; let b = 0x01000193 ^ 0x5bd1e995;
   for (let i = 0; i < t.length; i++) { const ch = t.charCodeAt(i); a = Math.imul(a ^ ch, 0x01000193) >>> 0; b = Math.imul(b ^ ch, 0x5bd1e995) >>> 0; }

@@ -1,8 +1,8 @@
-"""Die allgemeine Lese-Brücke (B29 Abnahme, docs/04 „Lese-Bridge“) – Python-Fassung des TypeScript-SDKs (read-bridge.ts), gleiches Verhalten.
+"""The general read bridge: Python version of the TypeScript SDK (read-bridge.ts), same behavior.
 
-Ein Endpunkt je deklarierter Tabelle, nur deklarierte Spalten, mit Cursor. Der Agent schreibt keine Brücke je App: er holt den Lese-Umfang
-(`everydeck/everydeck-read-scope.json`, aus dem Befund abgeleitet) und gibt eine Funktion `rows(table, columns, keys, after, limit)` mit, die Zeilen aus
-der Datenbank der App liest – über eine eigene Leserolle (nur SELECT). `psycopg_rows(conn)` ist die fertige Fassung für psycopg (2 oder 3).
+One endpoint per declared table, only declared columns, with a cursor. The agent writes no bridge per app: it takes the read scope
+(`everydeck/everydeck-read-scope.json`, derived from the Befund) and passes a function `rows(table, columns, keys, after, limit)` that reads rows from
+the app's database through a dedicated reader role (SELECT only). `psycopg_rows(conn)` is the ready-made version for psycopg (2 or 3).
 
     bridge = ReadBridge(scope=json.load(open("everydeck/everydeck-read-scope.json")), token=os.environ["EVERYDECK_READ_BRIDGE_TOKEN"], rows=psycopg_rows(conn))
     # FastAPI:  @app.api_route("/everydeck/read/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -10,9 +10,9 @@ der Datenbank der App liest – über eine eigene Leserolle (nur SELECT). `psyco
     #               status, body = bridge.handle(request.method, request.url.path, dict(request.query_params), request.headers.get("authorization"))
     #               return JSONResponse(body, status_code=status)
 
-Vertrag: GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit · GET /everydeck/read/people?cursor&limit; eigener Bearer-Schlüssel;
-jedes Schreibverb wird abgewiesen; Seiten ≤ 200; Kennungen als Text (mehrere Schlüsselspalten mit „|“); Zeitstempel ISO-8601; Objektwerte
-als JSON-Text; kein Wert länger als 256 Zeichen. Beziehungen werden wie Objektarten geliefert (type = relations[].id).
+Contract: GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit · GET /everydeck/read/people?cursor&limit; own Bearer key;
+every write verb is rejected; pages ≤ 200; identifiers as text (several key columns joined with "|"); timestamps ISO-8601; object values
+as JSON text; no value longer than 256 characters. Relations are delivered like object types (type = relations[].id).
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 PAGE_MAX = 200
 VALUE_MAX = 256
-# rows(table, columns, keys, after, limit[, changed]) – changed = {"column", "since"}: nur Geändertes, stabil nach (Änderungsspalte, Schlüssel); Cursor dann [Änderungszeit, …Schlüssel] (B30 Schnitt A)
+# rows(table, columns, keys, after, limit[, changed]); changed = {"column", "since"}: only changed rows, stable by (change column, keys); cursor is then [change time, …keys]
 Rows = Callable[..., Iterable[Mapping[str, Any]]]
 
 
@@ -84,7 +84,7 @@ GRANT_MAX_SECONDS = 300
 
 
 def sign_everydeck_grant(keys: Iterable[str], grant: Mapping[str, Any]) -> dict[str, str]:
-    """Gegenstück (everydeck und Tests): Query-Parameter einer Freigabe – grant = base64url(JSON), grant_sig = v1=<hex> je Schlüssel."""
+    """Counterpart (everydeck and tests): query parameters of a grant; grant = base64url(JSON), grant_sig = v1=<hex> per key."""
     g = base64.urlsafe_b64encode(json.dumps(grant, separators=(",", ":")).encode()).decode().rstrip("=")
     sigs = []
     for k in keys:
@@ -100,8 +100,8 @@ def _is_name(x: Any) -> bool:
 
 
 def grant_of(keys: Iterable[str], query: Mapping[str, str] | None, typ: str, ref: str) -> dict[str, Any] | str:
-    """B46 Punkt 3: Freigabe prüfen – Signatur mit einem gültigen Schlüssel, genau dieses Gespräch, Grund, nicht abgelaufen, Nachrichtentabelle vollständig.
-    Gibt das Gespräch ({messages, attachments}) zurück oder den Grund der Ablehnung."""
+    """Check a grant: signature with a valid key, exactly this conversation, a reason, not expired, message table complete.
+    Returns the conversation ({messages, attachments}) or the reason for rejection."""
     q = query or {}; g = q.get("grant"); sig = q.get("grant_sig")
     if not g or not sig:
         return "grant missing"
@@ -131,12 +131,12 @@ class ReadBridge:
                  deleted: Callable[[str, Sequence[str], str, int], Sequence[Mapping[str, Any]]] | None = None,
                  signatures: str = "required", keys: Sequence[str] | None = None, seen: Callable[[str, float], bool] | None = None,
                  match: Callable[..., Iterable[Mapping[str, Any]]] | None = None) -> None:
-        # B31 Schnitt A: match(table, columns, where_column, values, order, after, limit) → Zeilen eines Gesprächs (psycopg_match); ohne match keine Gespräche
+        # match(table, columns, where_column, values, order, after, limit) → rows of one conversation (psycopg_match); without match no conversations
         self.match = match
-        # B30 Schnitt A: one(table, columns, keys, ref) → eine Zeile; deleted(table, keys, since, limit) → [{ref, deleted_at}] (Löschungen, die die App kennt)
+        # one(table, columns, keys, ref) → one row; deleted(table, keys, since, limit) → [{ref, deleted_at}] (deletions the app knows about)
         self.one = one; self.deleted = deleted
-        # B30 Schnitt E: everydeck signiert jeden Aufruf – "required" (Standard) lehnt unsignierte ab, "optional" nimmt den Bearer ohne Signatur (ältere everydeck-Stände), "off" prüft nur den Bearer;
-        # keys = gültige Schlüssel (Standard: token; während eines Tauschs der neue und der alte), seen = Replay-Schutz über mehrere Instanzen
+        # everydeck signs every call: "required" (default) rejects unsigned calls, "optional" accepts the Bearer without a signature (everydeck instances that do not sign yet), "off" checks only the Bearer;
+        # keys = valid keys (default: token; during a rotation the new and the old one), seen = replay protection across several instances
         if signatures not in ("required", "optional", "off"): raise ValueError("signatures must be required, optional or off")
         self.signatures = signatures; self.keys = list(keys) if keys else [token]; self.seen = seen
         self.scope = scope
@@ -144,7 +144,7 @@ class ReadBridge:
         self.rows = rows
         self.app = app
         self.page_limit = min(PAGE_MAX, max(1, page_limit))
-        self._rights = rights   # fest, oder eine Funktion, die beim ersten Aufruf prüft (psycopg_rights) – nie behauptet
+        self._rights = rights   # fixed, or a function that checks on the first call (psycopg_rights); never just claimed
         self._rights_cache: dict[str, Any] | None = None
         self.types: dict[str, dict[str, Any]] = {}
         for o in scope.get("objects", []):
@@ -161,7 +161,7 @@ class ReadBridge:
         return self._rights_cache
 
     def capabilities(self) -> dict[str, Any]:
-        # B30 Schnitt A: je Objektart, ob changed_since geht (Änderungsspalte im Umfang), und ob der Einzelabruf geht
+        # per object type whether changed_since works (change column in the scope), and whether fetching one object works
         objects = [{"type": o["type"], "fields": [f["name"] for f in o["fields"]], **({"statuses": list(o["statuses"])} if o.get("statuses") else {}), "changed_since": bool(o.get("changed"))} for o in self.scope.get("objects", [])]
         objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False} for r in self.scope.get("relations", [])]
         people = self.scope.get("people")
@@ -179,7 +179,7 @@ class ReadBridge:
 
     def handle(self, method: str, path: str, query: Mapping[str, str] | None = None, authorization: str | None = None,
                headers: Mapping[str, str] | None = None, body: bytes | str | None = None, url: str | None = None) -> tuple[int, Any]:
-        # headers/url/body (B30 Schnitt E): Kopfzeilen und Pfad mit Query, wie die App sie sieht – für die Signaturprüfung; FastAPI: request.headers, str(request.url), await request.body()
+        # headers/url/body: headers and path with query as the app sees them, for the signature check; FastAPI: request.headers, str(request.url), await request.body()
         full = url if url is not None else (path + ("?" + "&".join(f"{k}={v}" for k, v in (query or {}).items()) if query else ""))
         path = path.split("?", 1)[0]
         if not path.startswith("/everydeck/read/"):
@@ -192,8 +192,8 @@ class ReadBridge:
             if not v.ok:
                 return 401, {"error": f"signature rejected: {v.reason}"}
         elif self.signatures == "required":
-            return 401, {"error": "signature required (X-Everydeck-Signature missing) – everydeck signs every call since B30; use signatures=\"optional\" for older everydeck instances"}
-        elif not hmac.compare_digest((authorization or "").encode(), f"Bearer {self.token}".encode()):   # zeitkonstant
+            return 401, {"error": "signature required (X-Everydeck-Signature missing): everydeck signs every call; use signatures=\"optional\" only for everydeck instances that do not sign calls yet"}
+        elif not hmac.compare_digest((authorization or "").encode(), f"Bearer {self.token}".encode()):   # constant time
             return 401, {"error": "read key invalid"}
         if method.upper() != "GET":
             return 405, {"error": "read only"}
@@ -212,7 +212,7 @@ class ReadBridge:
             rows = list(self.rows(p["table"], cols, [p["ref"]], after, limit + 1))
             kept = rows[:limit]
 
-            def name_of(r):   # B35 Punkt 3: Anzeigename nach der Regel der App – erste Stufe mit Inhalt, Teile mit dem Trennzeichen der App (wie read-bridge.ts)
+            def name_of(r):   # display name by the app's rule: first step with content, parts joined with the app's separator (as in read-bridge.ts)
                 for st in steps:
                     parts = [x for x in ("" if r.get(c) is None else _text(r[c]).strip() for c in st["columns"]) if x]
                     if parts:
@@ -220,11 +220,11 @@ class ReadBridge:
                 return None
             items = [{"subject_ref": _text(r[p["ref"]])[:128], **{f: (None if r.get(c) is None else _text(r[c])[:VALUE_MAX]) for f, c in p["fields"].items()}, **({"display_name": name_of(r)} if steps and "display_name" in p["fields"] else {})} for r in kept]
             return 200, {"as_of": as_of, "items": items, "next_cursor": _b64([_text(kept[-1][p["ref"]])]) if len(rows) > limit else None}
-        if path.startswith("/everydeck/read/messages/") and path[len("/everydeck/read/messages/"):].count("/") == 1:   # B31 Schnitt A: Nachrichten eines Gesprächs, nur auf Abruf
+        if path.startswith("/everydeck/read/messages/") and path[len("/everydeck/read/messages/"):].count("/") == 1:   # messages of one conversation, on demand only
             typ, ref = path[len("/everydeck/read/messages/"):].split("/", 1)
             if self.match is None:
                 return 404, {"error": "this bridge reads no conversations"}
-            # B46 Punkt 3: nur mit der Freigabe von everydeck für genau dieses Gespräch (geöffnet mit Grund); Tabelle und Spalten stehen nur in ihr
+            # only with everydeck's grant for exactly this conversation (opened with a reason); table and columns are only in the grant
             conv = grant_of(self.keys, query, typ, ref)
             if isinstance(conv, str):
                 return 403, {"error": f"a conversation is read only when a moderator opens it with a reason in everydeck ({conv})"}
@@ -244,7 +244,7 @@ class ReadBridge:
                       "text": "\n".join(_text(r[c]) for c in m["text"] if r.get(c) is not None)[:4000], **({"attachments": att[ids[i]]} if att.get(ids[i]) else {})} for i, r in enumerate(kept)]
             return 200, {"type": typ, "ref": ref[:128], "as_of": as_of, "items": items, "next_cursor": _b64([_iso(kept[-1][m["time"]]) or "", *(_text(kept[-1][k]) for k in m["ref"])]) if len(rows) > limit else None}
         rest = path[len("/everydeck/read/objects/"):] if path.startswith("/everydeck/read/objects/") else None
-        if rest is not None and rest.count("/") == 1:   # B30 Schnitt A: Einzelabruf GET /everydeck/read/objects/{type}/{ref}
+        if rest is not None and rest.count("/") == 1:   # fetch one object: GET /everydeck/read/objects/{type}/{ref}
             typ, ref_raw = rest.split("/", 1)
             x = self.types.get(typ)
             if not x:
@@ -267,7 +267,7 @@ class ReadBridge:
             if bad:
                 return 400, {"error": "bad cursor"}
             since_raw = (query or {}).get("changed_since")
-            if since_raw is not None:   # B30 Schnitt A: nur Geändertes seit since, stabil nach (Änderungsspalte, Schlüssel); dazu Gelöschtes, wo die App es kennt
+            if since_raw is not None:   # only rows changed since `since`, stable by (change column, keys); plus deletions where the app knows them
                 if not x["changed"]:
                     return 400, {"error": f"changed_since is not supported for {typ}: no column the database sets on every change"}
                 since = _iso(since_raw)
@@ -306,7 +306,7 @@ class ReadBridge:
 
 
 def _iso(v: Any) -> str | None:
-    """Zeitstempel als ISO-8601 (UTC, Z) oder None"""
+    """Timestamp as ISO-8601 (UTC, Z) or None"""
     if v is None:
         return None
     if isinstance(v, _dt.datetime):
@@ -325,18 +325,18 @@ def _ident(name: str) -> str:
 
 
 def read_view_name(table: str) -> str:
-    """Name der Sicht im Schema der Leserolle (everydeck’s SQL legt sie an): Tabelle, außerhalb von public `<schema>__<tabelle>`."""
+    """Name of the view in the reader role's schema (everydeck's SQL creates it): the table name, outside public `<schema>__<table>`."""
     return table.replace(".", "__", 1) if "." in table else table
 
 
 def psycopg_rows(conn: Any, schema: str | None = None) -> Rows:
-    """`rows` für psycopg 2/3: Keyset-Cursor über die Schlüsselspalten, nur die genannten Spalten; die Verbindung gehört der Leserolle.
-    `schema`: die Sichten der Leserolle (z. B. everydeck_read) statt der Tabellen – so greifen die Zeilenrechte der App nicht für den Leser."""
+    """`rows` for psycopg 2/3: keyset cursor over the key columns, only the given columns; the connection belongs to the reader role.
+    `schema`: the reader role's views (e.g. everydeck_read) instead of the tables, so the app's row-level policies do not apply to the reader."""
     def rows(table: str, columns: Sequence[str], keys: Sequence[str], after: Sequence[str] | None, limit: int, changed: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
         src = f"{_ident(schema)}.{_ident(read_view_name(table))}" if schema else _ident(table)
         lim = f"LIMIT {max(1, min(PAGE_MAX + 1, int(limit)))}"
         cur = conn.cursor()
-        if changed:   # B30 Schnitt A: nur Geändertes seit since, stabil nach (Änderungsspalte, Schlüssel); Cursor = [Änderungszeit, …Schlüssel]
+        if changed:   # only rows changed since `since`, stable by (change column, keys); cursor = [change time, …keys]
             order = [changed["column"], *keys]; params: list[Any] = [changed["since"]]
             where = f" WHERE {_ident(changed['column'])} >= %s"
             if after and len(after) == len(order):
@@ -352,7 +352,7 @@ def psycopg_rows(conn: Any, schema: str | None = None) -> Rows:
 
 
 def psycopg_one(conn: Any, schema: str | None = None) -> Callable[[str, Sequence[str], Sequence[str], Sequence[str]], Mapping[str, Any] | None]:
-    """B30 Schnitt A: `one` für psycopg – genau eine Zeile nach ihren Schlüsselwerten."""
+    """`one` for psycopg: exactly one row by its key values."""
     def one(table: str, columns: Sequence[str], keys: Sequence[str], ref: Sequence[str]) -> Mapping[str, Any] | None:
         src = f"{_ident(schema)}.{_ident(read_view_name(table))}" if schema else _ident(table)
         cur = conn.cursor()
@@ -365,7 +365,7 @@ def psycopg_one(conn: Any, schema: str | None = None) -> Callable[[str, Sequence
 
 
 def psycopg_match(conn: Any, schema: str | None = None) -> Callable[..., list[dict[str, Any]]]:
-    """B31 Schnitt A: `match` für psycopg – Zeilen mit where_column = ANY(values), Keyset-Cursor über order (Nachrichten eines Gesprächs)."""
+    """`match` for psycopg: rows with where_column = ANY(values), keyset cursor over order (messages of one conversation)."""
     def match(table: str, columns: Sequence[str], where_column: str, values: Sequence[str], order: Sequence[str], after: Sequence[str] | None, limit: int) -> list[dict[str, Any]]:
         src = f"{_ident(schema)}.{_ident(read_view_name(table))}" if schema else _ident(table)
         params: list[Any] = [list(values)]; cond = f"{_ident(where_column)}::text = ANY(%s)"
@@ -380,7 +380,7 @@ def psycopg_match(conn: Any, schema: str | None = None) -> Callable[..., list[di
 
 
 def scope_tables(scope: Mapping[str, Any]) -> list[str]:
-    """Alle Tabellen des Umfangs (Objekte, Beziehungen, Gespräche, Personen)."""
+    """All tables of the scope (objects, relations, conversations, people)."""
     out: list[str] = []
     convs = [t for c in (scope.get("conversations") or []) for t in [c["table"], c["messages"]["table"], *([c["attachments"]["table"]] if c.get("attachments") else [])]]
     for t in [o["table"] for o in scope.get("objects", [])] + [r["table"] for r in scope.get("relations", [])] + convs + ([scope["people"]["table"]] if scope.get("people") else []):
@@ -397,22 +397,22 @@ EXPOSURE_SQL = """SELECT
 
 
 def psycopg_rights(conn: Any, scope: Mapping[str, Any], view_schema: str | None = None) -> Callable[[], dict[str, Any]]:
-    """Rechte der Rolle prüfen, nicht behaupten: Superuser (pg_roles.rolsuper) und INSERT/UPDATE/DELETE je Tabelle des Umfangs (has_table_privilege);
-    mit `view_schema` (Sichten der Leserolle, z. B. everydeck_read) zusätzlich, ob das Schema über die Supabase-API (pgrst.db_schemas) oder für anon/authenticated/PUBLIC erreichbar ist."""
+    """Check the role's rights instead of claiming them: superuser (pg_roles.rolsuper) and INSERT/UPDATE/DELETE per scope table (has_table_privilege);
+    with `view_schema` (the reader role's views, e.g. everydeck_read) also whether the schema is reachable through the Supabase API (pgrst.db_schemas) or for anon/authenticated/PUBLIC."""
     def check() -> dict[str, Any]:
         cur = conn.cursor()
         cur.execute("SELECT current_user::text, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
         role, superuser = cur.fetchone()
         writable = []
         for t in scope_tables(scope):
-            # über den Katalog (pg_class), nicht über den Namen: has_table_privilege(name) verlangt USAGE auf dem Schema – eine Leserolle hat das nicht
+            # via the catalog (pg_class), not by name: has_table_privilege(name) requires USAGE on the schema, which a reader role does not have
             schema, name = t.split(".", 1) if "." in t else ("public", t)
             cur.execute("SELECT (has_table_privilege(current_user, c.oid, 'INSERT') OR has_table_privilege(current_user, c.oid, 'UPDATE') OR has_table_privilege(current_user, c.oid, 'DELETE')) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s", [schema, name])
             row = cur.fetchone()
             if row and row[0]:
                 writable.append(t)
         out = {"role": role, "superuser": bool(superuser), "writable": writable, "select_only": not superuser and not writable, "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")}
-        if view_schema:   # die Sichten laufen als Eigentümer (keine Zeilenrechte der App): niemand außer der Leserolle darf an das Schema
+        if view_schema:   # the views run as their owner (no app row-level policies): nobody but the reader role may access the schema
             cur.execute(EXPOSURE_SQL, {"s": view_schema})
             api, anon, authenticated, pub = cur.fetchone()
             out["exposed"] = [n for n, v in (("supabase api", api), ("anon", anon), ("authenticated", authenticated), ("public", pub)) if v]

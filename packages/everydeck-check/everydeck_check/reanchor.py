@@ -1,13 +1,13 @@
-"""B37 Baustein 2 – verschobene Fundstellen neu verankern, nur aus Fakten (git und Syntaxbaum), ohne Freigabe.
+"""Re-anchor places that moved, only from facts (git and syntax tree), without approval.
 
-Jede Fundstelle des Befunds (ein Objekt mit `path` und `line`) gilt für den Stand `commit`. Nach einer Änderung der App stehen Zeilen woanders.
-everydeck sieht den Code nicht – das Neuverankern läuft dort, wo der Code ist (im Wächter auf GitHub oder beim Agenten), in dieser Reihenfolge:
+Every place of the Befund (an object with `path` and `line`) holds for the state `commit`. After a change to the app, lines are elsewhere.
+everydeck does not see the code; re-anchoring runs where the code is (in the GitHub check or at the agent), in this order:
 
-  1. git: die Zeile ist zwischen `commit` und HEAD unverändert geblieben (auch in einer umbenannten Datei) → neue Zeilennummer aus dem Diff.
-  2. Text: die Zeile wurde verschoben (Diff sieht Löschen + Einfügen) und ihr Text steht in der neuen Datei genau einmal → diese Zeile.
-  3. Symbol: die Fundstelle nennt ein Symbol und die Datei definiert es genau einmal → steht der alte Text im Körper genau einmal, diese Zeile,
-     sonst die Zeile der Definition.
-Sonst bleibt die Fundstelle offen (`unresolved`) – nichts wird geraten.
+  1. git: the line stayed unchanged between `commit` and HEAD (also in a renamed file) → new line number from the diff.
+  2. text: the line was moved (the diff sees delete + insert) and its text appears exactly once in the new file → that line.
+  3. symbol: the place names a symbol and the file defines it exactly once → if the old text appears exactly once in the body, that line,
+     otherwise the line of the definition.
+Otherwise the place stays open (`unresolved`); nothing is guessed.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _git(repo: Path, *args: str) -> str | None:
 
 
 def places(doc: Any, at: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
-    """Jede Fundstelle im Befund mit ihrem Ort (z. B. `flows[0].signals[1].evidence`) – ein Objekt mit Datei und Zeile (nicht `database`)."""
+    """Every place in the Befund with its location (e.g. `flows[0].signals[1].evidence`): an object with file and line (not `database`)."""
     if isinstance(doc, dict):
         if isinstance(doc.get("path"), str) and isinstance(doc.get("line"), int) and doc["path"] != "database":
             yield at, doc
@@ -40,7 +40,7 @@ def places(doc: Any, at: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
 
 def _hunks(repo: Path, base: str, head: str, old: str, new: str) -> list[tuple[int, int, int, int]]:
     out = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", base, head, "--", old, new) if old != new else _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", base, head, "--", old)
-    if old != new:   # umbenannte Datei: Inhalte direkt vergleichen
+    if old != new:   # renamed file: compare contents directly
         out = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", f"{base}:{old}", f"{head}:{new}")
     hs: list[tuple[int, int, int, int]] = []
     for ln in (out or "").splitlines():
@@ -51,10 +51,10 @@ def _hunks(repo: Path, base: str, head: str, old: str, new: str) -> list[tuple[i
 
 
 def _map_line(hunks: list[tuple[int, int, int, int]], line: int) -> int | None:
-    """Zeile im alten Stand → Zeile im neuen Stand; None, wenn die Zeile selbst geändert oder gelöscht wurde."""
+    """Line in the old state → line in the new state; None if the line itself was changed or deleted."""
     shift = 0
     for a, b, _c, d in hunks:
-        if b == 0:   # reine Einfügung nach Zeile a
+        if b == 0:   # pure insertion after line a
             if line > a: shift += d
             continue
         if line < a: break
@@ -79,7 +79,7 @@ def _functions(repo: Path, rel: str, text: str) -> list[dict[str, Any]] | None:
 
 
 def reanchor(b: dict[str, Any], repo: Path, base: str | None = None) -> dict[str, Any]:
-    """Verankert alle Fundstellen von `base` (Standard: `commit` des Befunds) auf HEAD um; ändert `b` und liefert den Bericht."""
+    """Re-anchors all places from `base` (default: the Befund's `commit`) to HEAD; changes `b` and returns the report."""
     repo = repo.resolve()
     head = (_git(repo, "rev-parse", "HEAD") or "").strip() or None
     base = base or b.get("commit")
@@ -112,8 +112,8 @@ def reanchor(b: dict[str, Any], repo: Path, base: str | None = None) -> dict[str
         new_path = renames.get(old_path, old_path)
         if old_path not in changed and new_path == old_path:
             rep["unchanged"] += 1; continue
-        # die Datei gab es am Commit des Befunds nicht (z. B. eine Fundstelle, die nach einer Umbenennung von Hand nachgetragen wurde): git kann nichts
-        # verschieben – die Fundstelle bleibt, wie sie ist, und die Prüfung urteilt über sie
+        # the file did not exist at the Befund's commit (e.g. a place added by hand after a rename): git cannot
+        # move anything; the place stays as it is and the check judges it
         if old_path not in renames and _git(repo, "cat-file", "-e", f"{base}:{old_path}") is None:
             rep["unchanged"] += 1; rep.setdefault("not_at_base", []).append(at); continue
         if old_path in deleted:

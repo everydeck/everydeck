@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://everydeck.local/schemas/change.1.0-r0.json",
   "title": "Everydeck change description 1.0-r0 (everydeck-change.json)",
-  "description": "Structured description of one commit, maintained by the operator's coding agent and checked mechanically by everydeck-check change (B9).",
+  "description": "Structured description of one commit, maintained by the operator's coding agent and checked mechanically by everydeck-check change.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

@@ -1,25 +1,25 @@
 /**
- * B30 Schnitt E – Prüfhilfe für Brücken: everydeck signiert jeden Aufruf an eine Lese- oder App-Brücke (wie Stripe).
- *   X-Everydeck-Timestamp (Unix-Sekunden), X-Everydeck-Request-Id (UUID), X-Everydeck-Signature (v1=<hex>[,v1=<hex>] – eine je gültigem Schlüssel).
- *   Signatur = HMAC-SHA256(Schlüssel, "EVERYDECK-V1\n" + METHOD + "\n" + Pfad ab /everydeck/ mit Query + "\n" + Zeitstempel + "\n" + request_id + "\n" + SHA-256(Körper) hex).
- * Die App lehnt ab, wenn der Zeitstempel älter (oder jünger) als 5 Minuten ist oder die request_id in dieser Zeit schon gesehen wurde.
- * B31 Abnahme (A8): Die request_id der Signatur (X-Everydeck-Request-Id) ist je HTTP-Aufruf neu, auch wenn everydeck denselben Auftrag wiederholt – der
- * Replay-Schutz trifft nur eine wörtlich wiederholte Anfrage. Die Idempotenz einer Aktion trägt `request_id` im Körper und `Idempotency-Key`;
- * eine Wiederholung beantwortet die Tür mit dem festgehaltenen Ergebnis, nie mit 401.
- * Läuft in Node ≥ 20, Deno (Supabase Edge Functions) und Browsern: nur Web Crypto, kein `node:`-Modul.
+ * Verification helper for bridges: everydeck signs every call to a read bridge or app bridge (like Stripe).
+ *   X-Everydeck-Timestamp (Unix seconds), X-Everydeck-Request-Id (UUID), X-Everydeck-Signature (v1=<hex>[,v1=<hex>], one per valid key).
+ *   Signature = HMAC-SHA256(key, "EVERYDECK-V1\n" + METHOD + "\n" + path from /everydeck/ with query + "\n" + timestamp + "\n" + request_id + "\n" + SHA-256(body) hex).
+ * The app rejects a call when the timestamp is older (or newer) than 5 minutes or the request_id was already seen within that time.
+ * The signature's request_id (X-Everydeck-Request-Id) is new for every HTTP call, even when everydeck retries the same job; the
+ * replay protection only catches a literally repeated request. The idempotency of an action is carried by `request_id` in the body and `Idempotency-Key`;
+ * the door answers a retry with the recorded result, never with 401.
+ * Runs in Node >= 20, Deno (Supabase Edge Functions) and browsers: Web Crypto only, no `node:` module.
  *
- * Eine Zeile in der Tür der App:
+ * One line in the app's door:
  *   const v = await verifyEverydeckRequest({ method: req.method, url: req.url, headers: req.headers, body }, { keys: [process.env.EVERYDECK_BRIDGE_KEY] });
  *   if (!v.ok) return 401;
  */
-export interface VerifyInput { method: string; /** voller Pfad oder volle URL, wie die App ihn sieht; es zählt der Teil ab /everydeck/ mit Query */ url: string; headers: HeadersLike; /** roher Körper (Text oder Bytes); bei GET leer */ body?: string | Uint8Array | null | undefined }
+export interface VerifyInput { method: string; /** full path or full URL as the app sees it; the part from /everydeck/ including the query counts */ url: string; headers: HeadersLike; /** raw body (text or bytes); empty for GET */ body?: string | Uint8Array | null | undefined }
 export type HeadersLike = { get(name: string): string | null } | Record<string, string | string[] | undefined>;
 export interface VerifyOptions {
-  /** die gültigen Schlüssel der App – während eines Schlüsseltauschs der neue und der alte */
+  /** the app's valid keys; during a key rotation the new and the old one */
   keys: (string | undefined | null)[];
-  /** erlaubter Abstand des Zeitstempels in Sekunden (Standard 300) */
+  /** allowed timestamp skew in seconds (default 300) */
   maxSkewSeconds?: number;
-  /** Replay-Schutz: true, wenn die request_id in den letzten 5 Minuten schon gesehen wurde. Standard: Speicher dieses Prozesses (mehrere Instanzen: eigene Prüfung, z. B. Redis/Postgres) */
+  /** Replay protection: true when the request_id was already seen in the last 5 minutes. Default: memory of this process (several instances: your own check, e.g. Redis/Postgres) */
   seen?: (requestId: string, timestamp: number) => boolean | Promise<boolean>;
   now?: () => number;
 }
@@ -49,7 +49,7 @@ export async function signatureFor(key: string, canonical: string): Promise<stri
 }
 const sameHex = (a: string, b: string) => { if (a.length !== b.length) return false; let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i); return d === 0; };
 
-/** Replay-Speicher je Prozess: request_id → Zeitstempel, aufgeräumt nach dem Fenster. */
+/** Replay store per process: request_id → timestamp, cleaned up after the window. */
 export function memorySeen(windowSeconds = SIGNATURE_WINDOW_SECONDS, now: () => number = () => Date.now() / 1000) {
   const m = new Map<string, number>();
   return (id: string, ts: number): boolean => {
@@ -77,7 +77,7 @@ export async function verifyEverydeckRequest(req: VerifyInput, o: VerifyOptions)
   return { ok: true, requestId: id, timestamp };
 }
 
-/** Gegenstück für Tests und Prüfskripte der App: Kopfzeilen, wie everydeck sie schickt (`keys[0]` aktuell, weitere vorige). Im Produkt signiert nur everydeck. */
+/** Counterpart for the app's tests and check scripts: headers as everydeck sends them (`keys[0]` current, further ones previous). In production only everydeck signs. */
 export async function signEverydeckRequest(input: { keys: string[]; method: string; url: string; body?: string | Uint8Array | null | undefined; requestId?: string | undefined; now?: number | undefined }): Promise<Record<string, string>> {
   const timestamp = Math.floor((input.now ?? Date.now()) / 1000);
   const requestId = input.requestId ?? (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);

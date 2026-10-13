@@ -1,27 +1,27 @@
 /**
- * @everydeck/sdk – die allgemeine Lese-Brücke (B29 Abnahme, docs/04 „Lese-Bridge“): ein Endpunkt je deklarierter Tabelle, nur deklarierte Spalten,
- * mit Cursor. Der Agent schreibt keine Brücke mehr je App: er holt den Lese-Umfang (`everydeck/everydeck-read-scope.json`, aus dem Befund abgeleitet) und
- * liefert eine Funktion `rows`, die Zeilen aus der Datenbank der App liest – über eine eigene Leserolle (nur SELECT). `pgRows(client)` ist die
- * fertige Fassung für `pg` oder `postgres` (jeder Client mit `query(text, values)`), `pgRights(client, scope)` prüft beim Start die tatsächlichen
- * Rechte dieser Rolle (Superuser, INSERT/UPDATE/DELETE je Tabelle) – die Brücke meldet sie in `rights`, statt sie zu behaupten.
+ * @everydeck/sdk: the generic read bridge: one endpoint per declared table, declared columns only,
+ * with a cursor. The agent no longer writes a bridge per app: it fetches the read scope (`everydeck/everydeck-read-scope.json`, derived from the Befund) and
+ * passes a function `rows` that reads rows from the app's database, through a dedicated reader role (SELECT only). `pgRows(client)` is the
+ * ready-made version for `pg` or `postgres` (any client with `query(text, values)`); `pgRights(client, scope)` checks the actual
+ * rights of that role at startup (superuser, INSERT/UPDATE/DELETE per table), and the bridge reports them in `rights` instead of claiming them.
  *
- * Läuft in Node ≥ 22, Deno (Supabase Edge Functions) und jeder fetch-Laufzeit: kein `Buffer`, kein `node:`-Modul. `handle()` ist die reine
- * Funktion, `fetch()` der Adapter für Request/Response (Deno.serve), `node()` der für node:http.
+ * Runs in Node >= 22, Deno (Supabase Edge Functions) and any fetch runtime: no `Buffer`, no `node:` module. `handle()` is the pure
+ * function, `fetch()` the adapter for Request/Response (Deno.serve), `node()` the one for node:http.
  *
- * Vertrag (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit
- * · B31: GET /everydeck/read/messages/{type}/{ref}?cursor&limit (Nachrichten eines Gesprächs, nur auf Abruf mit `match`);
- * B30 Schnitt A (inkrementell wie Fivetran): mit `changed_since` nur Geändertes, stabil nach (Änderungsspalte, Schlüssel), dazu `deleted` wo die App Löschungen kennt; Einzelabruf nach einem Signal; die Fähigkeiten nennen je Objektart `changed_since` und `fetch_one`;
- * eigener Bearer-Schlüssel (zeitkonstant verglichen); jedes Schreibverb wird abgewiesen; Seiten ≤ 200; Kennungen als Text (mehrere Schlüsselspalten
- * mit „|“ verbunden); Zeitstempel als ISO-8601; Objektwerte als JSON-Text; kein Wert länger als 256 Zeichen. Beziehungen (Verknüpfungstabellen)
- * werden wie Objektarten geliefert (type = relations[].id, fields = die beiden Seiten). Nichts außerhalb des Umfangs ist erreichbar.
+ * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit
+ * · GET /everydeck/read/messages/{type}/{ref}?cursor&limit (messages of a conversation, on demand only, with `match`);
+ * incremental (like Fivetran): with `changed_since` only changed rows, stable by (change column, key), plus `deleted` where the app knows deletions; single fetch after a signal; the capabilities name `changed_since` and `fetch_one` per object type;
+ * own Bearer key (compared in constant time); every write verb is rejected; pages <= 200; identifiers as text (several key columns
+ * joined with "|"); timestamps as ISO-8601; object values as JSON text; no value longer than 256 characters. Relations (link tables)
+ * are delivered like object types (type = relations[].id, fields = the two sides). Nothing outside the scope is reachable.
  */
 import { verifyEverydeckRequest, type HeadersLike, type VerifyOptions } from './verify.js';
 const headerOf = (h: HeadersLike, name: string): string | null => { if (typeof (h as { get?: unknown }).get === 'function') return (h as { get(n: string): string | null }).get(name); const v = (h as Record<string, string | string[] | undefined>)[name] ?? (h as Record<string, string | string[] | undefined>)[name.toLowerCase()]; return Array.isArray(v) ? v[0] ?? null : v ?? null; };
 /**
- * B46 Punkt 3: ein Gespräch liest die Brücke nur mit einer Freigabe (grant) von everydeck für genau dieses Gespräch – ein Moderator hat es mit Grund
- * geöffnet. Die Freigabe nennt Objektart, Kennung, Grund, Ablauf (Unix-Sekunden, höchstens 5 Minuten) und die Nachrichtentabelle mit ihren Spalten;
- * der Dauer-Umfang kennt diese Tabelle nicht. Sie reist als Query (?grant=<base64url(JSON)>&grant_sig=v1=<hex>), signiert mit dem Brückenschlüssel
- * über "EVERYDECK-GRANT-V1\n" + grant. Nichts davon wird gespeichert.
+ * The bridge reads a conversation only with a grant from everydeck for exactly that conversation: a moderator opened it with a reason.
+ * The grant names object type, identifier, reason, expiry (Unix seconds, at most 5 minutes) and the message table with its columns;
+ * the standing scope does not know this table. It travels as a query (?grant=<base64url(JSON)>&grant_sig=v1=<hex>), signed with the bridge key
+ * over "EVERYDECK-GRANT-V1\n" + grant. None of it is stored.
  */
 export const GRANT_SIGNATURE_PREFIX = 'EVERYDECK-GRANT-V1\n';
 export interface ReadGrant { v: 1; id: string; type: string; ref: string; reason: string; exp: number; messages: ReadScopeConversation['messages']; attachments?: ReadScopeConversation['attachments'] }
@@ -30,7 +30,7 @@ async function grantHmac(key: string, grant: string): Promise<string> {
   const k = await crypto.subtle.importKey('raw', enc.encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', k, enc.encode(GRANT_SIGNATURE_PREFIX + grant))), (x) => x.toString(16).padStart(2, '0')).join('');
 }
-/** Gegenstück für everydeck und Tests: Query-Parameter einer Freigabe */
+/** Counterpart for everydeck and tests: query parameters of a grant */
 export async function signEverydeckGrant(keys: string[], grant: ReadGrant): Promise<{ grant: string; grant_sig: string }> {
   const bytes = enc.encode(JSON.stringify(grant)); let bin = ''; for (const b of bytes) bin += String.fromCharCode(b);
   const g = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -38,7 +38,7 @@ export async function signEverydeckGrant(keys: string[], grant: ReadGrant): Prom
   return { grant: g, grant_sig: sigs.join(',') };
 }
 const isName = (x: unknown) => typeof x === 'string' && x.length > 0 && x.length <= 160;
-/** Freigabe prüfen: Signatur mit einem gültigen Schlüssel, genau dieses Gespräch, Grund, nicht abgelaufen, Nachrichtentabelle vollständig */
+/** Checks a grant: signature with a valid key, exactly this conversation, reason, not expired, message table complete */
 async function grantOf(keys: string[], q: Record<string, string | undefined> | undefined, type: string, ref: string): Promise<ReadGrant | string> {
   const g = q?.['grant']; const sig = q?.['grant_sig'];
   if (!g || !sig) return 'grant missing';
@@ -56,33 +56,33 @@ async function grantOf(keys: string[], q: Record<string, string | undefined> | u
   return v;
 }
 export interface ReadScopeField { name: string; column: string }
-export interface ReadScopeObject { type: string; table: string; ref: string[]; title?: string; status?: string; owner?: string; fields: ReadScopeField[]; statuses?: string[]; /** B30 Schnitt A: die Spalte, die die Datenbank bei jeder Änderung setzt (Trigger/onupdate) – erlaubt `changed_since`; ohne sie nur Volllauf */ changed?: string }
+export interface ReadScopeObject { type: string; table: string; ref: string[]; title?: string; status?: string; owner?: string; fields: ReadScopeField[]; statuses?: string[]; /** the column the database sets on every change (trigger/onupdate); allows `changed_since`; without it only full runs */ changed?: string }
 export interface ReadScopeRelation { id: string; table: string; ref: string[]; fields: ReadScopeField[] }
-/** B35: name = Regel der App für den Anzeigenamen (Stufen nacheinander; je Stufe die Spalten, verbunden mit dem Trennzeichen der App) */
+/** name = the app's rule for the display name (stages in order; per stage the columns, joined with the app's separator) */
 export interface ReadScopePeople { table: string; ref: string; fields: Record<string, string>; name?: { columns: string[]; separator?: string }[] }
-/** B31 Schnitt A: ein Gespräch – die Nachrichten liefert die Brücke nur auf Abruf (GET /everydeck/read/messages/{type}/{ref}), everydeck speichert sie nicht */
+/** A conversation: the bridge delivers its messages only on demand (GET /everydeck/read/messages/{type}/{ref}); everydeck does not store them */
 export interface ReadScopeConversation { type: string; table: string; ref: string[]; messages: { table: string; ref: string[]; conversation: string; sender: string; time: string; text: string[] }; attachments?: { table: string; message: string; url: string; name?: string; kind: 'image' | 'file' } }
 export interface ReadScope { version: '1'; objects: ReadScopeObject[]; relations: ReadScopeRelation[]; conversations?: ReadScopeConversation[]; people: ReadScopePeople | null }
-/** Rechte der Datenbankrolle – geprüft, nicht behauptet */
-export interface ReadRights { role: string; select_only: boolean; superuser?: boolean; writable?: string[]; checked_at?: string; /** B29 vierte Runde: wer außer der Leserolle an das Sichten-Schema kommt – 'supabase api' (pgrst.db_schemas des authenticator), 'anon', 'authenticated', 'public' (USAGE auf dem Schema); leer = niemand */ exposed?: string[];
-  /** B46 (E2): die Rolle umgeht die Zeilenrechte der App (pg_roles.rolbypassrls) – die Brücke sieht dann jede Zeile und liefert nur die freigegebenen Spalten */ bypass_rls?: boolean;
-  /** B46 (E2): jede Abfrage läuft in einer Transaktion, die die Datenbank nur lesen lässt (current_setting('transaction_read_only') = on, geprüft) */ read_only_transaction?: boolean }
+/** Rights of the database role: checked, not claimed */
+export interface ReadRights { role: string; select_only: boolean; superuser?: boolean; writable?: string[]; checked_at?: string; /** who besides the reader role can reach the view schema: 'supabase api' (pgrst.db_schemas of authenticator), 'anon', 'authenticated', 'public' (USAGE on the schema); empty = nobody */ exposed?: string[];
+  /** the role bypasses the app's row security (pg_roles.rolbypassrls); the bridge then sees every row and delivers only the approved columns */ bypass_rls?: boolean;
+  /** every query runs in a transaction in which the database only allows reads (current_setting('transaction_read_only') = on, checked) */ read_only_transaction?: boolean }
 
-/** Zeilen einer Tabelle, sortiert nach den Schlüsselspalten, ab einem Cursor (Werte der Schlüsselspalten der letzten Zeile), höchstens `limit`.
- *  B30 Schnitt A: mit `changed` nur Zeilen mit changed.column ≥ since, stabil sortiert nach (changed.column, Schlüssel); der Cursor ist dann [Änderungszeit, …Schlüssel] */
+/** Rows of a table, sorted by the key columns, from a cursor (key column values of the last row), at most `limit`.
+ *  With `changed` only rows with changed.column >= since, sorted stably by (changed.column, key); the cursor is then [change time, ...key] */
 export type ReadRows = (q: { table: string; columns: string[]; keys: string[]; after: string[] | null; limit: number; changed?: { column: string; since: string } | undefined }) => Promise<Record<string, unknown>[]>;
-/** B30 Schnitt A: genau eine Zeile nach ihren Schlüsselwerten (Einzelabruf nach einem Signal) */
+/** Exactly one row by its key values (single fetch after a signal) */
 export type ReadOne = (q: { table: string; columns: string[]; keys: string[]; ref: string[] }) => Promise<Record<string, unknown> | null>;
-/** B30 Schnitt A: Löschungen, die die App kennt (Soft-Delete-Spalte, Löschtabelle) – [{ ref, deleted_at }] seit `since`; ohne Adapter kommt Gelöschtes über die Inventur */
+/** Deletions the app knows (soft-delete column, deletion table): [{ ref, deleted_at }] since `since`; without an adapter, deleted rows show up through the inventory */
 export type ReadDeleted = (q: { table: string; keys: string[]; since: string; limit: number }) => Promise<{ ref: string; deleted_at: string }[]>;
-/** B31 Schnitt A: Zeilen, deren Spalte `where.column` einen der Werte hat, sortiert nach `order`, ab einem Cursor (Werte der Sortierspalten) – für die Nachrichten eines Gesprächs */
+/** Rows whose column `where.column` has one of the values, sorted by `order`, from a cursor (values of the sort columns); for the messages of a conversation */
 export type ReadMatch = (q: { table: string; columns: string[]; where: { column: string; values: string[] }; order: string[]; after: string[] | null; limit: number }) => Promise<Record<string, unknown>[]>;
 export interface ReadBridgeOptions { scope: ReadScope; token: string;
-  /** B31 Schnitt A: Nachrichten eines Gesprächs auf Abruf (pgMatch); ohne `match` bietet die Brücke keine Gespräche an */ match?: ReadMatch;
-  /** B30 Schnitt E: everydeck signiert jeden Aufruf – `required` (Standard) lehnt unsignierte Aufrufe ab, `optional` nimmt den Bearer, wenn keine Signatur da ist (ältere everydeck-Stände), `off` prüft nur den Bearer */ signatures?: 'required' | 'optional' | 'off';
-  /** gültige Schlüssel für die Signatur (Standard: `token`; während eines Tauschs der neue und der alte) */ keys?: string[]; /** Replay-Schutz über mehrere Instanzen (Standard: Speicher dieses Prozesses) */ seen?: VerifyOptions['seen']; rows: ReadRows; one?: ReadOne; deleted?: ReadDeleted; app?: string; pageLimit?: number; /** fest oder beim ersten Aufruf geprüft (pgRights) */ rights?: ReadRights | (() => Promise<ReadRights>) }
+  /** messages of a conversation on demand (pgMatch); without `match` the bridge offers no conversations */ match?: ReadMatch;
+  /** everydeck signs every call: `required` (default) rejects unsigned calls, `optional` accepts the Bearer when there is no signature (everydeck instances that do not sign yet), `off` checks only the Bearer */ signatures?: 'required' | 'optional' | 'off';
+  /** valid keys for the signature (default: `token`; during a rotation the new and the old one) */ keys?: string[]; /** replay protection across several instances (default: memory of this process) */ seen?: VerifyOptions['seen']; rows: ReadRows; one?: ReadOne; deleted?: ReadDeleted; app?: string; pageLimit?: number; /** fixed, or checked on the first call (pgRights) */ rights?: ReadRights | (() => Promise<ReadRights>) }
 export interface ReadBridgeRequest { method: string; path: string; query?: Record<string, string | undefined>; authorization?: string | undefined;
-  /** B30 Schnitt E: Kopfzeilen (X-Everydeck-Timestamp, X-Everydeck-Request-Id, X-Everydeck-Signature) und der Pfad mit Query, wie die App ihn sieht – für die Signaturprüfung */ headers?: HeadersLike | undefined; url?: string | undefined; body?: string | Uint8Array | null | undefined }
+  /** headers (X-Everydeck-Timestamp, X-Everydeck-Request-Id, X-Everydeck-Signature) and the path with query as the app sees it, for the signature check */ headers?: HeadersLike | undefined; url?: string | undefined; body?: string | Uint8Array | null | undefined }
 export interface ReadBridgeResponse { status: number; body: unknown }
 export interface QueryClient { query: (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }
 
@@ -90,7 +90,7 @@ const PAGE_MAX = 200; const VALUE_MAX = 256;
 const enc = new TextEncoder(); const dec = new TextDecoder();
 const b64 = (v: string[]) => { const bytes = enc.encode(JSON.stringify(v)); let bin = ''; for (const b of bytes) bin += String.fromCharCode(b); return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
 const unb64 = (c: string): string[] | null => { try { const bin = atob(c.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (c.length % 4)) % 4)); const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0)); const v = JSON.parse(dec.decode(bytes)); return Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : null; } catch { return null; } };
-/** Schlüsselvergleich in konstanter Zeit (keine frühe Rückkehr je Zeichen) */
+/** Key comparison in constant time (no early return per character) */
 export function sameToken(a: string | undefined, b: string): boolean {
   if (typeof a !== 'string') return false;
   const x = enc.encode(a); const y = enc.encode(b); let d = x.length ^ y.length;
@@ -98,7 +98,7 @@ export function sameToken(a: string | undefined, b: string): boolean {
   return d === 0 && x.length === y.length;
 }
 const text = (v: unknown): string => (v instanceof Date ? v.toISOString() : typeof v === 'string' ? v : typeof v === 'object' ? JSON.stringify(v) : String(v));
-/** Feldwert in der Transportform: Zahl, Ja/Nein, Text (≤ 256), sonst JSON-Text; Zeitstempel ISO-8601 */
+/** Field value in transport form: number, boolean, text (<= 256), otherwise JSON text; timestamps ISO-8601 */
 const value = (v: unknown): string | number | boolean | null => {
   if (v === null || v === undefined) return null;
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -115,7 +115,7 @@ export function createReadBridge(o: ReadBridgeOptions) {
   const objects = new Map<string, { table: string; keys: string[]; columns: string[]; title?: string | undefined; status?: string | undefined; owner?: string | undefined; changed?: string | undefined; fields: ReadScopeField[] }>();
   for (const x of o.scope.objects) objects.set(x.type, { table: x.table, keys: x.ref, title: x.title, status: x.status, owner: x.owner, changed: x.changed, fields: x.fields, columns: uniq([...x.ref, ...(x.title ? [x.title] : []), ...(x.status ? [x.status] : []), ...(x.owner ? [x.owner] : []), ...(x.changed ? [x.changed] : []), ...x.fields.map((f) => f.column)]) });
   for (const r of o.scope.relations) objects.set(r.id, { table: r.table, keys: r.ref, fields: r.fields, columns: uniq([...r.ref, ...r.fields.map((f) => f.column)]) });
-  // B30 Schnitt A: die Fähigkeiten sagen je Objektart, ob `changed_since` geht (Änderungsspalte im Umfang), und ob der Einzelabruf geht
+  // the capabilities say per object type whether `changed_since` works (change column in the scope) and whether the single fetch works
   const capabilities = async () => ({ version: '1' as const, ...(o.app ? { app: o.app } : {}), identity: 'subject_ref' as const,
     objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!x.changed })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false }))],
     ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields) } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
@@ -131,13 +131,13 @@ export function createReadBridge(o: ReadBridgeOptions) {
   async function handle(req: ReadBridgeRequest): Promise<ReadBridgeResponse> {
     const path = req.path.split('?')[0]!;
     if (!path.startsWith('/everydeck/read/')) return { status: 404, body: { error: 'not found' } };
-    // B30 Schnitt E: signierter Aufruf (Zeitfenster 5 min, request_id einmalig) – gilt statt des Bearers; ohne Signatur je nach Einstellung
+    // signed call (time window 5 min, request_id used once) counts instead of the Bearer; without a signature it depends on the setting
     const mode = o.signatures ?? 'required';
     const sigHeader = mode !== 'off' && req.headers ? headerOf(req.headers, 'x-everydeck-signature') : null;
     if (sigHeader) {
       const v = await verifyEverydeckRequest({ method: req.method, url: req.url ?? (req.path + (req.query && Object.keys(req.query).length ? '?' + new URLSearchParams(Object.entries(req.query).filter((e): e is [string, string] => typeof e[1] === 'string')).toString() : '')), headers: req.headers!, body: req.body ?? null }, { keys: o.keys ?? [o.token], ...(o.seen ? { seen: o.seen } : {}) });
       if (!v.ok) return { status: 401, body: { error: `signature rejected: ${v.reason}` } };
-    } else if (mode === 'required') return { status: 401, body: { error: 'signature required (X-Everydeck-Signature missing) – everydeck signs every call since B30; set signatures: "optional" for older everydeck instances' } };
+    } else if (mode === 'required') return { status: 401, body: { error: 'signature required (X-Everydeck-Signature missing): everydeck signs every call; set signatures: "optional" only for everydeck instances that do not sign calls yet' } };
     else if (!sameToken(req.authorization, `Bearer ${o.token}`)) return { status: 401, body: { error: 'read key invalid' } };
     if (req.method.toUpperCase() !== 'GET') return { status: 405, body: { error: 'read only' } };
     if (path === '/everydeck/read/capabilities') return { status: 200, body: await capabilities() };
@@ -148,17 +148,17 @@ export function createReadBridge(o: ReadBridgeOptions) {
       const cols = uniq([p.ref, ...Object.values(p.fields), ...(p.name ?? []).flatMap((st) => st.columns)]);
       const rows = await o.rows({ table: p.table, columns: cols, keys: [p.ref], after, limit: limit + 1 });
       const kept = rows.slice(0, limit);
-      // B35 Punkt 3: der Anzeigename nach der Regel der App – die erste Stufe mit Inhalt; je Stufe die nicht leeren Teile mit dem Trennzeichen der App
+      // the display name by the app's rule: the first stage with content; per stage the non-empty parts joined with the app's separator
       const nameOf = (r: Record<string, unknown>): string | null => { for (const st of p.name ?? []) { const parts = st.columns.map((c) => (r[c] === null || r[c] === undefined ? '' : text(r[c]).trim())).filter(Boolean); if (parts.length) return parts.join(st.separator ?? ' ').slice(0, VALUE_MAX); } return null; };
       const items = kept.map((r) => ({ subject_ref: text(r[p.ref]).slice(0, 128), ...Object.fromEntries(Object.entries(p.fields).map(([f, c]) => [f, r[c] === null || r[c] === undefined ? null : text(r[c]).slice(0, VALUE_MAX)])), ...(p.name?.length && 'display_name' in p.fields ? { display_name: nameOf(r) } : {}) }));
       return { status: 200, body: { as_of: asOf, items, next_cursor: rows.length > limit ? b64([text(kept[kept.length - 1]![p.ref])]) : null } };
     }
-    // B31 Schnitt A: GET /everydeck/read/messages/{type}/{ref} – die Nachrichten eines Gesprächs, aufsteigend nach Zeit; nur auf Abruf, everydeck speichert nichts
+    // GET /everydeck/read/messages/{type}/{ref}: the messages of a conversation, ascending by time; on demand only, everydeck stores nothing
     const mm = /^\/everydeck\/read\/messages\/([^/]+)\/([^/]+)$/.exec(path);
     if (mm) {
       const type = decodeURIComponent(mm[1]!); if (!o.match) return { status: 404, body: { error: 'this bridge reads no conversations' } };
       const ref = decodeURIComponent(mm[2]!);
-      // B46 Punkt 3: nur mit der Freigabe von everydeck für genau dieses Gespräch (geöffnet mit Grund); Tabelle und Spalten stehen nur in ihr
+      // only with everydeck's grant for exactly this conversation (opened with a reason); table and columns are only in the grant
       const grant = await grantOf(o.keys ?? [o.token], req.query, type, ref);
       if (typeof grant === 'string') return { status: 403, body: { error: `a conversation is read only when a moderator opens it with a reason in everydeck (${grant})` } };
       const conv = { messages: grant.messages, attachments: grant.attachments };
@@ -175,7 +175,7 @@ export function createReadBridge(o: ReadBridgeOptions) {
       const last = kept[kept.length - 1];
       return { status: 200, body: { type, ref: ref.slice(0, 128), as_of: asOf, items, next_cursor: rows.length > limit && last ? b64([isoOf(last[m.time]) ?? '', ...m.ref.map((k) => text(last[k]))]) : null } };
     }
-    // B30 Schnitt A: Einzelabruf GET /everydeck/read/objects/{type}/{ref} (Kennung = Schlüsselwerte, mehrere mit „|“)
+    // single fetch GET /everydeck/read/objects/{type}/{ref} (identifier = key values, several joined with "|")
     const m1 = /^\/everydeck\/read\/objects\/([^/]+)\/([^/]+)$/.exec(path);
     if (m1) {
       const type = decodeURIComponent(m1[1]!); const x = objects.get(type); if (!x) return { status: 404, body: { error: `unknown type ${type}` } };
@@ -189,7 +189,7 @@ export function createReadBridge(o: ReadBridgeOptions) {
     if (m) {
       const type = decodeURIComponent(m[1]!); const x = objects.get(type); if (!x) return { status: 404, body: { error: `unknown type ${type}` } };
       const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
-      // B30 Schnitt A: ?changed_since=<ISO> liefert nur Geändertes, stabil nach (Änderungsspalte, Schlüssel); dazu Gelöschtes, wo die App es kennt
+      // ?changed_since=<ISO> returns only changed rows, stable by (change column, key); plus deleted rows where the app knows them
       const sinceRaw = req.query?.['changed_since'];
       if (sinceRaw !== undefined) {
         if (!x.changed) return { status: 400, body: { error: `changed_since is not supported for ${type}: no column the database sets on every change` } };
@@ -207,13 +207,13 @@ export function createReadBridge(o: ReadBridgeOptions) {
     }
     return { status: 404, body: { error: 'not found' } };
   }
-  /** fetch-Adapter (Deno.serve, Supabase Edge Function, Cloudflare, Node 22): `prefix` ist der Pfadteil vor /everydeck/read, z. B. /everydeck-read-bridge bei Supabase */
+  /** fetch adapter (Deno.serve, Supabase Edge Function, Cloudflare, Node 22): `prefix` is the path part before /everydeck/read, e.g. /everydeck-read-bridge on Supabase */
   const fetchHandler = (prefix = '') => async (req: Request): Promise<Response> => {
     const url = new URL(req.url); const path = prefix && url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : url.pathname;
     const r = await handle({ method: req.method, path, query: Object.fromEntries(url.searchParams), authorization: req.headers.get('authorization') ?? undefined, headers: req.headers, url: url.pathname + url.search, body: req.method === 'GET' || req.method === 'HEAD' ? null : new Uint8Array(await req.arrayBuffer()) });
     return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'content-type': 'application/json' } });
   };
-  /** Node-Adapter: (req, res) für node:http oder Express-artige Server */
+  /** Node adapter: (req, res) for node:http or Express-style servers */
   const node = () => async (req: { method?: string | undefined; url?: string | undefined; headers: Record<string, string | string[] | undefined> }, res: { writeHead: (s: number, h: Record<string, string>) => void; end: (b: string) => void }) => {
     const url = new URL(req.url ?? '/', 'http://bridge');
     const r = await handle({ method: req.method ?? 'GET', path: url.pathname, query: Object.fromEntries(url.searchParams), authorization: Array.isArray(req.headers['authorization']) ? req.headers['authorization'][0] : req.headers['authorization'], headers: req.headers, url: url.pathname + url.search, body: null });
@@ -223,15 +223,15 @@ export function createReadBridge(o: ReadBridgeOptions) {
 }
 
 const ident = (name: string) => name.split('.').map((p) => `"${p.replace(/"/g, '""')}"`).join('.');
-/** Name der Sicht im Schema der Leserolle (everydeck’s SQL legt sie an): Tabelle, außerhalb von public `<schema>__<tabelle>` */
+/** Name of the view in the reader role's schema (everydeck's SQL creates it): the table, outside public `<schema>__<table>` */
 export const readViewName = (table: string): string => (table.includes('.') ? table.replace('.', '__') : table);
-/** `rows` für `pg`/`postgres` (jeder Client mit `query(text, values)`): Keyset-Cursor über die Schlüsselspalten, nur die genannten Spalten.
- *  `schema`: die Sichten der Leserolle (z. B. everydeck_read) statt der Tabellen – so greifen die Zeilenrechte der App nicht für den Leser */
+/** `rows` for `pg`/`postgres` (any client with `query(text, values)`): keyset cursor over the key columns, only the named columns.
+ *  `schema`: the reader role's views (e.g. everydeck_read) instead of the tables, so the app's row security does not apply to the reader */
 export function pgRows(client: QueryClient, o: { schema?: string } = {}): ReadRows {
   return async ({ table, columns, keys, after, limit, changed }) => {
     const from = o.schema ? `${ident(o.schema)}.${ident(readViewName(table))}` : ident(table);
     const lim = `LIMIT ${Math.max(1, Math.min(PAGE_MAX + 1, limit))}`;
-    if (changed) {   // B30 Schnitt A: nur Geändertes seit `since`, stabil nach (Änderungsspalte, Schlüssel); Cursor = [Änderungszeit, …Schlüssel]
+    if (changed) {   // only rows changed since `since`, stable by (change column, key); cursor = [change time, ...key]
       const order = [changed.column, ...keys]; const params: unknown[] = [changed.since];
       let where = ` WHERE ${ident(changed.column)} >= $1`;
       if (after && after.length === order.length) { where += ` AND (${order.map(ident).join(', ')}) > (${order.map((_, i) => `$${i + 2}`).join(', ')})`; params.push(...after); }
@@ -242,7 +242,7 @@ export function pgRows(client: QueryClient, o: { schema?: string } = {}): ReadRo
     return (await client.query(sql, where ? after! : [])).rows;
   };
 }
-/** B30 Schnitt A: `one` für `pg`/`postgres` – genau eine Zeile nach ihren Schlüsselwerten */
+/** `one` for `pg`/`postgres`: exactly one row by its key values */
 export function pgOne(client: QueryClient, o: { schema?: string } = {}): ReadOne {
   return async ({ table, columns, keys, ref }) => {
     const from = o.schema ? `${ident(o.schema)}.${ident(readViewName(table))}` : ident(table);
@@ -250,7 +250,7 @@ export function pgOne(client: QueryClient, o: { schema?: string } = {}): ReadOne
     return r[0] ?? null;
   };
 }
-/** B31 Schnitt A: `match` für `pg`/`postgres` – Zeilen mit `where.column = ANY(values)`, Keyset-Cursor über `order` */
+/** `match` for `pg`/`postgres`: rows with `where.column = ANY(values)`, keyset cursor over `order` */
 export function pgMatch(client: QueryClient, o: { schema?: string } = {}): ReadMatch {
   return async ({ table, columns, where, order, after, limit }) => {
     const from = o.schema ? `${ident(o.schema)}.${ident(readViewName(table))}` : ident(table);
@@ -259,11 +259,11 @@ export function pgMatch(client: QueryClient, o: { schema?: string } = {}): ReadM
     return (await client.query(`SELECT ${uniq([...columns, ...order]).map(ident).join(', ')} FROM ${from} WHERE ${cond} ORDER BY ${order.map(ident).join(', ')} LIMIT ${Math.max(1, Math.min(PAGE_MAX + 1, limit))}`, params)).rows;
   };
 }
-/** Alle Tabellen des Umfangs (Objekte, Beziehungen, Gespräche, Personen) – für die Rechteprüfung und das SQL der Leserolle */
+/** All tables of the scope (objects, relations, conversations, people), for the rights check and the reader role's SQL */
 export const scopeTables = (scope: ReadScope): string[] => uniq([...scope.objects.map((x) => x.table), ...scope.relations.map((r) => r.table), ...(scope.conversations ?? []).flatMap((c) => [c.table, c.messages.table, ...(c.attachments ? [c.attachments.table] : [])]), ...(scope.people ? [scope.people.table] : [])]);
-/** Rechte der Rolle prüfen, nicht behaupten: Superuser (pg_roles.rolsuper) und INSERT/UPDATE/DELETE je Tabelle des Umfangs (has_table_privilege);
- * mit `schema` (die Sichten der Leserolle, z. B. everydeck_read) zusätzlich, ob das Schema über die Supabase-API (pgrst.db_schemas) oder für anon/authenticated/PUBLIC erreichbar ist */
-/** Erreichbarkeit des Sichten-Schemas: in pgrst.db_schemas der Rolle authenticator (Supabase-API), USAGE für anon / authenticated, USAGE für PUBLIC (nspacl '=U') */
+/** Checks the role's rights instead of claiming them: superuser (pg_roles.rolsuper) and INSERT/UPDATE/DELETE per scope table (has_table_privilege);
+ * with `schema` (the reader role's views, e.g. everydeck_read) also whether the schema is reachable through the Supabase API (pgrst.db_schemas) or for anon/authenticated/PUBLIC */
+/** Reachability of the view schema: in pgrst.db_schemas of the authenticator role (Supabase API), USAGE for anon / authenticated, USAGE for PUBLIC (nspacl '=U') */
 export const EXPOSURE_SQL = `SELECT
   coalesce((SELECT bool_or(cfg ~ ('(^|[=, ])' || $1 || '($|[, ])')) FROM pg_db_role_setting rs JOIN pg_roles r ON r.oid = rs.setrole CROSS JOIN LATERAL unnest(rs.setconfig) AS cfg WHERE r.rolname = 'authenticator' AND cfg LIKE 'pgrst.db_schemas=%'), false) AS api,
   CASE WHEN EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) THEN coalesce((SELECT bool_or(has_schema_privilege(r.rolname, $1, 'USAGE')) FROM pg_roles r WHERE r.rolname = 'anon'), false) ELSE false END AS anon,
@@ -274,14 +274,14 @@ export function pgRights(client: QueryClient, scope: ReadScope, opts: { schema?:
     const who = (await client.query('SELECT current_user::text AS role, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser')).rows[0] as { role: string; superuser: boolean } | undefined;
     const writable: string[] = [];
     for (const t of scopeTables(scope)) {
-      // über den Katalog (pg_class), nicht über den Namen: has_table_privilege(name) verlangt USAGE auf dem Schema und scheitert sonst – eine Leserolle hat das nicht
+      // through the catalog (pg_class), not by name: has_table_privilege(name) requires USAGE on the schema and fails otherwise, which a reader role does not have
       const [schema, name] = t.includes('.') ? [t.slice(0, t.indexOf('.')), t.slice(t.indexOf('.') + 1)] : ['public', t];
       const r = (await client.query("SELECT (has_table_privilege(current_user, c.oid, 'INSERT') OR has_table_privilege(current_user, c.oid, 'UPDATE') OR has_table_privilege(current_user, c.oid, 'DELETE')) AS w FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2", [schema, name])).rows[0] as { w: boolean } | undefined;
       if (r?.w) writable.push(t);
     }
     const superuser = !!who?.superuser;
     const exposed: string[] = [];
-    if (opts.schema) {   // die Sichten laufen als Eigentümer (keine Zeilenrechte der App): niemand außer der Leserolle darf an das Schema
+    if (opts.schema) {   // the views run as owner (no app row security): nobody but the reader role may reach the schema
       const e = (await client.query(EXPOSURE_SQL, [opts.schema])).rows[0] as { api?: boolean; anon?: boolean; authenticated?: boolean; pub?: boolean } | undefined;
       if (e?.api) exposed.push('supabase api'); if (e?.anon) exposed.push('anon'); if (e?.authenticated) exposed.push('authenticated'); if (e?.pub) exposed.push('public');
     }

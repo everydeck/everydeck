@@ -1,32 +1,32 @@
-"""everydeck Python SDK (R0, Transportvertrag 1.0-r0).
+"""everydeck Python SDK (transport contract 1.0-r0).
 
-Zusagen (docs/05, belegt in P2a und tests/):
-- `signal()/error()/log()` blockieren nie und werfen nie: O(1) Enqueue in einen begrenzten Speicherpuffer. Kein Datei- oder Netz-IO im Aufrufer.
-- Ein Sender-Thread überträgt Batches (max. 50 Ereignisse, 64 KiB). Drei getrennte Ergebnisse je Batch:
-  angenommen (202) · erneut versuchen (429, 5xx, Timeout, Netz) · endgültig abgewiesen (400/401/403/409/413/422).
-  Abgewiesene Batches zählen nie als gesendet; 401/403 pausieren den Sender (auth_pause_seconds) und melden eine Warnung.
-- B30 Schnitt D (0.1.1): Batches gehen gzip-komprimiert (`compress=False` schaltet es ab), `Retry-After` bei 429/503 wird befolgt,
-  Wiederholungen mit vollem Zufallsanteil (`full_jitter`); `stats`: batches_compressed, bytes_raw, bytes_sent, retry_after_waits – wie das TypeScript-SDK.
-- B30 Schnitt E (0.1.2): `everydeck.verify.verify_everydeck_request` prüft die Signatur von everydeck an Brücken (5-Minuten-Fenster, request_id einmalig); `ReadBridge` prüft selbst (`signatures="required"`).
-- B33 (0.1.5): `error(..., exc=e)` schickt zu bis zu 5 Frames im Code der App die Code-Zeilen mit (Fundzeile und je 5 davor und danach, je höchstens 200 Zeichen, bereinigt wie Fehlermeldungen); gelesen im Sender-Thread, nie im Aufruf; `Everydeck(..., source_context=False)` schaltet es ab. `error.context_status` sagt, ob Zeilen dabei sind oder warum nicht.
-- B34b (0.1.6): `error(..., response={code, message})` wie im TS-SDK (Code nur als Kennung, Meldung bereinigt, 300 Zeichen); `answer_of(exc)` liest beides aus Attributen der Ausnahme (z. B. postgrest `APIError.code`/`.message`), nie aus ihrem Text.
-- B32 (0.1.4): `signal`, `error` und `log` nehmen `object_type`/`object_ref` wie das TS-SDK (`objectType`/`objectRef`).
-- B31 (0.1.3): `Everydeck.error(..., exc=e)` sendet die Stack-Frames der Ausnahme (`error.frames`, innerste zuerst) – oder fertige `frames=[…]`; `ReadBridge(match=psycopg_match(conn))` liefert die Nachrichten eines Gesprächs auf Abruf (`GET /everydeck/read/messages/{type}/{ref}`).
-- Der Sender-Thread endet nie unbemerkt: jede Ausnahme wird gezählt, gemeldet und die Schleife fortgesetzt.
-- Pufferüberlauf wird als Ereignis `gap` (buffer_overflow) gemeldet: eine *erkennbare* Datenlücke.
-- Optionaler Spool (JSONL, begrenzte Größe) läuft in einem eigenen Thread, der als einziger die Datei anfasst: Schreibvorgänge und
-  Bestätigungen (angenommene/abgewiesene Ereignisse) kommen über zwei begrenzte Warteschlangen im RAM (`max_spool_queue`) und werden im
-  Spool-Thread gemeinsam ausgewertet – eine Bestätigung, die vor dem Schreiben eintrifft, verhindert das Schreiben, statt eine Waise zu
-  hinterlassen. Weder Aufrufer noch Sender halten während Datei-IO eine Sperre. Fehler (voll, nicht beschreibbar) werden gezählt und
-  gemeldet, betreffen aber weder Kundenrequests noch den Sender. Beim Start werden unbeschädigte Spool-Zeilen nachgeliefert (`gap`
-  restart_recovered); beschädigte Zeilen (abgebrochener Schreibvorgang) werden gezählt und verworfen. Ohne Spool bleibt ein SIGKILL unsichtbar.
-  Laufen die Warteschlangen über (Spool-Thread hängt an langsamem Datenträger), werden die ältesten Einträge verworfen und gezählt
-  (`spool_queue_dropped`, `spool_ack_dropped`); Folge einer verworfenen Bestätigung ist höchstens eine erneute Zustellung bereits angenommener
-  Ereignisse nach einem Neustart (everydeck dedupliziert je event_id), nie ein Verlust.
-- Lebenszeichen (R1): mit `heartbeat_interval` sendet der Sender-Thread alle n Sekunden ein Signal `everydeck.sdk.heartbeat`
-  (operation_id `everydeck.sdk:<instance_id>`, Felder instance_id/interval_seconds/pid). Ausbleibende Lebenszeichen sind für everydeck eine
-  Überwachungslücke, kein bewiesener Ausfall der App.
-- Das SDK kennt keine Datenbank von everydeck und entscheidet keine Engine-Urteile.
+Guarantees:
+- `signal()/error()/log()` never block and never raise: O(1) enqueue into a bounded in-memory buffer. No file or network IO in the caller.
+- A sender thread transmits batches (max. 50 events, 64 KiB). Three separate outcomes per batch:
+  accepted (202) · retry (429, 5xx, timeout, network) · finally rejected (400/401/403/409/413/422).
+  Rejected batches never count as sent; 401/403 pause the sender (auth_pause_seconds) and report a warning.
+- Batches are sent gzip-compressed (`compress=False` turns it off), `Retry-After` on 429/503 is honored,
+  retries use full jitter (`full_jitter`); `stats`: batches_compressed, bytes_raw, bytes_sent, retry_after_waits, as in the TypeScript SDK.
+- `everydeck.verify.verify_everydeck_request` checks everydeck's signature at bridges (5-minute window, request_id used once); `ReadBridge` checks it itself (`signatures="required"`).
+- `error(..., exc=e)` sends the code lines for up to 5 frames in the app's code (the error line and 5 before and after, at most 200 characters each, scrubbed like error messages); read in the sender thread, never in the call; `Everydeck(..., source_context=False)` turns it off. `error.context_status` says whether lines are included or why not.
+- `error(..., response={code, message})` as in the TS SDK (code only as an identifier, message scrubbed, 300 characters); `answer_of(exc)` reads both from attributes of the exception (e.g. postgrest `APIError.code`/`.message`), never from its text.
+- `signal`, `error` and `log` take `object_type`/`object_ref` like the TS SDK (`objectType`/`objectRef`).
+- `Everydeck.error(..., exc=e)` sends the exception's stack frames (`error.frames`, innermost first), or ready-made `frames=[…]`; `ReadBridge(match=psycopg_match(conn))` delivers the messages of one conversation on demand (`GET /everydeck/read/messages/{type}/{ref}`).
+- The sender thread never ends silently: every exception is counted, reported, and the loop continues.
+- Buffer overflow is reported as a `gap` event (buffer_overflow): a *detectable* data gap.
+- An optional spool (JSONL, bounded size) runs in its own thread, which is the only one touching the file: writes and
+  acknowledgements (accepted/rejected events) arrive through two bounded in-memory queues (`max_spool_queue`) and are evaluated
+  together in the spool thread; an acknowledgement that arrives before the write prevents the write instead of leaving an orphan
+  behind. Neither caller nor sender holds a lock during file IO. Errors (full, not writable) are counted and
+  reported but affect neither customer requests nor the sender. On start, intact spool lines are replayed (`gap`
+  restart_recovered); corrupt lines (interrupted write) are counted and discarded. Without a spool a SIGKILL stays invisible.
+  If the queues overflow (spool thread stuck on a slow disk), the oldest entries are discarded and counted
+  (`spool_queue_dropped`, `spool_ack_dropped`); a discarded acknowledgement can at most cause already accepted events to be
+  delivered again after a restart (everydeck deduplicates by event_id), never a loss.
+- Heartbeats: with `heartbeat_interval` the sender thread sends a signal `everydeck.sdk.heartbeat` every n seconds
+  (operation_id `everydeck.sdk:<instance_id>`, fields instance_id/interval_seconds/pid). Missing heartbeats are a
+  monitoring gap for everydeck, not a proven outage of the app.
+- The SDK knows no everydeck database and makes no engine verdicts.
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ from typing import Any, Callable, Literal
 __all__ = ["Everydeck", "AfterCommit", "SCHEMA_VERSION", "BATCH_MAX", "error_class_of", "scrub_text", "answer_of"]
 
 SCHEMA_VERSION = "1.3-r0"
-# B23: Herkunft jedes Ereignisses – ein Server-Schlüssel meldet immer die Plattform `server`
+# origin of every event: a server key always reports the platform `server`
 CLIENT = {"platform": "server", "runtime": "python"}
 BATCH_MAX = 50
 BATCH_MAX_BYTES = 64 * 1024
@@ -70,9 +70,9 @@ _COMMIT_ENV = ("GITHUB_SHA", "VERCEL_GIT_COMMIT_SHA", "RENDER_GIT_COMMIT", "CF_P
 
 
 def resolve_release_key(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
-    """B15/C5: automatische Versionskennung – gleiche Regel wie @everydeck/sdk resolveReleaseKey und everydeck-agent version.
+    """Automatic release key: same rule as @everydeck/sdk resolveReleaseKey and everydeck-agent version.
 
-    EVERYDECK_RELEASE_KEY (außer "auto") > Commit aus CI/Hosting (git:<sha12>) > lokales Git (git:<sha12>[+dirty.<hash8>]) > "unknown".
+    EVERYDECK_RELEASE_KEY (except "auto") > commit from CI/hosting (git:<sha12>) > local Git (git:<sha12>[+dirty.<hash8>]) > "unknown".
     """
     import hashlib
     import re
@@ -113,13 +113,13 @@ def _dumps(v: Any) -> str:
 
 
 def full_jitter(failures: int, cap: float, rnd: Callable[[], float] = random.random) -> float:
-    """B30 Schnitt D: Backoff mit vollem Zufallsanteil („full jitter"): gleichverteilt in [0, min(cap, 0.5 s · 2^n)] – wie das TypeScript-SDK."""
+    """Backoff with full jitter: uniform in [0, min(cap, 0.5 s · 2^n)], as in the TypeScript SDK."""
     ceiling = min(cap, 0.5 * 2 ** max(0, min(6, failures)))
     return rnd() * ceiling
 
 
 def parse_retry_after(value: str | None, now: float | None = None) -> float | None:
-    """`Retry-After` als Sekunden oder HTTP-Datum → Sekunden, begrenzt auf eine Stunde; None, wenn fehlt oder unlesbar."""
+    """`Retry-After` as seconds or HTTP date → seconds, capped at one hour; None when missing or unreadable."""
     if not value:
         return None
     v = value.strip()
@@ -164,7 +164,7 @@ class Everydeck:
         self.credential = credential or ""
         self.release_key = resolve_release_key() if not release_key or release_key == "auto" else release_key
         self.manifest_digest = manifest_digest or ""
-        # B15/C7: Prüflauf der Einrichtung (nur Verifikationsskripte)
+        # setup check run (verification scripts only)
         self.probe_id = probe_id
         self.max_buffer = max_buffer
         self.flush_interval = flush_interval
@@ -175,18 +175,18 @@ class Everydeck:
         self.max_spool_queue = max(1, int(max_spool_queue))
         self.auth_pause_seconds = auth_pause_seconds
         self.max_send_backoff = max_send_backoff
-        # B30 Schnitt D: Batches gzip-komprimiert senden (Standard an); everydeck nimmt Content-Encoding: gzip an
+        # send batches gzip-compressed (on by default); everydeck accepts Content-Encoding: gzip
         self.compress = compress
-        # B33: Code-Zeilen zu den Frames im Code der App (Standard an); Dateien liest der Sender-Thread, zwischengespeichert je Pfad
+        # code lines for frames in the app's code (on by default); the sender thread reads the files, cached per path
         self.source_context = source_context
         self._source_cache: dict[str, list[str] | None] = {}
         self._warn_cb = on_warning or (lambda m: _log.warning(m))
         self.enabled = enabled
-        # B36: fehlt Adresse oder Schlüssel (z. B. nach einem Update mit neuen Variablennamen), schaltet das SDK ab – aber laut, nie still
+        # if address or key is missing (e.g. after an update with new variable names), the SDK turns itself off, loudly, never silently
         if self.enabled and (not self.endpoint or not self.credential or not self.manifest_digest):
             self.enabled = False
             missing = "no endpoint" if not self.endpoint else "no key" if not self.credential else "no manifest digest"
-            self._warn_cb(f"everydeck: disabled: {missing} – nothing is sent to everydeck until the app passes endpoint, key and manifest digest")
+            self._warn_cb(f"everydeck: disabled: {missing}; nothing is sent to everydeck until the app passes endpoint, key and manifest digest")
         self.heartbeat_interval = heartbeat_interval
         self.instance_id = instance_id or f"{socket.gethostname()[:40]}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self._next_heartbeat = 0.0
@@ -198,10 +198,10 @@ class Everydeck:
         self._unreported_loss = 0
         self._paused_until = 0.0
         self._consecutive_failures = 0
-        self._spool_q: deque[dict[str, Any]] = deque()          # ausstehende Schreibvorgänge (begrenzt)
-        self._spool_acks: dict[str, None] = {}                  # ausstehende Bestätigungen, geordnet (begrenzt)
-        self._spool_q_lock = threading.Lock()   # nur Warteschlangen (Aufrufer, Sender, Spool-Thread), nie während Datei-IO gehalten
-        self._spool_lock = threading.Lock()     # Datei; nur Spool-Thread (und Wiederherstellung im Konstruktor)
+        self._spool_q: deque[dict[str, Any]] = deque()          # pending writes (bounded)
+        self._spool_acks: dict[str, None] = {}                  # pending acknowledgements, ordered (bounded)
+        self._spool_q_lock = threading.Lock()   # queues only (caller, sender, spool thread), never held during file IO
+        self._spool_lock = threading.Lock()     # file; spool thread only (and recovery in the constructor)
         self._spool_ack_overflow_warned = False
         self._spool_wake = threading.Event()
         self._spool_disabled = False
@@ -212,7 +212,7 @@ class Everydeck:
             "auth_failures": 0, "last_rejection": None, "sender_errors": 0,
             "spool_errors": 0, "spool_corrupt_lines": 0, "spool_dropped": 0, "spool_queue_dropped": 0, "spool_ack_dropped": 0,
             "replayed_from_spool": 0, "spool_disabled": False, "heartbeats": 0,
-            "batches_compressed": 0, "bytes_raw": 0, "bytes_sent": 0, "retry_after_waits": 0,   # B30 Schnitt D
+            "batches_compressed": 0, "bytes_raw": 0, "bytes_sent": 0, "retry_after_waits": 0,
         }
         if not enabled:
             return
@@ -236,18 +236,18 @@ class Everydeck:
 
                 _signal.signal(sig, handler)
 
-    # ---------------- API (nie blockierend, nie werfend) ----------------
+    # ---------------- API (never blocking, never raising) ----------------
     def signal(self, name: str, operation_id: str, *, attempt_id: str | None = None, subject_ref: str | None = None,
                account_ref: str | None = None, fields: dict[str, Any] | None = None, request_id: str | None = None,
                business_key: str | None = None, object_type: str | None = None, object_ref: str | None = None) -> str | None:
-        """B32 (0.1.4): `object_type`/`object_ref` nennen das Objekt des Ergebnisses (wie `objectType`/`objectRef` im TS-SDK)."""
+        """`object_type`/`object_ref` name the object of the outcome (like `objectType`/`objectRef` in the TS SDK)."""
         return self._enq({"kind": "signal", "name": name, "operation_id": str(operation_id),
                           **_opt(attempt_id=attempt_id, subject_ref=subject_ref, account_ref=account_ref, fields=fields,
                                  request_id=request_id, business_key=business_key, object_type=object_type, object_ref=object_ref)})
 
     def heartbeat(self, interval_seconds: float, *, job: str | None = None) -> str | None:
-        """Lebenszeichen auf Abruf. Mit `job` (1.9-r0, `jobs[].id` im Manifest): dieser Job ist gelaufen – am Ende jedes erfolgreichen Laufs
-        senden; everydeck meldet einen Job, der zwei Takte schweigt. Ohne `job`: diese Prozessinstanz läuft (wie `heartbeat_interval`)."""
+        """Heartbeat on demand. With `job` (1.9-r0, `jobs[].id` in the manifest): this job has run; send it at the end of every successful run;
+        everydeck reports a job that stays silent for two intervals. Without `job`: this process instance is running (like `heartbeat_interval`)."""
         import re as _re
         if job is not None and not _re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", job):
             _log.warning("everydeck: heartbeat job id rejected: %r", job)
@@ -262,12 +262,12 @@ class Everydeck:
               fields: dict[str, Any] | None = None, http: dict[str, Any] | None = None, request_id: str | None = None,
               frames: list[dict[str, Any]] | None = None, exc: BaseException | None = None, object_type: str | None = None,
               object_ref: str | None = None, response: dict[str, Any] | None = None) -> str | None:
-        """B31: mit `exc` (die abgefangene Ausnahme) bildet das SDK die Stack-Frames selbst – innerste zuerst, höchstens 20,
-        Datei als die letzten zwei Pfadteile wie im Browser-SDK; `frames` übergibt sie fertig ({function, file?, line?})."""
+        """With `exc` (the caught exception) the SDK builds the stack frames itself: innermost first, at most 20,
+        file as the last two path parts as in the browser SDK; `frames` passes them ready-made ({function, file?, line?})."""
         err: dict[str, Any] = {"class": error_class}
         if message:
             err["message"] = str(message)[:1024]
-        # 1.4-r0 (B33b, B34b): Fehlercode und Meldung aus der Antwort, die die App bekam – wie im TS-SDK (Code nur als Kennung, Meldung bereinigt, 300 Zeichen)
+        # 1.4-r0: error code and message from the response the app received, as in the TS SDK (code only as an identifier, message scrubbed, 300 characters)
         if response:
             ans: dict[str, Any] = {}
             code = response.get("code"); msg = response.get("message")
@@ -279,7 +279,7 @@ class Everydeck:
                 err["response"] = ans
         fr = frames if frames is not None else (_frames_of(exc) if exc is not None else None)
         if fr:
-            keep_abs = frames is None and self.source_context   # der volle Pfad bleibt nur bis zum Sender-Thread (Code-Zeilen), er wird nie gesendet
+            keep_abs = frames is None and self.source_context   # the full path only lives until the sender thread (code lines); it is never sent
             err["frames"] = [{"function": str(f.get("function") or "anonymous")[:128], **({"file": str(f["file"])[:240]} if f.get("file") else {}), **({"line": int(f["line"])} if f.get("line") else {}),
                               **({"in_app": bool(f["in_app"])} if isinstance(f.get("in_app"), bool) else {}), **({"_abs": f["_abs"]} if keep_abs and f.get("_abs") else {})} for f in fr[:20]]
             if not self.source_context:
@@ -296,8 +296,8 @@ class Everydeck:
     def identify(self, subject_ref: str, *, account_ref: str | None = None, display_name: str | None = None,
                  email: str | None = None, login_method: str | None = None, provider_user_id: str | None = None,
                  org_name: str | None = None) -> str | None:
-        """Identitätsquelle (Manifest 1.1 `people`): freigegebene Stammdaten einer Person. everydeck speichert nur die im freigegebenen
-        Manifest genannten Felder; alle anderen werden verworfen und gezählt. Kein Vorgang, keine Regel. Nur serverseitig sinnvoll."""
+        """Identity source (manifest 1.1 `people`): approved master data of a person. everydeck stores only the fields named in the approved
+        manifest; all others are discarded and counted. No operation, no rule. Only meaningful on the server side."""
         fields: dict[str, Any] = {k: str(v)[:256] for k, v in {"display_name": display_name, "email": email, "login_method": login_method,
                                                               "provider_user_id": provider_user_id, "org_name": org_name}.items() if v is not None}
         self.stats["identities"] = self.stats.get("identities", 0) + 1
@@ -310,7 +310,7 @@ class Everydeck:
                           **_opt(fields=fields, operation_id=operation_id, request_id=request_id, object_type=object_type, object_ref=object_ref)})
 
     def flush(self, timeout: float | None = None) -> bool:
-        """Wartet, bis der Puffer geleert ist. False bei Ablauf des Budgets (z. B. everydeck nicht erreichbar)."""
+        """Waits until the buffer is empty. False when the budget runs out (e.g. everydeck not reachable)."""
         if not self.enabled:
             return True
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -321,7 +321,7 @@ class Everydeck:
                 return True
             if deadline is not None and time.monotonic() >= deadline:
                 return False
-            self._paused_until = 0.0  # ein expliziter Flush hebt die Auth-Pause auf (ein Versuch)
+            self._paused_until = 0.0  # an explicit flush lifts the auth pause (one attempt)
             self._wake.set()
             time.sleep(0.02)
 
@@ -336,7 +336,7 @@ class Everydeck:
         self._spool_wake.set()
         st = getattr(self, "_st", None)
         if st is not None and st is not threading.current_thread():
-            st.join(max(0.0, deadline - time.monotonic()))  # ausstehende Spool-Bestätigungen noch anwenden (begrenzt)
+            st.join(max(0.0, deadline - time.monotonic()))  # still apply pending spool acknowledgements (bounded)
         return ok
 
     # ---------------- Enqueue ----------------
@@ -354,8 +354,8 @@ class Everydeck:
             spool = bool(self.spool_path) and not self._spool_disabled
             spool_dropped = 0
             if spool:
-                # Reihenfolge ist Absicht: erst Schreibauftrag, dann Sendepuffer. Der Sender kann ein Ereignis erst nach diesem
-                # Schritt sehen; der Spool-Thread sieht deshalb eine Bestätigung nie ohne den zugehörigen Schreibauftrag.
+                # The order is intentional: write job first, then send buffer. The sender can only see an event after this
+                # step; the spool thread therefore never sees an acknowledgement without its write job.
                 with self._spool_q_lock:
                     if len(self._spool_q) >= self.max_spool_queue:
                         self._spool_q.popleft()
@@ -375,11 +375,11 @@ class Everydeck:
             if wake:
                 self._wake.set()
             return ev["event_id"]
-        except Exception as e:  # Kundenrequest darf nie scheitern
+        except Exception as e:  # a customer request must never fail
             self._warn(f"everydeck: enqueue failed: {e!r}")
             return None
 
-    # ---------------- Sender-Thread ----------------
+    # ---------------- Sender thread ----------------
     def _run(self) -> None:
         while True:
             try:
@@ -390,13 +390,13 @@ class Everydeck:
                     self._send_pending()
                 if self._stop.is_set() and not self._q:
                     break
-            except Exception as e:  # Thread endet nie unbemerkt
+            except Exception as e:  # the thread never ends silently
                 self.stats["sender_errors"] += 1
                 self._warn(f"everydeck: sender error (continuing): {e!r}")
                 time.sleep(full_jitter(self._consecutive_failures, self.max_send_backoff))
 
     def _maybe_heartbeat(self) -> None:
-        """Lebenszeichen im Sender-Thread; läuft über denselben Puffer wie alle Ereignisse (kein Sonderweg, keine Garantie)."""
+        """Heartbeat in the sender thread; goes through the same buffer as all events (no special path, no guarantee)."""
         if not self.heartbeat_interval or self._stop.is_set():
             return
         now = time.monotonic()
@@ -438,8 +438,8 @@ class Everydeck:
         return self._source_cache.get(path)
 
     def _with_source_context(self, ev: dict[str, Any]) -> dict[str, Any]:
-        """B33: Code-Zeilen zu höchstens 5 Frames im Code der App; das Ereignis bleibt unter EVENT_MAX_BYTES (was nicht passt: partial).
-        Der volle Pfad (`_abs`) verlässt das SDK nie. Kopie – das Original im Puffer und im Spool bleibt unverändert."""
+        """Code lines for at most 5 frames in the app's code; the event stays below EVENT_MAX_BYTES (what does not fit: partial).
+        The full path (`_abs`) never leaves the SDK. Works on a copy; the original in the buffer and in the spool stays unchanged."""
         err = ev.get("error") if isinstance(ev.get("error"), dict) else None
         if not err or not err.get("frames"):
             return ev
@@ -484,7 +484,7 @@ class Everydeck:
                     return
                 items = self._take_batch()
                 self._inflight = True
-            items = [self._with_source_context(it) for it in items]   # B33: Datei-IO außerhalb der Sperre, auf Kopien (der Spool-Thread liest die Originale)
+            items = [self._with_source_context(it) for it in items]   # file IO outside the lock, on copies (the spool thread reads the originals)
             try:
                 outcome, detail = self._post(items)
             except Exception as e:
@@ -494,7 +494,7 @@ class Everydeck:
             ack: set[str] | None = None
             warn: str | None = None
             stop_after = False
-            with self._lock:   # nur Zähler und Zustand; Datei-IO und Callbacks laufen außerhalb dieser Sperre
+            with self._lock:   # counters and state only; file IO and callbacks run outside this lock
                 if outcome == "accepted":
                     self.stats["accepted"] += len(items)
                     self.stats["batches_accepted"] += 1
@@ -504,7 +504,7 @@ class Everydeck:
                     self.stats["batches_rejected"] += 1
                     self.stats["dropped_rejected"] += len(items)
                     self.stats["last_rejection"] = detail
-                    ack = {i["event_id"] for i in items}  # kein erneuter Versuch, auch nicht nach Neustart
+                    ack = {i["event_id"] for i in items}  # no retry, not even after a restart
                     code = int(detail.get("status", 0)) if isinstance(detail, dict) else 0
                     if code in _AUTH:
                         self.stats["auth_failures"] += 1
@@ -518,7 +518,7 @@ class Everydeck:
                     self.stats["retries"] += 1
                     self._consecutive_failures += 1
                     self._requeue(items)
-                    # B30 Schnitt D: Retry-After von everydeck (429 Budget/Kontingent, 503 Schutz) wird befolgt, sonst Backoff mit vollem Zufallsanteil
+                    # Retry-After from everydeck (429 budget/quota, 503 protection) is honored, otherwise backoff with full jitter
                     retry_after = detail.get("retry_after") if isinstance(detail, dict) else None
                     if retry_after is not None:
                         self.stats["retry_after_waits"] += 1
@@ -527,7 +527,7 @@ class Everydeck:
                         self._paused_until = time.monotonic() + full_jitter(self._consecutive_failures, self.max_send_backoff)
                     stop_after = True
             if ack:
-                self._spool_enqueue_ack(ack)   # vor dem Ende von inflight: flush() sieht erst danach „leer“, close() wartet auf den Spool
+                self._spool_enqueue_ack(ack)   # before inflight ends: flush() only sees "empty" afterwards, close() waits for the spool
             with self._lock:
                 self._inflight = False
             if warn:
@@ -536,12 +536,12 @@ class Everydeck:
                 return
 
     def _post(self, items: list[dict[str, Any]]) -> tuple[Outcome, Any]:
-        """Genau ein Zustellversuch. Wiederholungen steuert der Sender (Backoff bis max_send_backoff)."""
+        """Exactly one delivery attempt. The sender controls retries (backoff up to max_send_backoff)."""
         body = _dumps({"schema_version": SCHEMA_VERSION, "batch_id": str(uuid.uuid4()), "release_key": self.release_key,
                        "manifest_digest": self.manifest_digest, **({"probe_id": self.probe_id} if self.probe_id else {}), "events": items}).encode()
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self.credential}
         self.stats["bytes_raw"] += len(body)
-        if self.compress:   # B30 Schnitt D
+        if self.compress:
             body = gzip.compress(body, compresslevel=6, mtime=0)
             headers["Content-Encoding"] = "gzip"
             self.stats["batches_compressed"] += 1
@@ -563,9 +563,9 @@ class Everydeck:
         except Exception as e:
             return "retry", {"error": repr(e)[:200]}
 
-    # ---------------- Spool-Thread (dauerhafter Hinweis) ----------------
+    # ---------------- Spool thread (durable record) ----------------
     def _spool_open(self, mode: str):
-        return open(self.spool_path, mode, encoding="utf-8")  # separat, damit Tests Fehler injizieren können
+        return open(self.spool_path, mode, encoding="utf-8")  # separate so tests can inject errors
 
     def _spool_run(self) -> None:
         while True:
@@ -583,7 +583,7 @@ class Everydeck:
                 self._spool_fail(e)
 
     def _spool_enqueue_ack(self, ids: set[str]) -> None:
-        """Vom Sender: Ereignisse sind endgültig erledigt (angenommen oder abgewiesen). Nur Warteschlange, kein Datei-IO."""
+        """From the sender: events are finally done (accepted or rejected). Queue only, no file IO."""
         if not self.spool_path or self._spool_disabled:
             return
         over = 0
@@ -592,7 +592,7 @@ class Everydeck:
                 self._spool_acks[i] = None
             over = len(self._spool_acks) - self.max_spool_queue
             if over > 0:
-                for k in list(self._spool_acks)[:over]:   # älteste zuerst; die Schreibaufträge dazu sind ebenfalls die ältesten
+                for k in list(self._spool_acks)[:over]:   # oldest first; their write jobs are the oldest as well
                     del self._spool_acks[k]
                 self.stats["spool_ack_dropped"] += over
         if over > 0 and not self._spool_ack_overflow_warned:
@@ -601,7 +601,7 @@ class Everydeck:
         self._spool_wake.set()
 
     def _spool_cycle(self) -> None:
-        """Ein Durchlauf: Schreibaufträge und Bestätigungen gemeinsam betrachten. Bestätigt und noch nicht geschrieben → gar nicht schreiben."""
+        """One pass: look at write jobs and acknowledgements together. Acknowledged and not yet written → do not write at all."""
         with self._spool_q_lock:
             writes = list(self._spool_q)
             self._spool_q.clear()
@@ -617,12 +617,12 @@ class Everydeck:
         if writes:
             self._spool_write(writes)
         if acks:
-            self._spool_ack(acks)   # Bestätigungen ohne Zeile (Nachlieferungs-/Lückenereignisse, verworfene Schreibaufträge) verfallen hier
+            self._spool_ack(acks)   # acknowledgements without a line (replay/gap events, discarded write jobs) expire here
 
     def _spool_write(self, batch: list[dict[str, Any]]) -> None:
         with self._spool_lock:
-            # Bis zum Limit auffüllen (ganze Zeilen), den Rest verwerfen und den Spool schließen – unabhängig davon, wie viele
-            # Ereignisse ein Zyklus zufällig einsammelt.
+            # Fill up to the limit (whole lines), discard the rest and close the spool, regardless of how many
+            # events a cycle happens to collect.
             lines: list[str] = []
             size = 0
             dropped = 0
@@ -659,7 +659,7 @@ class Everydeck:
             self._warn(f"everydeck: spool unavailable ({e!r}); spool disabled, delivery continues in memory only")
 
     def _spool_ack(self, ids: set[str]) -> None:
-        """Nur Spool-Thread: bestätigte Zeilen entfernen (atomares Zurückschreiben)."""
+        """Spool thread only: remove acknowledged lines (atomic rewrite)."""
         if not self.spool_path or self._spool_disabled:
             return
         try:
@@ -674,7 +674,7 @@ class Everydeck:
                     f.writelines(keep)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(tmp, self.spool_path)  # atomar: kein halb geschriebener Spool
+                os.replace(tmp, self.spool_path)  # atomic: no half-written spool
                 self._spool_bytes = sum(len(l.encode("utf-8")) for l in keep)
         except Exception as e:
             self._spool_fail(e)
@@ -705,7 +705,7 @@ class Everydeck:
                 self.stats["replayed_from_spool"] += 1
             self._q.append({"event_id": str(uuid.uuid4()), "occurred_at": _now(), "kind": "gap", "name": "everydeck.sdk.recovered",
                             "gap": {"cause": "restart_recovered", "replayed": len(replay), "dropped": dropped}})
-            with self._spool_lock:  # Spool auf die nachgelieferten, gültigen Zeilen zurückschreiben
+            with self._spool_lock:  # rewrite the spool to the replayed, valid lines
                 tmp = self.spool_path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
                     f.writelines(_dumps(ev) + "\n" for ev in replay)
@@ -731,7 +731,7 @@ def _safe_id(line: str) -> str | None:
 
 
 class AfterCommit:
-    """Ergebnisbeleg = Commit (P1-Befund): Signale erst nach erfolgreichem Commit senden."""
+    """Outcome evidence = commit: send signals only after a successful commit."""
 
     def __init__(self) -> None:
         self._fns: list[Callable[[], Any]] = []
@@ -755,8 +755,8 @@ _ANSWER_CODE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
 def answer_of(exc: BaseException | None) -> dict[str, Any] | None:
-    """B34b: Fehlercode und Meldung, die eine Ausnahme als eigene Attribute trägt (z. B. postgrest APIError: `code`, `message`) – für
-    `error(..., response=answer_of(exc))`. Nur Attribute, kein Lesen im Text der Ausnahme; ohne beide Attribute None."""
+    """Error code and message an exception carries as its own attributes (e.g. postgrest APIError: `code`, `message`), for
+    `error(..., response=answer_of(exc))`. Attributes only, no parsing of the exception text; None without both attributes."""
     if exc is None:
         return None
     code = getattr(exc, "code", None); msg = getattr(exc, "message", None)
@@ -765,7 +765,7 @@ def answer_of(exc: BaseException | None) -> dict[str, Any] | None:
 
 
 def error_class_of(exc: BaseException | type | str) -> str:
-    """B31: stabile Fehlerklasse aus dem Namen einer Ausnahme – Abkürzungen bleiben zusammen: APIError → api_error, HTTPException → http_exception, TypeError → type_error."""
+    """Stable error class from an exception name; acronyms stay together: APIError → api_error, HTTPException → http_exception, TypeError → type_error."""
     import re as _re
     name = exc if isinstance(exc, str) else (exc.__name__ if isinstance(exc, type) else type(exc).__name__)
     s = _re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name); s = _re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
@@ -775,7 +775,7 @@ def error_class_of(exc: BaseException | type | str) -> str:
 
 
 def _library_roots() -> tuple[str, ...]:
-    """Standardbibliothek und installierte Pakete – kein Code der App (B33)"""
+    """Standard library and installed packages: not the app's code"""
     import sysconfig
     roots = {sysconfig.get_paths().get(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")}
     return tuple(os.path.realpath(r) + os.sep for r in roots if r)
@@ -796,8 +796,8 @@ def _in_app(path: str) -> bool:
 
 
 def _frames_of(exc: BaseException) -> list[dict[str, Any]]:
-    """Stack-Frames einer Ausnahme, innerste zuerst (wie ein JS-Stack), Datei = die letzten zwei Pfadteile; `in_app` und der volle Pfad
-    (`_abs`, nur intern für die Code-Zeilen, B33)"""
+    """Stack frames of an exception, innermost first (like a JS stack), file = the last two path parts; `in_app` and the full path
+    (`_abs`, internal only, for the code lines)"""
     import traceback
     out: list[dict[str, Any]] = []
     for fs in reversed(traceback.extract_tb(exc.__traceback__)):
@@ -808,7 +808,7 @@ def _frames_of(exc: BaseException) -> list[dict[str, Any]]:
     return out
 
 
-# ── B33: Code-Zeilen und Bereinigung – dieselbe Regel wie @everydeck/sdk (TS) und everydeck (packages/contracts scrubText); die Paritätsprüfung vergleicht sie ──
+# ── Code lines and scrubbing: the same rule as @everydeck/sdk (TS) and everydeck's scrubText; a parity check compares them ──
 CONTEXT_FRAMES = 5
 CONTEXT_LINES = 5
 CONTEXT_LINE_MAX = 200
@@ -827,7 +827,7 @@ _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
 def scrub_text(text: str) -> str:
-    """Geheimnisse, Bearer-Token und E-Mail-Adressen entfernen (Fehlermeldung oder Code-Zeile)"""
+    """Remove secrets, bearer tokens and e-mail addresses (error message or code line)"""
     out = _BEARER.sub("Bearer [redacted]", str(text))
     for rx in _SECRET_PATTERNS:
         out = rx.sub("[redacted]", out)
@@ -836,7 +836,7 @@ def scrub_text(text: str) -> str:
 
 
 def _context_of(lines: list[str], line: int) -> dict[str, Any] | None:
-    """Fundzeile und je CONTEXT_LINES davor und danach; None, wenn die Zeile nicht in der Datei liegt (nichts raten)"""
+    """The error line and CONTEXT_LINES before and after; None when the line is not in the file (no guessing)"""
     if line < 1 or line > len(lines):
         return None
     cut = lambda x: scrub_text(x[:CONTEXT_LINE_MAX])[:CONTEXT_LINE_MAX]

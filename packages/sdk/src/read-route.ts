@@ -1,41 +1,42 @@
 /**
- * @everydeck/sdk/read-bridge – B46 (Entscheidung E2): die Lese-Brücke als fertige Route. Die App bindet sie mit ihrer eigenen Datenbankverbindung ein,
- * ohne Leserolle, ohne Sichten, ohne kopierte Dateien und ohne eine Datei mit dem Lese-Umfang im Repo:
+ * @everydeck/sdk/read-bridge: the read bridge as a ready-made route. The app mounts it with its own database connection,
+ * without a reader role, without views, without copied files and without a file with the read scope in the repo:
  *
  *   import postgres from 'npm:postgres@3.4.5';
- *   import { everydeckReadBridge } from 'npm:@everydeck/sdk@<version>/read-bridge';
- *   const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2 });
+ *   import { everydeckReadBridge, supabaseDbUrl } from 'npm:@everydeck/sdk@<version>/read-bridge';
+ *   const sql = postgres(supabaseDbUrl(), { prepare: false, max: 2 });   // SUPABASE_DB_URL, locally with the name that Deno resolves
  *   Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
  *
- * Was die Route tut:
- *  - Den Lese-Umfang holt sie bei everydeck (GET <endpoint>/v1/read-scope, Brückenschlüssel als Bearer). everydeck signiert ihn mit demselben Schlüssel
- *    (HMAC-SHA256 über "EVERYDECK-SCOPE-V1\n" + payload); ohne gültige Signatur liest die Route nichts (503). Sie hält ihn höchstens `scopeTtlSeconds`.
- *  - Jede Abfrage läuft in einer eigenen Nur-Lesen-Transaktion auf der Verbindung der App (postgres.js: sql.begin('read only'), pg-Pool: BEGIN READ ONLY):
- *    die Datenbank selbst lehnt darin jedes Schreiben ab (SQLSTATE 25006). Gelesen werden nur Tabellen und Spalten aus dem signierten Umfang.
- *  - Die Rechte meldet sie geprüft: die Rolle der Verbindung, ob sie Superuser ist, ob sie die Zeilenrechte der App umgeht (rolbypassrls), ob die
- *    Transaktion wirklich nur lesen darf (current_setting('transaction_read_only')) und auf welchen Tabellen die Rolle selbst schreiben dürfte.
- *  - Aufrufe von everydeck sind signiert (verify.ts); unsignierte Aufrufe und Schreibverben lehnt sie ab.
- * Läuft in Node ≥ 22, Deno (Supabase Edge Functions) und jeder fetch-Laufzeit: nur Web Crypto, kein `node:`-Modul.
+ * What the route does:
+ *  - It fetches the read scope from everydeck (GET <endpoint>/v1/read-scope, bridge key as Bearer). everydeck signs it with the same key
+ *    (HMAC-SHA256 over "EVERYDECK-SCOPE-V1\n" + payload); without a valid signature the route reads nothing (503). It keeps it for at most `scopeTtlSeconds`.
+ *  - Every query runs in its own read-only transaction on the app's connection (postgres.js: sql.begin('read only'), pg Pool: BEGIN READ ONLY):
+ *    the database itself rejects every write inside it (SQLSTATE 25006). Only tables and columns from the signed scope are read.
+ *  - It reports its rights as checked: the connection's role, whether it is a superuser, whether it bypasses the app's row security (rolbypassrls), whether the
+ *    transaction really is read-only (current_setting('transaction_read_only')) and on which tables the role itself could write.
+ *  - Calls from everydeck are signed (verify.ts); it rejects unsigned calls and write verbs.
+ * Runs in Node >= 22, Deno (Supabase Edge Functions) and any fetch runtime: Web Crypto only, no `node:` module.
  */
 import { createReadBridge, pgMatch, pgOne, pgRights, pgRows, type QueryClient, type ReadBridgeRequest, type ReadBridgeResponse, type ReadRights, type ReadScope } from './read-bridge.js';
 import { memorySeen, type VerifyOptions } from './verify.js';
+export { supabaseDbUrl, LOCAL_DB_HOST } from './supabase-db.js';
 
 export const SCOPE_SIGNATURE_PREFIX = 'EVERYDECK-SCOPE-V1\n';
-/** Eine Spalte, die everydeck nie liest (B46 Punkt 2): Kontaktdaten und Nachrichten – nur ihr Name, nie ein Wert */
+/** A column that everydeck never reads: contact data and messages; only its name, never a value */
 export interface WithheldColumn { table: string; column: string; kind: 'email' | 'phone' | 'ip' | 'message'; type?: string; label?: string }
-/** Was everydeck signiert: der freigegebene Lese-Umfang dieser Brücke */
+/** What everydeck signs: the approved read scope of this bridge */
 export interface SignedScopePayload { version: '1'; project_id: string; environment_id: string; revision_id: string; digest: string; issued_at: string; scope: ReadScope; withheld?: WithheldColumn[] }
 
-/** Eine Datenbank, die eine Funktion in einer Nur-Lesen-Transaktion ausführt */
+/** A database that runs a function in a read-only transaction */
 export interface ReadOnlyDb { readOnly<T>(fn: (q: QueryClient) => Promise<T>): Promise<T> }
 /** postgres.js (`postgres(url)`) */
 interface PostgresJsLike { begin: (options: string, fn: (tx: { unsafe: (text: string, values?: unknown[]) => Promise<unknown> }) => Promise<unknown>) => Promise<unknown> }
-/** pg.Pool (`new Pool(…)`) – connect() liefert einen Client mit release() */
+/** pg.Pool (`new Pool(…)`): connect() returns a client with release() */
 interface PgPoolLike { connect: () => Promise<{ query: (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>; release: (err?: Error | boolean) => void }> }
 export type AppDb = ReadOnlyDb | PostgresJsLike | PgPoolLike;
 
 const hasFn = (x: unknown, name: string): boolean => (typeof x === 'object' || typeof x === 'function') && x !== null && typeof (x as Record<string, unknown>)[name] === 'function';
-/** Die Verbindung der App als Nur-Lesen-Datenbank: postgres.js, ein pg-Pool oder etwas mit readOnly() */
+/** The app's connection as a read-only database: postgres.js, a pg Pool or something with readOnly() */
 export function readOnlyDb(db: AppDb): ReadOnlyDb {
   if (hasFn(db, 'readOnly')) return db as ReadOnlyDb;
   if (hasFn(db, 'begin')) {
@@ -47,7 +48,7 @@ export function readOnlyDb(db: AppDb): ReadOnlyDb {
     return { readOnly: async <T>(fn: (q: QueryClient) => Promise<T>) => {
       const c = await pool.connect(); let failed: unknown = null;
       try { await c.query('BEGIN READ ONLY'); const out = await fn({ query: (text, values) => c.query(text, values ?? []) }); await c.query('COMMIT'); return out; }
-      catch (e) { failed = e; try { await c.query('ROLLBACK'); } catch { /* Verbindung kaputt: der Pool verwirft sie */ } throw e; }
+      catch (e) { failed = e; try { await c.query('ROLLBACK'); } catch { /* connection broken: the pool discards it */ } throw e; }
       finally { c.release(failed instanceof Error && !(failed as { code?: string }).code ? failed : undefined); } } };
   }
   throw new Error('everydeck read bridge: db must be a postgres.js connection, a pg Pool or an object with readOnly(fn)');
@@ -60,26 +61,26 @@ async function hmacHex(key: string, text: string): Promise<string> {
   return hex(await crypto.subtle.sign('HMAC', k, enc.encode(text)));
 }
 const sameHex = (a: string, b: string) => { if (a.length !== b.length) return false; let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i); return d === 0; };
-/** Signatur des Lese-Umfangs prüfen (v1=<hex>[,v1=<hex>] – eine je gültigem Schlüssel) */
+/** Verifies the read scope signature (v1=<hex>[,v1=<hex>], one per valid key) */
 export async function verifyScopeSignature(keys: string[], payload: string, signature: string | undefined | null): Promise<boolean> {
   if (typeof signature !== 'string' || !keys.length) return false;
   const given = signature.split(',').map((p) => p.trim()).filter((p) => p.startsWith('v1=')).map((p) => p.slice(3).toLowerCase());
   for (const k of keys) { const expected = await hmacHex(k, SCOPE_SIGNATURE_PREFIX + payload); if (given.some((g) => sameHex(g, expected))) return true; }
   return false;
 }
-/** Gegenstück (everydeck und Tests): signierter Lese-Umfang */
+/** Counterpart (everydeck and tests): signed read scope */
 export async function signScopePayload(keys: string[], payload: string): Promise<string> {
   const out: string[] = []; for (const k of keys.filter((x, i, a) => !!x && a.indexOf(x) === i)) out.push(`v1=${await hmacHex(k, SCOPE_SIGNATURE_PREFIX + payload)}`); return out.join(',');
 }
 
 export interface ReadRouteOptions {
-  /** Adresse von everydeck (EVERYDECK_URL) */ endpoint: string;
-  /** Brückenschlüssel (EVERYDECK_READ_BRIDGE_TOKEN), von everydeck erzeugt */ key: string;
-  /** voriger Schlüssel während eines Tauschs */ previousKey?: string | undefined;
-  /** die Verbindung, die die App schon hat */ db: AppDb;
-  /** Pfadteil vor /everydeck/read (Supabase Edge Function: /everydeck-read-bridge) */ prefix?: string;
-  app?: string; fetch?: typeof fetch; /** wie lange der Lese-Umfang gilt, bevor die Route ihn neu holt (Standard 60 s) */ scopeTtlSeconds?: number;
-  /** Replay-Schutz über mehrere Instanzen (Standard: Speicher dieses Prozesses) */ seen?: VerifyOptions['seen'];
+  /** everydeck address (EVERYDECK_URL) */ endpoint: string;
+  /** bridge key (EVERYDECK_READ_BRIDGE_TOKEN), created by everydeck */ key: string;
+  /** previous key during a rotation */ previousKey?: string | undefined;
+  /** the connection the app already has */ db: AppDb;
+  /** path part before /everydeck/read (Supabase Edge Function: /everydeck-read-bridge) */ prefix?: string;
+  app?: string; fetch?: typeof fetch; /** how long the read scope stays valid before the route fetches it again (default 60 s) */ scopeTtlSeconds?: number;
+  /** replay protection across several instances (default: memory of this process) */ seen?: VerifyOptions['seen'];
 }
 
 const unavailable = (error: string): ReadBridgeResponse => ({ status: 503, body: { error } });
@@ -94,7 +95,7 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
   try { ro = readOnlyDb(o.db); } catch (e) { dbError = e instanceof Error ? e.message : String(e); }
   let cached: { at: number; payload: SignedScopePayload; bridge: ReturnType<typeof createReadBridge> } | null = null;
 
-  /** Rechte geprüft in derselben Art Transaktion, in der gelesen wird */
+  /** Rights checked in the same kind of transaction that reads */
   const rightsOf = (scope: ReadScope) => async (): Promise<ReadRights> => ro!.readOnly(async (q) => {
     const base = await pgRights(q, scope)();
     const who = (await q.query(ROLE_SQL)).rows[0] as { role?: string; superuser?: boolean; bypass_rls?: boolean; read_only?: string } | undefined;
@@ -131,13 +132,13 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
     return l.bridge.handle(req);
   }
   const prefix = o.prefix ?? '';
-  /** fetch-Adapter (Deno.serve, Supabase Edge Function, Cloudflare, Next.js Route Handler) */
+  /** fetch adapter (Deno.serve, Supabase Edge Function, Cloudflare, Next.js Route Handler) */
   const fetchHandler = async (req: Request): Promise<Response> => {
     const url = new URL(req.url); const path = prefix && url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : url.pathname;
     const r = await handle({ method: req.method, path, query: Object.fromEntries(url.searchParams), authorization: req.headers.get('authorization') ?? undefined, headers: req.headers, url: url.pathname + url.search, body: req.method === 'GET' || req.method === 'HEAD' ? null : new Uint8Array(await req.arrayBuffer()) });
     return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'content-type': 'application/json' } });
   };
-  /** Node-Adapter: (req, res) für node:http oder Express-artige Server */
+  /** Node adapter: (req, res) for node:http or Express-style servers */
   const node = () => async (req: { method?: string | undefined; url?: string | undefined; headers: Record<string, string | string[] | undefined>; [Symbol.asyncIterator]?: () => AsyncIterator<unknown> }, res: { writeHead: (s: number, h: Record<string, string>) => void; end: (b: string) => void }) => {
     const url = new URL(req.url ?? '/', 'http://bridge'); const path = prefix && url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : url.pathname;
     const method = req.method ?? 'GET'; let body: Uint8Array | null = null;

@@ -6,11 +6,11 @@ export { everydeckReadBridge, readOnlyDb, verifyScopeSignature, signScopePayload
 import { createEverydeck as createCore, type EverydeckOptions, type EverydeckClient } from './core.js';
 import { resolveReleaseKey } from './release.js';
 
-/** Node-Einstieg: `releaseKey: 'auto'` (oder leer) nimmt die automatische Versionskennung (B15/C5, release.ts). Deno nutzt core.js direkt. */
+/** Node entry: `releaseKey: 'auto'` (or empty) uses the automatic release key (release.ts). Deno uses core.js directly. */
 export function createEverydeck(o: EverydeckOptions): EverydeckClient {
   return createCore({ readSource: readNodeSource, ...o, releaseKey: !o.releaseKey || o.releaseKey === 'auto' ? resolveReleaseKey() : o.releaseKey });
 }
-/** B33: Datei der laufenden App lesen (für Code-Zeilen beim Senden); größer als 2 MB oder nicht lesbar → null */
+/** Reads a file of the running app (for code lines when sending); larger than 2 MB or unreadable → null */
 async function readNodeSource(path: string): Promise<string | null> {
   try { const fs = await import('node:fs/promises'); const st = await fs.stat(path); if (!st.isFile() || st.size > 2_000_000) return null; return await fs.readFile(path, 'utf8'); } catch { return null; }
 }

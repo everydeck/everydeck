@@ -1,11 +1,11 @@
 /**
- * B15/C5 – Automatische Versionskennung (Node). Dieselbe Regel gilt für das Python-SDK und `everydeck-agent version`, damit eine gemeldete
- * Reparatur und die beobachtete Laufzeitfassung verglichen werden können (docs/05 „Reparatur als belegbarer Ablauf“):
- *   1. `EVERYDECK_RELEASE_KEY` (außer „auto“) – ausdrücklich gesetzt, unverändert
- *   2. Commit der Bereitstellung aus der CI-/Hosting-Umgebung → `git:<sha12>`
- *   3. lokales Git: `git:<sha12>` bzw. mit lokalen Änderungen `git:<sha12>+dirty.<hash8>` (Hash über `git diff HEAD` und nicht ignorierte neue Dateien)
- *   4. sonst `unknown` – everydeck kann dann keine Fassungen vergleichen und sagt das.
- * Kein Commit ist nötig, damit eine geänderte Fassung als neue Kennung erscheint; der Wert wird beim Start berechnet.
+ * Automatic release key (Node). The same rule applies to the Python SDK and `everydeck-agent version`, so that a reported
+ * repair and the observed running version can be compared:
+ *   1. `EVERYDECK_RELEASE_KEY` (except "auto"): set explicitly, used unchanged
+ *   2. deployment commit from the CI or hosting environment → `git:<sha12>`
+ *   3. local git: `git:<sha12>`, or with local changes `git:<sha12>+dirty.<hash8>` (hash over `git diff HEAD` and new files that are not ignored)
+ *   4. otherwise `unknown`: everydeck then cannot compare versions and says so.
+ * No commit is needed for a changed version to show up as a new key; the value is computed at startup.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -27,9 +27,9 @@ export function resolveReleaseKey(opts: { env?: Record<string, string | undefine
     const head = git('rev-parse', 'HEAD').toString().trim().slice(0, 12);
     const h = createHash('sha256');
     h.update(git('diff', 'HEAD', '--binary'));
-    // neue, nicht ignorierte Dateien zählen mit (Pfad + Inhalt); Laufzeitdateien gehören in die Ignore-Regeln der App
+    // new files that are not ignored count too (path + content); runtime files belong in the app's ignore rules
     const untracked = git('ls-files', '--others', '--exclude-standard', '-z').toString().split('\0').filter(Boolean).sort();
-    for (const f of untracked) { h.update(`\0${f}\0`); try { h.update(readFileSync(join(top, f))); } catch { /* entfernt während der Berechnung */ } }
+    for (const f of untracked) { h.update(`\0${f}\0`); try { h.update(readFileSync(join(top, f))); } catch { /* removed during the computation */ } }
     const dirty = untracked.length > 0 || git('status', '--porcelain', '--untracked-files=no').toString().trim().length > 0;
     return dirty ? `git:${head}+dirty.${h.digest('hex').slice(0, 8)}` : `git:${head}`;
   } catch { return 'unknown'; }

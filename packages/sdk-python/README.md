@@ -24,7 +24,7 @@ everydeck.signal("job.created", operation_id)
 - `signal()`, `error()` and `log()` never block and never raise: they enqueue into a bounded in-memory buffer; a background thread sends batches (at most 50 events, 64 KiB, gzip-compressed).
 - Retries only on 429, 5xx, timeout and network errors; `Retry-After` is honoured; final rejections are dropped and counted, never reported as sent.
 - A buffer overflow is reported as a `gap` event, so everydeck shows a known data gap instead of silence.
-- `heartbeat_interval` sends `everydeck.sdk.heartbeat` from the sender thread. Give each component a stable `instance_id` (for example `"api"`, `"cv-worker"`).
+- `heartbeat_interval` sends `everydeck.sdk.heartbeat` from the sender thread. Give each component a stable `instance_id` (for example `"api"`, `"worker"`).
 - `release_key="auto"` derives the version from the deployment commit (`EVERYDECK_RELEASE_KEY`, `GITHUB_SHA`, `VERCEL_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`, …) or local git.
 - `everydeck.verify.verify_everydeck_request` checks everydeck's signature on bridge calls.
 - Read bridge (0.3.0): `everydeck.read_route.EverydeckReadBridge(endpoint, key, db)` is the ready-made route. It fetches its read scope from everydeck (`GET <endpoint>/v1/read-scope` with the bridge key) and uses it only with everydeck's signature; no read-scope file, no read role, no views. `db` is the connection the app already has: `PsycopgReadOnly(conninfo)` runs every query in `BEGIN READ ONLY`, `SupabaseReadOnly(client)` reads through the app's Supabase client with `select()` only (GET requests, which PostgREST runs read-only; only tables in schemas the Supabase API exposes).

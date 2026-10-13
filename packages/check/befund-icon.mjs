@@ -1,10 +1,10 @@
 /**
- * B38 Punkt 1: das Icon, das die App selbst ausliefert – ein Fakt mit Fundstelle, nie geraten.
- *   1. `<link rel="apple-touch-icon" | "icon" | "shortcut icon" href>` in den HTML-Einstiegen (Vite `index.html`, `public/index.html` …),
- *   2. Icons im Web-Manifest (`icons[].src`, das größte zuerst),
- *   3. Next.js: `app/icon.*`, `app/apple-icon.*` (auch unter `src/app/`), Expo: `expo.icon` in `app.json`.
- * Die Datei kommt mit Fundstelle, Medientyp, SHA-256 und Inhalt (Base64, höchstens 96 KiB) in den Befund (`app.icon`); everydeck speichert eine Kopie
- * für die Karte "Your apps" und gibt den Inhalt nicht weiter in den gespeicherten Befund. Ohne Datei: kein Icon (die Karte zeigt den Anfangsbuchstaben).
+ * The icon the app itself ships: a fact with its place in the code, never guessed.
+ *   1. `<link rel="apple-touch-icon" | "icon" | "shortcut icon" href>` in the HTML entry files (Vite `index.html`, `public/index.html` ...),
+ *   2. icons in the web manifest (`icons[].src`, largest first),
+ *   3. Next.js: `app/icon.*`, `app/apple-icon.*` (also under `src/app/`); Expo: `expo.icon` in `app.json`.
+ * The file goes into the Befund (`app.icon`) with its place, media type, SHA-256 and content (Base64, at most 96 KiB); everydeck stores a copy
+ * for the "Your apps" card and does not pass the content on into the stored Befund. No file: no icon (the card shows the first letter).
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -15,13 +15,13 @@ const TYPES = { '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-i
 const typeOf = (p) => TYPES[(/\.[a-z]+$/i.exec(p)?.[0] ?? '').toLowerCase()] ?? null;
 const lineOf = (src, idx) => src.slice(0, idx).split('\n').length;
 
-/** Kandidaten mit Rang (kleiner = besser): apple-touch-icon (groß, quadratisch), Manifest nach Größe, SVG, PNG, ICO */
+/** Candidates with a rank (lower = better): apple-touch-icon (large, square), manifest by size, SVG, PNG, ICO */
 export function iconCandidates(repo, files) {
   const rel = (p) => relative(repo, p);
   const out = [];
   const resolveHref = (href, fromFile) => {
     const h = String(href).split(/[?#]/)[0];
-    if (!h || /^(?:[a-z]+:)?\/\//i.test(h) || h.startsWith('data:')) return null;   // fremde Adresse oder eingebettet: keine Datei im Repo
+    if (!h || /^(?:[a-z]+:)?\/\//i.test(h) || h.startsWith('data:')) return null;   // external address or inline data: no file in the repo
     const base = dirname(fromFile);
     const tries = h.startsWith('/') ? [join(base, 'public', h), join(repo, 'public', h), join(base, h), join(repo, h)] : [join(base, h), join(base, 'public', h)];
     return tries.find((p) => existsSync(p) && statSync(p).isFile()) ?? null;
@@ -56,7 +56,7 @@ export function iconCandidates(repo, files) {
   return out.filter((c) => typeOf(c.file)).sort((a, b) => a.rank - b.rank || b.size - a.size);
 }
 
-/** Das beste Icon unter der Größengrenze, mit Inhalt – oder null */
+/** The best icon under the size limit, with its content, or null */
 export function findIcon(repo, files) {
   for (const c of iconCandidates(repo, files)) {
     const bytes = readFileSync(c.file);

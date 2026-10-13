@@ -1,14 +1,14 @@
-"""everydeck-check: deterministischer Prüf-/Synchronisierungsschritt im CI-/Buildweg des Kunden (docs/02).
+"""everydeck-check: deterministic check and sync step in the customer's CI/build path.
 
-- validate: Manifest gegen Schema 1.0-r0 und Referenzen (Signale, Fähigkeiten, Regeln).
-- drift:    Fundstellen (path, symbol) müssen existieren und im Symbol einen Aufruf `.signal("<name>", …)` (bzw. error/log)
-            enthalten. Ein Lockfile (`everydeck-manifest.lock.json`) hält die Zahl der Aufrufstellen je (Signal, Symbol) fest;
-            sinkt sie, ist das Drift (P1-Grenze O11). Neuer Commit ≠ Drift, nur eine neue Revision.
-- publish:  POST /api/projects/<id>/manifests mit Publish-Token; Netzausfall von everydeck darf den Build nicht brechen
-            (Exit 0 mit Warnung, Artefakt bleibt).
-- change:   `everydeck-change.json` (B9, Modul `change`): Form, Fähigkeits-/Datei-/Symbolreferenzen, Bindung an HEAD und Manifest-Digest;
-            optional POST /api/projects/<id>/changes. Die Beschreibung stammt vom Coding-Agenten, everydeck-check prüft nur mechanisch.
-Python-Symbole (Funktionen, Klassen, Methoden) werden per AST geprüft; andere Sprachen sind nicht unterstützt.
+- validate: manifest against schema 1.0-r0 and references (signals, capabilities, rules).
+- drift:    places (path, symbol) must exist and contain a call `.signal("<name>", …)` (or error/log) inside the symbol.
+            A lock file (`everydeck-manifest.lock.json`) records the number of call sites per (signal, symbol);
+            if it drops, that is drift. A new commit is not drift, only a new revision.
+- publish:  POST /api/projects/<id>/manifests with a publish token; an everydeck outage must not break the build
+            (exit 0 with a warning, the artifact stays).
+- change:   `everydeck-change.json` (module `change`): shape, capability/file/symbol references, binding to HEAD and the manifest digest;
+            optional POST /api/projects/<id>/changes. The description comes from the coding agent; everydeck-check only checks it mechanically.
+Python symbols (functions, classes, methods) are checked through the AST; other languages are not supported.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ __all__ = ["validate_manifest", "reference_errors", "digest", "check_drift", "fr
 
 
 def split_proposal(doc: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """B20: Der Vorschlag ist `{ "manifest": …, "local_check": … }` (genau der Body von POST …/proposals); ein nacktes Manifest bleibt erlaubt."""
+    """The proposal is `{ "manifest": …, "local_check": … }` (exactly the body of POST …/proposals); a bare manifest is still allowed."""
     if isinstance(doc, dict) and isinstance(doc.get("manifest"), dict) and "schema_version" not in doc:
         lc = doc.get("local_check")
         return doc["manifest"], lc if isinstance(lc, dict) else None
@@ -36,21 +36,21 @@ def split_proposal(doc: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] 
 
 
 def coverage_of(doc: dict[str, Any]) -> Any:
-    """B22: `coverage[]` des Vorschlags (None bei nacktem Manifest oder ohne Tabelle)."""
+    """`coverage[]` of the proposal (None for a bare manifest or without the table)."""
     if isinstance(doc, dict) and isinstance(doc.get("manifest"), dict) and "schema_version" not in doc:
         return doc.get("coverage")
     return None
 
 
 def reverses_of(action: dict[str, Any]) -> list[str]:
-    """B.reverses = ["A"]: B macht A rückgängig; Einzelwert (bis 1.8-r0) oder Liste (ab 1.9-r0)."""
+    """B.reverses = ["A"]: B undoes A; a single value (up to 1.8-r0) or a list (from 1.9-r0)."""
     r = action.get("reverses")
     return [] if r is None else list(r) if isinstance(r, list) else [r]
 
 
 def every_ok(every: str) -> bool:
-    """Takt eines Jobs im Manifest: Dauer (15m, 1h, 1d) oder Cron mit fünf Feldern. B32: dieselbe Regel wie everydeck (jobPeriodSeconds aus
-    packages/contracts über everydeck_check/rules/everydeck-rules.mjs), kein Nachbau in Python."""
+    """Rhythm of a job in the manifest: a duration (15m, 1h, 1d) or a five-field cron expression. The same rule as everydeck (jobPeriodSeconds,
+    through everydeck_check/rules/everydeck-rules.mjs), not rebuilt in Python."""
     from .rules import run_rule
     return run_rule("cadence", {"expressions": [str(every)]})["results"][0]["manifest_period_seconds"] is not None
 
@@ -59,7 +59,7 @@ _ISO_DURATION = re.compile(r"^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)
 
 
 def iso_duration_seconds(d: Any) -> int | None:
-    """ISO-8601-Dauer (Wochen, Tage, Stunden, Minuten) in Sekunden, wie `isoDurationSeconds` in packages/contracts; ungültig oder 0 → None."""
+    """ISO 8601 duration (weeks, days, hours, minutes) in seconds, like `isoDurationSeconds` in everydeck's contracts; invalid or 0 → None."""
     if not isinstance(d, str) or d in ("P", "PT"):
         return None
     m = _ISO_DURATION.match(d)
@@ -74,8 +74,8 @@ def _schema() -> dict[str, Any]:
     return json.loads(resources.files("everydeck_check").joinpath("schemas/manifest.schema.json").read_text(encoding="utf-8"))
 
 
-# B15: Adapter-Merkmale, die keine Ablauf-ID sind (server_errors = zentraler Serverfehlerpfad angebunden)
-ADAPTER_FEATURES = ("server_errors", "browser_actions", "messages")   # B22: messages = Nachrichten-Eckdaten (everydeck.messageSent)
+# Adapter features that are not flow ids (server_errors = central server error path connected)
+ADAPTER_FEATURES = ("server_errors", "browser_actions", "messages")   # messages = message metadata (everydeck.messageSent)
 
 
 def validate_manifest(manifest: dict[str, Any]) -> list[str]:
@@ -87,7 +87,7 @@ LOCKED_ROLES = ("ref", "person", "limit", "amount")
 
 
 def field_editable(o: dict[str, Any], f: dict[str, Any]) -> bool:
-    """Wirksame Bearbeitbarkeit (Spiegel von contracts fieldEdit): Standard ja, sobald die Objektart einen Verwaltungssatz hat; gesperrt durch Rolle, managed_in oder den Agenten."""
+    """Effective editability (mirror of contracts fieldEdit): yes by default once the object type has a manage block; locked by role, managed_in or the agent."""
     if f.get("role") in LOCKED_ROLES or f.get("managed_in") or not o.get("manage"):
         return False
     ed = f.get("edit")
@@ -95,7 +95,7 @@ def field_editable(o: dict[str, Any], f: dict[str, Any]) -> bool:
 
 
 def description_path_errors(m: Any) -> list[str]:
-    """B35 Punkt 4: Beschreibungstexte, die eine Datei nennen, die das Manifest als Fundstelle führt – dieselbe Regel wie descriptionPathErrors (TS)."""
+    """Description texts that name a file the manifest lists as a place; the same rule as descriptionPathErrors (TS)."""
     import re as _re
     paths: list[str] = []; texts: list[tuple[str, str]] = []
 
@@ -115,7 +115,7 @@ def description_path_errors(m: Any) -> list[str]:
         for p in paths:
             i = text.find(p)
             if i >= 0 and not _re.match(r"[\w./-]", text[i - 1] if i > 0 else "") and not _re.match(r"[\w-]", text[i + len(p)] if i + len(p) < len(text) else ""):
-                errs.append(f"{at} names the file {p} – places belong in evidence"); break
+                errs.append(f"{at} names the file {p}; places belong in evidence"); break
     return errs
 
 
@@ -145,7 +145,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
                 errs.append(f"rule {r['id']}: unknown signal {name}")
             elif sig[name] != r["capability_id"]:
                 errs.append(f"rule {r['id']}: signal {name} belongs to {sig[name]}")
-    # 1.1-r0: Schritte und Nachfolger (nur innerhalb desselben Ablaufs), Bausteine (Abläufe und Abhängigkeiten auflösbar) – wie packages/contracts
+    # 1.1-r0: steps and successors (only within the same flow), components (flows and dependencies resolvable); as in the contracts
     for c in m.get("capabilities", []):
         steps = c.get("steps") or []
         ids = [st["id"] for st in steps]
@@ -181,7 +181,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
                 errs.append(f"component {k['id']}: unknown dependency {d}")
     if m.get("schema_version") == "1.0-r0" and (m.get("people") or m.get("app") or m.get("components") or any(c.get("steps") or c.get("description") for c in m.get("capabilities", []))):
         errs.append("1.1-r0 fields (app, people, components, description, steps) require schema_version 1.1-r0")
-    # 1.2-r0 (B11): Objekttypen und Adapter eindeutig, Adapter nur auf bekannte Abläufe, Version passend
+    # 1.2-r0: object types and adapters unique, adapters only on known flows, matching version
     seen_obj: set[str] = set()
     for o in m.get("objects", []) or []:
         if o["type"] in seen_obj:
@@ -200,7 +200,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
         for cid in a.get("capabilities", []) or []:
             if cid not in caps and cid not in ADAPTER_FEATURES:
                 errs.append(f"adapter {a['id']}: unknown capability {cid}")
-    versions = list(_schema()["properties"]["schema_version"]["enum"])   # eine Quelle: das ausgelieferte Schema (B20: vorher fehlten 1.8/1.9)
+    versions = list(_schema()["properties"]["schema_version"]["enum"])   # one source: the shipped schema
     def at_least(v: str) -> bool:
         have = m.get("schema_version")
         return have in versions and versions.index(have) >= versions.index(v)
@@ -210,7 +210,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
         errs.append("adapters require schema_version 1.2-r0")
     if (m.get("people") or {}).get("source") == "read_bridge" and not at_least("1.2-r0"):
         errs.append("people.source read_bridge requires schema_version 1.2-r0")
-    # 1.4-r0 (B13): Auswertungen und Aktionen nur auf deklarierte Objekte, Felder, Status, Abläufe (Spiegel von contracts)
+    # 1.4-r0: analytics and actions only on declared objects, fields, statuses, flows (mirror of contracts)
     objs = {o.get("type"): o for o in m.get("objects", []) or []}
     cap_ids = {c.get("id") for c in m.get("capabilities", [])}
     def field_kind(o, f):
@@ -282,20 +282,20 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
             errs.append(f"action {x.get('id')}: reverses as a list requires schema_version 1.9-r0")
     if (m.get("analytics") or m.get("actions")) and not at_least("1.4-r0"):
         errs.append("analytics/actions require schema_version 1.4-r0")
-    # 1.5-r0 (B15): belegte Statusgruppe
+    # 1.5-r0: status lifecycle group
     if any(st.get("lifecycle") for o in m.get("objects", []) or [] for st in o.get("statuses", []) or []) and not at_least("1.5-r0"):
         errs.append("status lifecycle requires schema_version 1.5-r0")
-    # 1.6-r0 (B16): Darstellungshinweis für das Zeichen der Objektart
+    # 1.6-r0: display hint for the icon of the object type
     if any(o.get("icon") for o in m.get("objects", []) or []) and not at_least("1.6-r0"):
         errs.append("object icon requires schema_version 1.6-r0")
-    # 1.7-r0 (B16 Schnitt B): Bedienstufe und Rückgängig-Fenster von Aktionen
+    # 1.7-r0: risk level and undo window of actions
     actions = m.get("actions", []) or []
     if any(a.get("risk") or "undo_seconds" in a for a in actions) and not at_least("1.7-r0"):
         errs.append("action risk/undo_seconds require schema_version 1.7-r0")
     for a in actions:
         if "undo_seconds" in a and (a.get("risk") or "amber") != "amber":
             errs.append(f"action {a.get('id')}: undo_seconds only applies to amber actions")
-    # 1.9-r0 (B20): Jobs – eindeutige Kennung, lesbarer Takt, bekannte Komponente (Spiegel von contracts)
+    # 1.9-r0: jobs: unique id, readable rhythm, known component (mirror of contracts)
     jobs = m.get("jobs", []) or []
     if jobs and not at_least("1.9-r0"):
         errs.append("jobs require schema_version 1.9-r0")
@@ -311,13 +311,13 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
             errs.append(f"job {j.get('id')}: every \"{j.get('every')}\" is neither a duration (15m, 1h, 1d) nor a five-field cron expression")
         if j.get("component") and j.get("component") not in comp_ids:
             errs.append(f"job {j.get('id')}: unknown component {j.get('component')}")
-    # 1.9-r0 (B20 Schnitt B): mehr Objektarten, Meldegründe, Personenaktionen, lange Abläufe, Browser-Fehlschläge (Spiegel von contracts)
+    # 1.9-r0: more object types, report reasons, person actions, long flows, browser failures (mirror of contracts)
     objects = m.get("objects", []) or []
     if len(objects) > 10 and not at_least("1.9-r0"):
         errs.append("more than 10 object types require schema_version 1.9-r0")
     if any(str(a.get("capability", "")).startswith("person.") for a in actions) and any(o.get("type") == "person" for o in objects):
         errs.append('object type "person" is reserved when person.* actions are declared')
-    # 1.12-r0 (B29 Abnahme): keine Grenze von 20 Objektarten / 24 Feldern mehr (Schutz 200 / 100 im Schema); Verknüpfungstabellen als relations[] (Spiegel von contracts)
+    # 1.12-r0: no limit of 20 object types / 24 fields any more (guard 200 / 100 in the schema); link tables as relations[] (mirror of contracts)
     if len(objects) > 20 and not at_least("1.12-r0"):
         errs.append("more than 20 object types require schema_version 1.12-r0")
     for o in objects:
@@ -376,13 +376,13 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
             if be in browser_errors:
                 errs.append(f"browser_error {be} used by two steps")
             browser_errors.add(be)
-    # 1.11-r0 (B22 Schnitt C): Feldtypen, Regeln, Bearbeitbarkeit, Verwaltungssatz (Spiegel von contracts)
+    # 1.11-r0: field kinds, rules, editability, manage block (mirror of contracts)
     v111 = at_least("1.11-r0")
     locked_roles = ("ref", "person", "limit", "amount")
     for o in objects:
         field_names = {f.get("name") for f in o.get("fields", []) or []}
         status_values = {st.get("value") for st in o.get("statuses", []) or []}
-        editable = {f.get("name") for f in o.get("fields", []) or [] if field_editable(o, f)}   # Standard bearbeitbar; gesperrt durch Rolle, managed_in, fehlenden Satz oder den Agenten
+        editable = {f.get("name") for f in o.get("fields", []) or [] if field_editable(o, f)}   # editable by default; locked by role, managed_in, a missing manage block or the agent
         for f in o.get("fields", []) or []:
             at = f"object {o.get('type')}: field {f.get('name')}"
             kind = f.get("kind")
@@ -449,7 +449,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
             if f not in pfields:
                 errs.append(f"people.manage.edit names field {f} that is not declared")
             if f in ("provider_user_id", "email", "login_method"):
-                errs.append(f"people.manage.edit: {f} is login data – never editable directly (email only through support.change_email)")
+                errs.append(f"people.manage.edit: {f} is login data; never editable directly (email only through support.change_email)")
         for f in (pm.get("bulk") or {}).get("fields") or []:
             if f not in efields:
                 errs.append(f"people.manage.bulk names field {f} that is not editable")
@@ -457,7 +457,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
             errs.append("people.manage.door built needs a test in the app (test.path)")
         if pm.get("support") and (m.get("people") or {}).get("provider") != "supabase_auth" and not (m.get("people") or {}).get("note"):
             errs.append("people.manage.support needs provider supabase_auth or a note naming the login provider that offers these actions")
-    # 1.10-r0 (B23): Plattformen eindeutig; Abläufe und Aktionen nennen nur deklarierte Plattformen (Spiegel von contracts)
+    # 1.10-r0: platforms unique; flows and actions name only declared platforms (mirror of contracts)
     platforms = m.get("platforms", []) or []
     declared_pl = {p.get("id") for p in platforms}
     if platforms and not at_least("1.10-r0"):
@@ -475,7 +475,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
         for pl in lst:
             if pl not in declared_pl:
                 errs.append(f"{what}: platform {pl} is not declared in platforms")
-    # 1.10-r0 (B23): API-Muster eindeutig je Methode, Parameter je Muster eindeutig (Spiegel von contracts)
+    # 1.10-r0: API patterns unique per method, parameters unique per pattern (mirror of contracts)
     api_routes = m.get("api_routes", []) or []
     if api_routes and not at_least("1.10-r0"):
         errs.append("api_routes require schema_version 1.10-r0")
@@ -488,7 +488,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
         params = [x for x in r.get("pattern", "").split("/") if x.startswith(":")]
         if len(set(params)) != len(params):
             errs.append(f"api route {r.get('pattern')}: a parameter name appears twice")
-    # 1.10-r0 (B23): Seitenmuster eindeutig, Parameter je Muster eindeutig, Plattformen deklariert (Spiegel von contracts)
+    # 1.10-r0: screen patterns unique, parameters unique per pattern, platforms declared (mirror of contracts)
     screens = m.get("screens", []) or []
     if screens and not at_least("1.10-r0"):
         errs.append("screens require schema_version 1.10-r0")
@@ -504,7 +504,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
         for pl in sc.get("platforms", []) or []:
             if pl not in declared_pl:
                 errs.append(f"screen {pat}: platform {pl} is not declared in platforms")
-    # 1.3-r0 (O30): deklarierter Alternativausgang – braucht ein Serversignal
+    # 1.3-r0: declared alternative outcome; needs a server signal
     for c in m.get("capabilities", []):
         for st in c.get("steps", []) or []:
             if st.get("role") != "alternative":
@@ -513,13 +513,13 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
                 errs.append(f"capability {c.get('id')}: step role alternative requires schema_version 1.3-r0")
             if not st.get("signal"):
                 errs.append(f"capability {c.get('id')}: alternative step {st.get('id')} needs a server signal")
-    errs += description_path_errors(m)   # B35 Punkt 4: wie descriptionPathErrors in packages/contracts
+    errs += description_path_errors(m)   # like descriptionPathErrors in the contracts
     return errs
 
 
 def canonical(v: Any) -> str:
-    """Kanonische Form wie `canonicalJson` in packages/contracts: sortierte Schlüssel, keine Leerzeichen, Unicode unverändert
-    (JSON.stringify escaped keine Umlaute – `ensure_ascii=False`, sonst weicht der Digest vom Server ab)."""
+    """Canonical form like `canonicalJson` in everydeck's contracts: sorted keys, no whitespace, Unicode unchanged
+    (JSON.stringify does not escape non-ASCII characters, hence `ensure_ascii=False`; otherwise the digest differs from the server)."""
     if isinstance(v, list):
         return "[" + ",".join(canonical(x) for x in v) + "]"
     if isinstance(v, dict):
@@ -528,7 +528,7 @@ def canonical(v: Any) -> str:
 
 
 def digest(manifest: dict[str, Any]) -> str:
-    """SHA-256 über die kanonische JSON-Form; identisch mit `canonicalJson` in packages/contracts."""
+    """SHA-256 over the canonical JSON form; identical to `canonicalJson` in everydeck's contracts."""
     return hashlib.sha256(canonical(manifest).encode("utf-8")).hexdigest()
 
 
@@ -604,9 +604,9 @@ def check_drift(repo: Path, manifest: dict[str, Any], lock: dict[str, int] | Non
             rep.findings.append(Finding("missing_file", s["name"], loc["path"]))
             continue
         if f.suffix != ".py":
-            # B11: sprachunabhängige Prüfung für andere Dateien (TypeScript, SQL, Deno): Symbol als Wort vorhanden, Signalname als
-            # Literal in der Datei; Aufrufstellen = Vorkommen des Literals. Weniger scharf als der Python-AST-Weg, aber mechanische Drift
-            # (Datei weg, Symbol umbenannt, Signal entfernt) wird erkannt.
+            # Language-independent check for other files (TypeScript, SQL, Deno): the symbol exists as a word, the signal name as a
+            # literal in the file; call sites = occurrences of the literal. Less precise than the Python AST path, but mechanical drift
+            # (file gone, symbol renamed, signal removed) is detected.
             text = f.read_text(encoding="utf-8", errors="replace")
             if not _symbol_in_text(text, loc["symbol"]):
                 rep.findings.append(Finding("missing_symbol", s["name"], f"{loc['path']}::{loc['symbol']}"))
@@ -644,20 +644,34 @@ def check_drift(repo: Path, manifest: dict[str, Any], lock: dict[str, int] | Non
     return rep
 
 
+_RELAY_CALL = re.compile(r"(?:relayOnce|createRelayHandler)\s*\(")
+# The SDK command for plain PostgreSQL (`npx everydeck-outbox-relay`) in a start file of the app, not a name inside a path
+_RELAY_COMMAND = re.compile(r"(?<![\w/.-])everydeck-outbox-relay(?![\w/.-])")
+_START_FILES = {"package.json", "Procfile", "Dockerfile"}
+
+
+def _relay_in_text(path: Path, text: str) -> bool:
+    """A relay of the app: relayOnce( (older copied relay) or createRelayHandler( (Supabase function from @everydeck/sdk/outbox), or the command
+    `everydeck-outbox-relay` in a start file (package.json, Procfile, Dockerfile, *.yml/*.yaml/*.toml)."""
+    if path.suffix in {".mjs", ".js", ".ts"} and _RELAY_CALL.search(text): return True
+    return (path.name in _START_FILES or path.suffix in {".yml", ".yaml", ".toml"}) and bool(_RELAY_COMMAND.search(text))
+
+
 def _relay_in_repo(repo: Path) -> bool:
-    """Ein Relay der App (Kopie aus dem Outbox-Paket) ruft relayOnce( – nicht im Bündel unter vendor/, nicht in node_modules."""
+    """A relay of the app anywhere in the repository; not in the bundle under vendor/, not in node_modules."""
     skip = {".git", "node_modules", "vendor", "dist", "build", ".next", "__pycache__", ".venv"}
     for f in repo.rglob("*"):
-        if f.suffix not in {".mjs", ".js", ".ts"} or any(p in skip for p in f.relative_to(repo).parts): continue
+        if not f.is_file() or any(p in skip for p in f.relative_to(repo).parts): continue
+        if f.suffix not in {".mjs", ".js", ".ts", ".yml", ".yaml", ".toml"} and f.name not in _START_FILES: continue
         try:
-            if "relayOnce(" in f.read_text(encoding="utf-8", errors="replace"): return True
+            if _relay_in_text(f, f.read_text(encoding="utf-8", errors="replace")): return True
         except OSError:
             continue
     return False
 
 
 def check_jobs(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
-    """B20: jede Fundstelle eines Jobs muss einen Heartbeat-Aufruf mit genau dieser Job-Kennung enthalten (alle Sprachen, Textprüfung)."""
+    """Every place of a job must contain a heartbeat call with exactly this job id (all languages, text check)."""
     import re as _re
     for j in manifest.get("jobs", []) or []:
         jid = j.get("id", "")
@@ -671,9 +685,9 @@ def check_jobs(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
             if ev.get("symbol") and not _symbol_in_text(text, ev["symbol"]):
                 rep.findings.append(Finding("missing_symbol", f"job:{jid}", f"{ev['path']}::{ev['symbol']}"))
                 continue
-            # B20 Schnitt C: das Outbox-Relay sendet den Schlag in relayOnce (Standardkennung everydeck_outbox_relay oder job: '<id>')
-            relay = _re.search(r"relayOnce\s*\(", text) and (jid == "everydeck_outbox_relay" or _re.search(r"job\s*:\s*[\"'`]" + _re.escape(jid) + r"[\"'`]", text))
-            # B31: die Fundstelle des Relay-Jobs ist oft der Zeitplan (pg_cron → Edge Function) – der Schlag steht dann im Relay der App
+            # The outbox relay sends the beat in relayOnce (default id everydeck_outbox_relay or job: '<id>')
+            relay = _relay_in_text(f, text) and (jid == "everydeck_outbox_relay" or _re.search(r"job\s*:\s*[\"'`]" + _re.escape(jid) + r"[\"'`]", text))
+            # The place of the relay job is often the schedule (pg_cron → Edge Function); the beat is then in the app's relay
             if not relay and jid == "everydeck_outbox_relay": relay = _relay_in_repo(repo)
             if not call.search(text) and not relay:
                 rep.findings.append(Finding("job_not_in_heartbeat", f"job:{jid}", ev["path"]))
@@ -684,9 +698,9 @@ _SCREEN_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", 
 
 
 def check_screens(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
-    """B23: jedes deklarierte Seiten- und API-Muster steht wörtlich im Code der App – dort, wo es dem Browser-SDK übergeben wird
-    (`initEverydeckBrowser({ screens, apiRoutes })`). Fehlt es, bildet das SDK diese Adressen nur auf den ersten Abschnitt ab: kein Leck, aber ein
-    ungenauer Weg vor dem Fehler bzw. ungenaue Anfragen. API-Muster einer App ohne Browser-SDK nutzt nur everydeck beim Empfang – keine Prüfung."""
+    """Every declared screen and API pattern appears literally in the app's code, where it is passed to the browser SDK
+    (`initEverydeckBrowser({ screens, apiRoutes })`). If it is missing, the SDK maps these addresses only to their first segment: no leak, but an
+    imprecise path before the error or imprecise requests. API patterns of an app without the browser SDK are used only by everydeck on receipt; no check."""
     wanted = [("screen", s.get("pattern", "")) for s in manifest.get("screens", []) or []] + [("api", r.get("pattern", "")) for r in manifest.get("api_routes", []) or []]
     if not wanted:
         return

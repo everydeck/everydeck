@@ -105,7 +105,7 @@
                 "browser_error": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9_.-]{0,95}$",
-                  "description": "1.9-r0, only on a failure step without a server signal: the name of the browser action (everydeck.action name, e.g. \"claim.submit\") whose failure ends the run as failed when nothing is left on the server – its failed request (<name>.request_failed) or thrown error (<name>.failed); a full error event name is accepted too. Shown as \"failed (reported by the browser only)\" with the trust level of a browser claim; any server evidence of the run takes precedence."
+                  "description": "1.9-r0, only on a failure step without a server signal: the name of the browser action (everydeck.action name, e.g. \"claim.submit\") whose failure ends the run as failed when nothing is left on the server: its failed request (<name>.request_failed) or thrown error (<name>.failed); a full error event name is accepted too. Shown as \"failed (reported by the browser only)\" with the trust level of a browser claim; any server evidence of the run takes precedence."
                 }
               },
               "required": [
@@ -118,7 +118,7 @@
             "type": "array",
             "maxItems": 20,
             "uniqueItems": true,
-            "description": "1.8-r0 (B18): tables or table.column the flow reads or writes, found in the code – lets everydeck answer an agent's context question before a risky change",
+            "description": "1.8-r0: tables or table.column the flow reads or writes, found in the code, so everydeck can answer an agent's context question before a risky change",
             "items": {
               "type": "string",
               "pattern": "^[a-z_][a-z0-9_]{0,62}(\\.[a-z_][a-z0-9_]{0,62})?$"
@@ -391,7 +391,7 @@
               "label_plural"
             ]
           },
-          "description": "1.8-r0: roles as views on people, checked in this order – org (belongs to a named organization), owns (owns objects of this type); a role without a rule takes everybody else"
+          "description": "1.8-r0: roles as views on people, checked in this order: org (belongs to a named organization), owns (owns objects of this type); a role without a rule takes everybody else"
         },
         "manage": {
           "type": "object",
@@ -597,13 +597,13 @@
                       "$ref": "#/$defs/manage_door"
                     }
                   },
-                  "description": "1.11-r0: a message to one person or a filtered group through the app's own channel (its mail delivery or its push) – never a messenger of everydeck's own; the bridge lists manage.person.message"
+                  "description": "1.11-r0: a message to one person or a filtered group through the app's own channel (its mail delivery or its push), never a messenger of everydeck's own; the bridge lists manage.person.message"
                 }
               },
               "description": "support standard actions, only those the login provider offers: resend the confirmation mail, send a password reset link, change the e-mail address; message = a message through the app's own channel (email or push)"
             }
           },
-          "description": "1.11-r0 (B22 Schnitt C): the management set for people – the same set as for objects plus support standard actions of the login provider; person data export is owner-only with a reason and logged"
+          "description": "1.11-r0: the management set for people (the same set as for objects plus support standard actions of the login provider); person data export is owner-only with a reason and logged"
         }
       },
       "required": [
@@ -798,7 +798,7 @@
                     "person",
                     "promotion"
                   ],
-                  "description": "1.8-r0: meaning of the field on the admin pages – content (title/text/images/price/url), the named time column of the list (time, a date field), reference to another object (ref, with ref_type), a plan limit counted against the inventory (limit, with ref_type), amount and period (amount/period), group for distributions (group), moderation signal (moderation.signal, with signals), contact channel (contact.*), period (start/end, date fields), answer time in minutes (duration), the other person as subject_ref (person), promoted until (promotion, a date field)"
+                  "description": "1.8-r0: meaning of the field on the admin pages: content (title/text/images/price/url), the named time column of the list (time, a date field), reference to another object (ref, with ref_type), a plan limit counted against the inventory (limit, with ref_type), amount and period (amount/period), group for distributions (group), moderation signal (moderation.signal, with signals), contact channel (contact.*), period (start/end, date fields), answer time in minutes (duration), the other person as subject_ref (person), promoted until (promotion, a date field)"
                 },
                 "ref_type": {
                   "type": "string",
@@ -889,17 +889,17 @@
                       }
                     }
                   },
-                  "description": "1.11-r0: with kind enum – the values the code allows, in the app's words"
+                  "description": "1.11-r0: with kind enum, the values the code allows, in the app's words"
                 },
                 "currency": {
                   "type": "string",
                   "pattern": "^[A-Z]{3}$",
-                  "description": "1.11-r0: with kind money – the fixed ISO 4217 currency of this field"
+                  "description": "1.11-r0: with kind money, the fixed ISO 4217 currency of this field"
                 },
                 "currency_field": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
-                  "description": "1.11-r0: with kind money – the declared field that holds the currency of each record (instead of a fixed currency)"
+                  "description": "1.11-r0: with kind money, the declared field that holds the currency of each record (instead of a fixed currency)"
                 },
                 "edit": {
                   "type": "object",
@@ -923,7 +923,7 @@
                       "type": "boolean"
                     }
                   },
-                  "description": "1.11-r0: editability. Default: editable – everything an admin of the app normally changes (titles, texts, prices, images, categories …) can be edited in everydeck once the object type has its management set (objects[].manage). Locked for good: identifiers and references (role ref, person, limit), login data, money outside an app function (role amount) and fields with managed_in – `editable: true` on them is an error. The agent may lock a single field with `editable: false` and a `reason`. `risk` (default green, amber for money) and `reason_required` change how the owner operates it."
+                  "description": "1.11-r0: editability. Default: editable. Everything an admin of the app normally changes (titles, texts, prices, images, categories …) can be edited in everydeck once the object type has its management set (objects[].manage). Locked for good: identifiers and references (role ref, person, limit), login data, money outside an app function (role amount) and fields with managed_in; `editable: true` on them is an error. The agent may lock a single field with `editable: false` and a `reason`. `risk` (default green, amber for money) and `reason_required` change how the owner operates it."
                 },
                 "managed_in": {
                   "type": "object",
@@ -943,7 +943,7 @@
                       "pattern": "^https://"
                     }
                   },
-                  "description": "1.11-r0: the field is managed in another system (e.g. the subscription in Stripe) – everydeck shows the link instead of a form"
+                  "description": "1.11-r0: the field is managed in another system (e.g. the subscription in Stripe); everydeck shows the link instead of a form"
                 }
               },
               "required": [
@@ -952,7 +952,7 @@
                 "kind"
               ]
             },
-            "description": "1.12-r0: every column of the table – up to 100 (protection). More than 24 require 1.12-r0."
+            "description": "1.12-r0: every column of the table, up to 100 (protection). More than 24 require 1.12-r0."
           },
           "statuses": {
             "type": "array",
@@ -984,7 +984,7 @@
                     "unfinished",
                     "finished"
                   ],
-                  "description": "1.5-r0: proven business meaning of the status – unfinished = still to be handled, finished = done (also cancelled). Only where the code proves it; without it everydeck offers no grouping."
+                  "description": "1.5-r0: proven business meaning of the status (unfinished = still to be handled, finished = done, including cancelled). Only where the code proves it; without it everydeck offers no grouping."
                 },
                 "revenue": {
                   "enum": [
@@ -993,11 +993,11 @@
                     "ended",
                     "requested"
                   ],
-                  "description": "1.8-r0: what the status means for revenue – paying, free, ended, requested"
+                  "description": "1.8-r0: what the status means for revenue (paying, free, ended, requested)"
                 },
                 "outcome": {
                   "type": "boolean",
-                  "description": "1.8-r0: the status is an outcome in the operator's sense (e.g. rented/sold) – used for reports only; everydeck does not see real deals"
+                  "description": "1.8-r0: the status is an outcome in the operator's sense (e.g. rented/sold); used for reports only; everydeck does not see real deals"
                 }
               },
               "required": [
@@ -1289,16 +1289,16 @@
                 }
               }
             },
-            "description": "1.11-r0 (B22 Schnitt C): the management set of this object type – what the operator may do in everydeck beyond declared actions: edit fields (fields[].edit), create, archive, delete, bulk change, export, import, each with its risk level (green runs at once, amber previews and offers undo, red needs the typed name). Everything goes through the app bridge v2 with the app's own validation; the owner approves the set per object type. Declare only what makes sense for this type."
+            "description": "1.11-r0: the management set of this object type. It says what the operator may do in everydeck beyond declared actions: edit fields (fields[].edit), create, archive, delete, bulk change, export, import, each with its risk level (green runs at once, amber previews and offers undo, red needs the typed name). Everything goes through the app bridge v2 with the app's own validation; the owner approves the set per object type. Declare only what makes sense for this type."
           },
           "technical": {
             "type": "boolean",
-            "description": "1.12-r0 (B29 Abnahme): true when the agent's description of what users work with (Befund works_with) does not name this table – it is under 'All data': reachable and manageable, but not in the main navigation; the owner can move any object type (nav_placement)"
+            "description": "1.12-r0: true when the agent's description of what users work with (Befund works_with) does not name this table. The table is then under 'All data' (reachable and manageable, but not in the main navigation); the owner can move any object type (nav_placement)"
           },
           "part_of": {
             "type": "string",
             "maxLength": 80,
-            "description": "1.12-r0 (B29 Abnahme, vierte Runde): the UI shows this object only as part of another object (works_with[].part_of) – no menu item, it appears on that object's detail page"
+            "description": "1.12-r0: the UI shows this object only as part of another object (works_with[].part_of); no menu item, it appears on that object's detail page"
           },
           "title_from": {
             "type": "object",
@@ -1307,7 +1307,7 @@
             "properties": {
               "fields": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" } }
             },
-            "description": "B31 Schnitt E: the record has no title column – everydeck composes the title from these fields (people by their name, references by the title of the referenced record, e.g. 'Anna ↔ Ben · Villa Canggu'); the identifier is never the title"
+            "description": "the record has no title column; everydeck composes the title from these fields (people by their name, references by the title of the referenced record, e.g. 'Anna ↔ Ben · Villa Canggu'); the identifier is never the title"
           }
         },
         "required": [
@@ -1319,7 +1319,7 @@
           "evidence"
         ]
       },
-      "description": "Business object types read through the read bridge, in the order an operator thinks about them. Up to 10 (more than 10, up to 20, need 1.9-r0); objects with an area are grouped under People, Revenue and Moderation, app objects from the 7th on appear under \"More\". 1.12-r0 (B29 Abnahme): every table of the app becomes a record type – up to 200 (protection, not a product limit; the manifest body stays below 512 KiB). More than 20 require 1.12-r0."
+      "description": "Business object types read through the read bridge, in the order an operator thinks about them. Up to 10 (more than 10, up to 20, need 1.9-r0); objects with an area are grouped under People, Revenue and Moderation, app objects from the 7th on appear under \"More\". 1.12-r0: every table of the app becomes a record type, up to 200 (protection, not a product limit; the manifest body stays below 512 KiB). More than 20 require 1.12-r0."
     },
     "adapters": {
       "type": "array",
@@ -1651,7 +1651,7 @@
           "capability": {
             "type": "string",
             "pattern": "^(access\\.(suspend|unsuspend)|person\\.[a-z][a-z0-9_-]{0,31}|object\\.[a-z][a-z0-9_-]{0,31}\\.[a-z][a-z0-9_-]{0,31})$",
-            "description": "object.<type>.<name> for object actions; for person actions access.suspend / access.unsuspend or, since 1.9-r0, any person.<name> (e.g. person.set_verified) – the person is then handled like an object: same risk levels, preview, protocol and undo, through the app bridge's people endpoints."
+            "description": "object.<type>.<name> for object actions; for person actions access.suspend / access.unsuspend or, since 1.9-r0, any person.<name> (e.g. person.set_verified); the person is then handled like an object: same risk levels, preview, protocol and undo, through the app bridge's people endpoints."
           },
           "from_statuses": {
             "type": "array",
@@ -1821,7 +1821,7 @@
           "field"
         ]
       },
-      "description": "1.8-r0: due dates on date fields of the inventory – due within due_within_seconds or older than older_than_seconds; the engine bundles all hits of one rule into one case"
+      "description": "1.8-r0: due dates on date fields of the inventory: due within due_within_seconds or older than older_than_seconds; the engine bundles all hits of one rule into one case"
     },
     "jobs": {
       "description": "1.9-r0: scheduled or long-running jobs that must keep running (cleanups, relays, imports). everydeck knows them before the first heartbeat and reports a job that has not reported for two periods. The job sends its heartbeat with the SDK: heartbeat(intervalSeconds, { job: \"<id>\" }); everydeck-check drift checks that the id appears in a heartbeat call at the evidence.",
@@ -1901,7 +1901,7 @@
       }
     },
     "platforms": {
-      "description": "1.10-r0 (B23): the platforms the app runs on – one entry per platform (web, ios, android, desktop, extension, server) with its runtime, where its version comes from at run time and, for app stores, the store status. everydeck splits errors, flows and repairs by platform; native crashes of a declared ios/android platform are shown as not captured.",
+      "description": "1.10-r0: the platforms the app runs on, one entry per platform (web, ios, android, desktop, extension, server) with its runtime, where its version comes from at run time and, for app stores, the store status. everydeck splits errors, flows and repairs by platform; native crashes of a declared ios/android platform are shown as not captured.",
       "type": "array",
       "maxItems": 6,
       "items": {
@@ -2007,7 +2007,7 @@
       }
     },
     "screens": {
-      "description": "1.10-r0 (B23): the page patterns of the app as its router defines them (React Router, Next.js, Expo Router, Vue Router …), written with :param for a variable segment and a final /* for a catch-all, e.g. /partner/:slug. The browser SDK maps every address to the matching pattern before it is sent as the trail before an error – a slug, a name or an id never leaves the browser; an address without a matching pattern keeps only its first segment. Pass the same patterns to the SDK (option `screens`).",
+      "description": "1.10-r0: the page patterns of the app as its router defines them (React Router, Next.js, Expo Router, Vue Router …), written with :param for a variable segment and a final /* for a catch-all, e.g. /partner/:slug. The browser SDK maps every address to the matching pattern before it is sent as the trail before an error. A slug, a name or an id never leaves the browser; an address without a matching pattern keeps only its first segment. Pass the same patterns to the SDK (option `screens`).",
       "type": "array",
       "maxItems": 300,
       "items": {
@@ -2080,7 +2080,7 @@
       }
     },
     "api_routes": {
-      "description": "1.10-r0 (B23): the API paths of the app as its server routes or functions define them, written like screens (/api/partners/:slug, :param, final /*). The browser SDK maps the path of every captured request – and paths or addresses inside error messages – to the matching pattern, and everydeck maps them again on arrival; a slug, a name or an id never leaves the browser. A path without a matching pattern keeps only its first segment. Supabase paths (/rest/v1/<table>, /rest/v1/rpc/<function>, /functions/v1/<name>, /auth/v1/…, storage up to the bucket) carry no names and need no pattern. Pass the same patterns to the SDK (option `apiRoutes`).",
+      "description": "1.10-r0: the API paths of the app as its server routes or functions define them, written like screens (/api/partners/:slug, :param, final /*). The browser SDK maps the path of every captured request (and paths or addresses inside error messages) to the matching pattern, and everydeck maps them again on arrival; a slug, a name or an id never leaves the browser. A path without a matching pattern keeps only its first segment. Supabase paths (/rest/v1/<table>, /rest/v1/rpc/<function>, /functions/v1/<name>, /auth/v1/…, storage up to the bucket) carry no names and need no pattern. Pass the same patterns to the SDK (option `apiRoutes`).",
       "type": "array",
       "maxItems": 500,
       "items": {
@@ -2150,7 +2150,7 @@
     "relations": {
       "type": "array",
       "maxItems": 200,
-      "description": "1.12-r0 (B29 Abnahme): link tables of the app – a table whose columns are exactly two foreign keys plus key or system columns. everydeck reads it through the read bridge like an object type (type = id, fields = the two side fields) but never shows it as a record type of its own: it appears as a relationship on the detail pages of both sides. Derived from the Befund (column.fk, column.pk, column.computed), never declared by hand.",
+      "description": "1.12-r0: link tables of the app: a table whose columns are exactly two foreign keys plus key or system columns. everydeck reads it through the read bridge like an object type (type = id, fields = the two side fields) but never shows it as a record type of its own: it appears as a relationship on the detail pages of both sides. Derived from the Befund (column.fk, column.pk, column.computed), never declared by hand.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -2299,7 +2299,7 @@
           "maxLength": 280
         }
       },
-      "description": "1.11-r0 (B22 Schnitt C): the door this set goes through – the app's existing function or one the agent built, with evidence and its test"
+      "description": "1.11-r0: the door this set goes through (the app's existing function or one the agent built), with evidence and its test"
     },
     "manage_evidence": {
       "type": "array",

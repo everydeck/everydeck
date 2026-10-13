@@ -1,8 +1,8 @@
-"""B46 (Entscheidung E2): die Lese-Brücke als fertige Route – Python-Fassung von @everydeck/sdk/read-bridge, gleiches Verhalten.
+"""The read bridge as a ready-made route: Python version of @everydeck/sdk/read-bridge, same behavior.
 
-Die App bindet sie mit der Verbindung ein, die sie schon hat; keine Leserolle, keine Sichten, keine Datei mit dem Lese-Umfang im Repo:
+The app mounts it with the connection it already has; no reader role, no views, no read scope file in the repo:
 
-    from everydeck.read_route import EverydeckReadBridge, SupabaseReadOnly   # oder PsycopgReadOnly(os.environ["DATABASE_URL"])
+    from everydeck.read_route import EverydeckReadBridge, SupabaseReadOnly   # or PsycopgReadOnly(os.environ["DATABASE_URL"])
     bridge = EverydeckReadBridge(os.environ["EVERYDECK_URL"], os.environ["EVERYDECK_READ_BRIDGE_TOKEN"], SupabaseReadOnly(supabase_admin))
     @app.api_route("/everydeck/read/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
     async def everydeck_read(rest: str, request: Request):
@@ -10,13 +10,13 @@ Die App bindet sie mit der Verbindung ein, die sie schon hat; keine Leserolle, k
                                                request.headers.get("authorization"), request.headers, await request.body(), str(request.url))
         return JSONResponse(body, status_code=status)
 
-- Den Lese-Umfang holt die Route bei everydeck (GET <endpoint>/v1/read-scope mit dem Brückenschlüssel als Bearer) und nutzt ihn nur mit gültiger
-  Signatur (HMAC-SHA256 mit demselben Schlüssel über "EVERYDECK-SCOPE-V1\\n" + payload); sonst liest sie nichts (503).
-- PsycopgReadOnly: jede Abfrage in einer eigenen Transaktion BEGIN READ ONLY auf der Verbindung der App – die Datenbank lehnt darin jedes Schreiben ab.
-  Die Rechte werden geprüft: Rolle, Superuser, rolbypassrls, current_setting('transaction_read_only').
-- SupabaseReadOnly: der Supabase-Client der App (PostgREST). Die Route ruft nur select() auf, also nur GET-Anfragen; PostgREST führt GET-Anfragen
-  in einer Nur-Lesen-Transaktion aus. Erreichbar sind nur Tabellen in Schemas, die die Supabase-API freigibt.
-Keine Abhängigkeiten außer der Standardbibliothek; psycopg bzw. supabase bringt die App mit.
+- The route fetches the read scope from everydeck (GET <endpoint>/v1/read-scope with the bridge key as Bearer) and uses it only with a valid
+  signature (HMAC-SHA256 with the same key over "EVERYDECK-SCOPE-V1\\n" + payload); otherwise it reads nothing (503).
+- PsycopgReadOnly: every query runs in its own BEGIN READ ONLY transaction on the app's connection; the database rejects any write inside it.
+  The rights are checked: role, superuser, rolbypassrls, current_setting('transaction_read_only').
+- SupabaseReadOnly: the app's Supabase client (PostgREST). The route only calls select(), so only GET requests; PostgREST runs GET requests
+  in a read-only transaction. Only tables in schemas exposed by the Supabase API are reachable.
+No dependencies beyond the standard library; the app brings psycopg or supabase itself.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def verify_scope_signature(keys: Iterable[str], payload: str, signature: str | N
 
 
 class PsycopgReadOnly:
-    """Die Verbindung der App über psycopg 3: `PsycopgReadOnly(conninfo)` oder `PsycopgReadOnly(connect=lambda: …)`; jede Abfrage in BEGIN READ ONLY … COMMIT."""
+    """The app's connection via psycopg 3: `PsycopgReadOnly(conninfo)` or `PsycopgReadOnly(connect=lambda: …)`; every query in BEGIN READ ONLY … COMMIT."""
 
     def __init__(self, conninfo: str | None = None, *, connect: Callable[[], Any] | None = None) -> None:
         if conninfo is None and connect is None:
@@ -87,7 +87,7 @@ class PsycopgReadOnly:
                 try:
                     conn.cursor().execute("ROLLBACK")
                 except Exception:
-                    self._conn = None   # Verbindung kaputt: beim nächsten Aufruf neu
+                    self._conn = None   # connection broken: reconnect on the next call
                 raise
 
     def rows(self, *a: Any, **k: Any) -> list[dict[str, Any]]:
@@ -110,12 +110,12 @@ class PsycopgReadOnly:
 
 
 def _quote(v: str) -> str:
-    """Wert in einem PostgREST-Filter (or=…): in doppelten Anführungszeichen, \\ und \" maskiert"""
+    """Value in a PostgREST filter (or=…): in double quotes, with \\ and \" escaped"""
     return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 class SupabaseReadOnly:
-    """Der Supabase-Client der App (supabase-py, PostgREST): nur select(), also nur GET-Anfragen – PostgREST führt sie in einer Nur-Lesen-Transaktion aus."""
+    """The app's Supabase client (supabase-py, PostgREST): only select(), so only GET requests; PostgREST runs them in a read-only transaction."""
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -163,21 +163,21 @@ class SupabaseReadOnly:
         return list(q.limit(max(1, min(PAGE_MAX + 1, int(limit)))).execute().data or [])
 
     def rights(self, scope: Mapping[str, Any]) -> dict[str, Any]:
-        # Über PostgREST lässt sich die Rolle nicht per SQL prüfen; fest steht der Weg: nur GET (select), von PostgREST nur lesend ausgeführt.
+        # The role cannot be checked by SQL through PostgREST; the path is fixed: only GET (select), run read-only by PostgREST.
         return {"role": "supabase api (postgrest)", "select_only": False, "read_only_transaction": True, "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")}
 
 
 def _default_fetch(url: str, headers: Mapping[str, str]) -> tuple[int, str]:
     req = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:   # noqa: S310 – Adresse von everydeck aus der Umgebung der App
+        with urllib.request.urlopen(req, timeout=10) as r:   # noqa: S310 (everydeck address from the app's environment)
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, ""
 
 
 class EverydeckReadBridge:
-    """Die fertige Lese-Brücke: Lese-Umfang signiert von everydeck, Lesen über `db` (PsycopgReadOnly oder SupabaseReadOnly)."""
+    """The ready-made read bridge: read scope signed by everydeck, reads through `db` (PsycopgReadOnly or SupabaseReadOnly)."""
 
     def __init__(self, endpoint: str | None, key: str | None, db: Any, *, previous_key: str | None = None, app: str | None = None, scope_ttl: float = 60.0,
                  seen: Callable[[str, float], bool] | None = None, fetch: Callable[[str, Mapping[str, str]], tuple[int, str]] | None = None) -> None:

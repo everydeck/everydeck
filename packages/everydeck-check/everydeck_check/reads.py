@@ -1,14 +1,14 @@
-"""B29, vierte Runde – die unabhängige Gegenprobe zu den Anzeigestellen des Befunds.
+"""The independent cross-check of the Befund's display locations.
 
-Das Gerüst (agent/befund-skeleton.mjs) liest Datenzugriffe über den Syntaxbaum. everydeck-check prüft NICHT mit derselben Erkennung, sondern
-mit einem eigenen, absichtlich einfachen Zeichenketten-Scanner: Jeder Tabellenname, der als Wort in einer Zeichenkette einer Frontend-Quelldatei
-vorkommt (ohne Typdateien, Tests und Kommentare), braucht entweder eine Anzeigestelle der Tabelle (shown an Tabelle oder Spalte) oder einen
-belegten Grund im Befund (tables[].not_shown[] mit Datei und Zeile). Sonst wird der Befund abgelehnt – mit der Stelle.
+The skeleton (befund-skeleton.mjs) reads data access through the syntax tree. everydeck-check does NOT check with the same detection, but
+with its own, deliberately simple string scanner: every table name that appears as a word in a string of a frontend source file
+(without type files, tests and comments) needs either a display location of the table (shown on the table or a column) or a
+documented reason in the Befund (tables[].not_shown[] with file and line). Otherwise the Befund is rejected, with the place.
 
-Frontend-Quelldatei (dieselbe Definition wie im Gerüst, damit beide Seiten dasselbe meinen): keine Backend-Ordner (backend, server, api, functions,
-supabase, migrations, scripts, prisma, db, database, test…), keine Test- oder Typdateien, .tsx/.jsx/.vue/.svelte überall, .ts/.js/.mjs nur in
-src/, app/, pages/, components/, lib/, frontend/, client/, web/, hooks/, contexts/, utils/, features/; eine Datei, die Routen registriert
-(app.get('/x', handler)), ist Backend.
+Frontend source file (the same definition as in the skeleton, so both sides mean the same): no backend folders (backend, server, api, functions,
+supabase, migrations, scripts, prisma, db, database, test…), no test or type files, .tsx/.jsx/.vue/.svelte everywhere, .ts/.js/.mjs only in
+src/, app/, pages/, components/, lib/, frontend/, client/, web/, hooks/, contexts/, utils/, features/; a file that registers routes
+(app.get('/x', handler)) is backend.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".vue", ".svelte"}
 
 def is_frontend_source(rel: str, text: str) -> bool:
     if BACKEND_DIR.search(rel) or TEST_FILE.search(rel) or TYPE_FILE.search(rel): return False
-    if rel.endswith(".ts") and re.search(r"\bTables:\s*\{", text): return False   # generierte Supabase-Typen
+    if rel.endswith(".ts") and re.search(r"\bTables:\s*\{", text): return False   # generated Supabase types
     if re.search(r"\.(tsx|jsx|vue|svelte)$", rel): return True
     if re.search(r"\.(ts|js|mjs)$", rel) and FRONTEND_DIR.match(rel): return not REGISTERS_ROUTES.search(text)
     return False
@@ -38,13 +38,13 @@ REGEX_BEFORE = re.compile(r"[(,=:\[!&|?{};]\s*$|\breturn\s*$|\btypeof\s*$|^\s*$"
 
 
 def string_tokens(text: str) -> Iterator[tuple[int, str]]:
-    """Zeichenketten eines JS/TS-Quelltexts mit Zeile: '…', "…" (keine Zeilenumbrüche – ein Apostroph in JSX-Text endet an der Zeile und zählt nicht),
-    `…` mit allen festen Teilen (die ${…}-Ausdrücke werden ausgelassen, auch verschachtelt). Kommentare // und /* */ und Regex-Literale werden übersprungen."""
+    """Strings of a JS/TS source with their line: '…', "…" (no line breaks; an apostrophe in JSX text ends at the line and does not count),
+    `…` with all fixed parts (the ${…} expressions are left out, also nested). Comments // and /* */ and regex literals are skipped."""
     i, n, line = 0, len(text), 1
     out: list[tuple[int, str]] = []
 
     def scan_template(j: int) -> tuple[int, str, int]:
-        """ab dem Zeichen nach dem öffnenden ` – liefert (Position nach dem schließenden `, fester Text, Zeilen dazwischen)"""
+        """from the character after the opening `; returns (position after the closing `, fixed text, lines in between)"""
         parts: list[str] = []; cur = ""; nl = 0
         while j < n:
             c = text[j]
@@ -52,7 +52,7 @@ def string_tokens(text: str) -> Iterator[tuple[int, str]]:
             if c == "`": parts.append(cur); return j + 1, "\n".join(parts), nl
             if c == "$" and text[j + 1:j + 2] == "{":
                 parts.append(cur); cur = ""; depth = 1; j += 2
-                while j < n and depth:   # Ausdruck überspringen – darin können Zeichenketten und weitere Vorlagen liegen
+                while j < n and depth:   # skip the expression; it can contain strings and further templates
                     c2 = text[j]
                     if c2 == "{": depth += 1
                     elif c2 == "}": depth -= 1
@@ -80,7 +80,7 @@ def string_tokens(text: str) -> Iterator[tuple[int, str]]:
             j = text.find("\n", i); i = n if j < 0 else j; continue
         if c == "/" and text[i + 1:i + 2] == "*":
             j = text.find("*/", i + 2); seg = text[i:n if j < 0 else j + 2]; line += seg.count("\n"); i += len(seg); continue
-        if c == "/" and REGEX_BEFORE.search(text[max(0, i - 40):i]):   # Regex-Literal: bis zum nächsten unmaskierten / außerhalb [ ]
+        if c == "/" and REGEX_BEFORE.search(text[max(0, i - 40):i]):   # regex literal: up to the next unescaped / outside [ ]
             j = i + 1; in_class = False
             while j < n and text[j] != "\n":
                 if text[j] == "\\": j += 2; continue
@@ -96,7 +96,7 @@ def string_tokens(text: str) -> Iterator[tuple[int, str]]:
                 if text[j] == "\\": j += 1
                 j += 1
             if j < n and text[j] == c: out.append((line, text[i + 1:j])); i = j + 1; continue
-            i += 1; continue   # keine Zeichenkette (Apostroph im Text)
+            i += 1; continue   # not a string (apostrophe in text)
         if c == "`":
             start_line = line; i, content, nl = scan_template(i + 1)
             for k, part in enumerate(content.split("\n")):
@@ -107,8 +107,8 @@ def string_tokens(text: str) -> Iterator[tuple[int, str]]:
 
 
 def path_strings(text: str) -> list[str]:
-    """Für den Routen-Abgleich: jede Zeichenkette als Pfadkandidat – Vorlagen mit :p je ${…} (verschachtelte Vorlagen zählen als Ausdruck),
-    Verkettungen 'a' + x + 'b' als a:pb."""
+    """For route matching: every string as a path candidate; templates with :p per ${…} (nested templates count as an expression),
+    concatenations 'a' + x + 'b' as a:pb."""
     out: list[str] = []; i, n = 0, len(text)
     def tmpl(j: int) -> tuple[int, str]:
         cur = ""
@@ -129,7 +129,7 @@ def path_strings(text: str) -> list[str]:
                 cur += ":p"; continue
             cur += c; j += 1
         return j, cur
-    pieces: list[tuple[int, str]] = []   # (Position, Inhalt) für Verkettungen
+    pieces: list[tuple[int, str]] = []   # (position, content) for concatenations
     while i < n:
         c = text[i]
         if c == "`":
@@ -141,7 +141,7 @@ def path_strings(text: str) -> list[str]:
         i += 1
     for k, (pos, content) in enumerate(pieces):
         out.append(content)
-        # Verkettung: 'a' + x + 'b' – die Zeichenketten dazwischen durch :p verbinden
+        # concatenation: 'a' + x + 'b'; join the strings in between with :p
         joined = content; last = pos + len(content) + 2
         for pos2, c2 in pieces[k + 1:]:
             between = text[last:pos2]
@@ -159,29 +159,29 @@ def _files(repo: Path):
 
 
 def frontend_mentions(repo: Path, tables: set[str]) -> list[dict]:
-    """Jede Stelle, an der eine Frontend-Quelldatei einen Tabellennamen als Wort in einer Zeichenkette nennt: [{ table, path, line, text }]."""
+    """Every place where a frontend source file names a table name as a word in a string: [{ table, path, line, text }]."""
     res = {t: re.compile(r"(?<![A-Za-z0-9_])" + re.escape(t) + r"(?![A-Za-z0-9_])") for t in tables}
     out: list[dict] = []
     for rel, text in _files(repo):
         if not is_frontend_source(rel, text): continue
         src = text
-        if rel.endswith((".vue", ".svelte")): src = "\n".join(m.group(1) for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", text))   # nur der Skriptteil
+        if rel.endswith((".vue", ".svelte")): src = "\n".join(m.group(1) for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", text))   # only the script part
         for line, content in string_tokens(src):
             for t, r in res.items():
                 if r.search(content): out.append({"table": t, "path": rel, "line": line, "text": content[:80], "_literal": content[:4000]})
-    # B32 (N4): nur Nennungen in Code zählen, nicht Fließtext – dieselbe Regel wie das Gerüst (packages/domain mentions.ts, Regel mentions)
+    # only mentions in code count, not prose; the same rule as the skeleton (rule mentions)
     if out:
         from .rules import RulesUnavailable, run_rule
         try: counts = run_rule("mentions", {"items": [{"literal": m["_literal"], "table": m["table"]} for m in out]})["counts"]
-        except RulesUnavailable: counts = [True] * len(out)   # ohne die Regel zählt jeder Treffer (wie bisher) – everydeck-check meldet das Fehlen von node an anderer Stelle
+        except RulesUnavailable: counts = [True] * len(out)   # without the rule every hit counts; everydeck-check reports the missing node elsewhere
         out = [m for m, c in zip(out, counts) if c]
     for m in out: m.pop("_literal", None)
     return out
 
 
 def reads_table(b: dict, repo: Path) -> list[dict]:
-    """Die Gegenprobe als Tabelle: je Tabelle des Befunds – im Frontend gefunden (Stellen), Zuordnung (Hauptnavigation mit Zugriffsweg / technisch mit Grund), Beleg.
-    Eine Zeile ohne Beleg heißt open: eine Nennung, die weder shown noch not_shown deckt."""
+    """The cross-check as a table, per table of the Befund: found in the frontend (places), placement (main navigation with access path / technical with reason), evidence.
+    A row without evidence is open: a mention covered by neither shown nor not_shown."""
     tables = {t["name"]: t for t in b.get("tables", [])}
     mentions = frontend_mentions(repo, set(tables))
     rows = []
@@ -200,9 +200,9 @@ def reads_table(b: dict, repo: Path) -> list[dict]:
 
 
 def reads_markdown(rows: list[dict]) -> str:
-    lines = ["| Tabelle | im Frontend gefunden | Zuordnung | Beleg |", "|---|---|---|---|"]
+    lines = ["| Table | found in the frontend | placement | evidence |", "|---|---|---|---|"]
     for r in rows:
-        place = f"Hauptnavigation ({', '.join(r['via'])})" if r["placement"] == "main" else ("technisch – " + ("; ".join(r.get("facts") or []) or "keine Nennung im Frontend"))
-        ev = r["evidence"] if not r["open"] else f"**offen: {', '.join(r['open'][:3])}**"
+        place = f"main navigation ({', '.join(r['via'])})" if r["placement"] == "main" else ("technical: " + ("; ".join(r.get("facts") or []) or "not named in the frontend"))
+        ev = r["evidence"] if not r["open"] else f"**open: {', '.join(r['open'][:3])}**"
         lines.append(f"| `{r['table']}` | {r['found']} | {place} | {ev} |")
     return "\n".join(lines)

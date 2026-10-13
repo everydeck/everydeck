@@ -19,8 +19,8 @@ def _load(p: str) -> dict:
 
 
 def _load_manifest(p: str) -> tuple[dict, dict | None, str]:
-    """B20: Datei ist der Vorschlag `{ manifest, local_check }` oder ein nacktes Manifest; geprüft wird das Manifest.
-    B29: ein Befund (1.12-r0) wird für drift/change in die Signalform gebracht (drift_manifest)."""
+    """The file is the proposal `{ manifest, local_check }` or a bare manifest; the manifest is checked.
+    A Befund (1.12-r0) is brought into signal form for drift/change (drift_manifest)."""
     doc = _load(p)
     from .befund import drift_manifest, is_befund
     if is_befund(doc):
@@ -44,14 +44,14 @@ def _local_check_errors(lc: dict | None) -> list[str]:
             errs.append(f"local_check.questions[{q.get('id', '?')}]: missing {', '.join(missing)}")
         elif q["recommended_option"] not in [o.get("id") for o in q.get("options", [])]:
             errs.append(f"local_check.questions[{q['id']}]: recommended_option is not one of the options")
-        # Entscheiden statt fragen: ohne `ask` eine Entscheidung (empfohlene Option gilt, recommendation = Grund); mit `ask` eine echte Frage
+        # decide instead of asking: without `ask` a decision (the recommended option applies, recommendation = reason); with `ask` a real question
         ask = q.get("ask")
         if ask is not None:
             if not isinstance(ask, dict) or not all(isinstance(ask.get(k), str) and 1 <= len(ask[k]) <= 300 for k in ("no_safe_default", "irreversible")):
-                errs.append(f"local_check.questions[{q.get('id', '?')}]: ask needs no_safe_default and irreversible (each 1–300 chars) – otherwise decide with the recommended option")
+                errs.append(f"local_check.questions[{q.get('id', '?')}]: ask needs no_safe_default and irreversible (each 1 to 300 chars); otherwise decide with the recommended option")
             real += 1
     if real > MAX_REAL_QUESTIONS:
-        errs.append(f"questions: {real} real questions (ask) – at most {MAX_REAL_QUESTIONS} per proposal; decide the rest with the recommended option and say why")
+        errs.append(f"questions: {real} real questions (ask); at most {MAX_REAL_QUESTIONS} per proposal; decide the rest with the recommended option and say why")
     return errs
 
 
@@ -59,15 +59,15 @@ MAX_REAL_QUESTIONS = 2
 
 
 def question_counts(lc: dict | None) -> dict:
-    """Entscheidungen und echte Fragen eines Vorschlags (Ziel 0 Fragen, höchstens 2 – Abnahmebedingung B28)."""
+    """Decisions and real questions of a proposal (goal 0 questions, at most 2)."""
     qs = (lc or {}).get("questions", []) or []
     real = sum(1 for q in qs if isinstance(q, dict) and q.get("ask") is not None)
     return {"decisions": len(qs) - real, "questions": real, "max_questions": MAX_REAL_QUESTIONS}
 
 
 def _coverage_errors(doc: dict, m: dict, form: str, repo: str | None) -> tuple[list[str], list[dict], list[str]]:
-    """B22: Abdeckungstabelle – Pflicht im Vorschlag; Form, dann gegen das Manifest und den Repo-Scan (dieselben Meldungen wie everydeck beim
-    Einreichen). Liefert (Fehler, erkannte Bausteine, Hinweise)."""
+    """Coverage table: required in a proposal; shape, then against the manifest and the repo scan (the same messages as everydeck on
+    submission). Returns (errors, detected blocks, notes)."""
     from .coverage import coverage_errors, coverage_questions, validate_coverage
     from .detect import detect_blocks
     cov = coverage_of(doc)
@@ -82,7 +82,7 @@ def _coverage_errors(doc: dict, m: dict, form: str, repo: str | None) -> tuple[l
 
 
 def cmd_validate(a: argparse.Namespace) -> int:
-    # B29: ein Befund (1.12-r0) – Form, Verweise, jede Fundstelle gegen das Repo, Vollständigkeit (Tabellen, Routen, Anbieterpakete)
+    # a Befund (1.12-r0): shape, references, every place against the repo, completeness (tables, routes, provider packages)
     raw = _load(a.manifest)
     from .befund import is_befund, validate_befund
     if is_befund(raw):
@@ -123,25 +123,25 @@ def cmd_drift(a: argparse.Namespace) -> int:
     lock = _load(str(lock_path))["call_sites"] if lock_path.exists() else None
     rep = check_drift(repo, m, lock)
     out = {"status": rep.status, "head": rep.head, "findings": [f.__dict__ for f in rep.findings], "call_sites": rep.call_sites}
-    # B31: direkt nach der Freigabe ist der Code schon weiter als der Befund (Adapter, Tür) – „new_build“ allein hindert das Einfrieren nicht;
-    # festgehalten werden die Aufrufstellen von jetzt. Jeder andere Befund (fehlendes Signal, Job ohne Herzschlag) bleibt Drift.
+    # right after approval the code is already ahead of the Befund (adapter, door); "new_build" alone does not prevent freezing;
+    # the call sites as of now are recorded. Every other finding (missing signal, job without heartbeat) stays drift.
     only_new_build = bool(rep.findings) and all(f.kind == "new_build" for f in rep.findings)
     if a.freeze and (rep.status != "drift" or only_new_build):
         lock_path.write_text(json.dumps(freeze_lock(rep), indent=1) + "\n", encoding="utf-8")
         out["lock"] = str(lock_path)
-        if only_new_build: out["note"] = "the code moved on since the Befund commit (new_build only) – call sites frozen as of now"
+        if only_new_build: out["note"] = "the code moved on since the Befund commit (new_build only); call sites frozen as of now"
     print(json.dumps(out, indent=1))
     return 0 if rep.status != "drift" or (a.freeze and only_new_build) else 2
 
 
 def cmd_reanchor(a: argparse.Namespace) -> int:
-    """B37 Baustein 2: Fundstellen vom Commit des Befunds auf HEAD umziehen (git, Text, Symbol). Ohne --out/--write nur der Bericht."""
+    """Move places from the Befund's commit to HEAD (git, text, symbol). Without --out/--write only the report."""
     from .reanchor import reanchor
     b = _load(a.befund)
     rep = reanchor(b, Path(a.repo), a.base)
     if not rep.get("error"):
         if isinstance(b.get("release_key"), str) and b["release_key"].startswith("git:") and rep["head"]:
-            b["release_key"] = f"git:{rep['head'][:12]}"   # die Fassung des Befunds folgt dem Commit (dieselbe Form wie der Release-Key des SDK)
+            b["release_key"] = f"git:{rep['head'][:12]}"   # the Befund's version follows the commit (the same form as the SDK release key)
         target = a.out or (a.befund if a.write else None)
         if target:
             Path(target).write_text(json.dumps(b, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"); rep["out"] = str(target)
@@ -150,14 +150,14 @@ def cmd_reanchor(a: argparse.Namespace) -> int:
 
 
 def cmd_publish(a: argparse.Namespace) -> int:
-    # B31: der Schlüssel nie auf der Kommandozeile (Prozessliste, Verlauf) – aus EVERYDECK_PUBLISH_KEY oder einer Datei (--token-file)
+    # never the key on the command line (process list, history); from EVERYDECK_PUBLISH_KEY or a file (--token-file)
     if not a.token:
         a.token = os.environ.get("EVERYDECK_PUBLISH_KEY") or (Path(a.token_file).read_text(encoding="utf-8").strip() if getattr(a, "token_file", None) else None)
     if not a.token:
-        print(json.dumps({"status": "invalid", "errors": ["no key: set EVERYDECK_PUBLISH_KEY or pass --token-file (a setup session key stays in the agent store – submit with everydeck-agent call … POST …/proposals --data-file instead)"]}, indent=1)); return 2
+        print(json.dumps({"status": "invalid", "errors": ["no key: set EVERYDECK_PUBLISH_KEY or pass --token-file (a setup session key stays in the agent store; submit with everydeck-agent call … POST …/proposals --data-file instead)"]}, indent=1)); return 2
     raw = _load(a.manifest)
     from .befund import is_befund, validate_befund
-    if is_befund(raw):   # B29: der Befund geht als { befund } an everydeck; everydeck leitet ab
+    if is_befund(raw):   # the Befund goes to everydeck as { befund }; everydeck derives
         errs = validate_befund(raw, Path(getattr(a, "repo", ".")).resolve() if getattr(a, "repo", None) else None)
         if errs:
             print(json.dumps({"status": "invalid", "errors": errs}, indent=1)); return 2
@@ -166,8 +166,8 @@ def cmd_publish(a: argparse.Namespace) -> int:
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 body = json.loads(r.read() or b"{}")
-                scope = (body.get("derived") or {}).get("read_scope") or body.get("read_scope")   # B31: der CI-Weg liefert ihn oben
-                if scope:   # B29 Abnahme: der Lese-Umfang für die allgemeine Lese-Brücke, neben dem Befund
+                scope = (body.get("derived") or {}).get("read_scope") or body.get("read_scope")   # the CI path returns it at the top level
+                if scope:   # the read scope for the general read bridge, next to the Befund
                     out = Path(a.manifest).resolve().parent / "everydeck-read-scope.json"
                     out.write_text(json.dumps(scope, indent=1) + "\n", encoding="utf-8")
                     body["derived"] = {**body["derived"], "read_scope": str(out)}
@@ -190,17 +190,17 @@ def cmd_publish(a: argparse.Namespace) -> int:
         detail = e.read().decode("utf-8", "replace")[:500]
         print(json.dumps({"status": "rejected", "http": e.code, "detail": detail}, indent=1))
         return 2 if e.code in (401, 403, 409, 422) else 0
-    except Exception as e:  # Netzausfall von everydeck blockiert den Build nicht (docs/02)
+    except Exception as e:  # an everydeck outage does not block the build
         print(json.dumps({"status": "unreachable", "warning": str(e)[:200], "digest": digest(m)}, indent=1))
         return 0
 
 
 def cmd_change(a: argparse.Namespace) -> int:
-    """B9: everydeck-change.json prüfen (Form, Referenzen, SHA-/Digest-Bindung) und optional an everydeck melden.
+    """Check everydeck-change.json (shape, references, SHA/digest binding) and optionally report it to everydeck.
 
-    Ohne --url/--project/--token nur lokale Prüfung. Mit allen dreien: POST /api/projects/<id>/changes mit dem Dateiinhalt.
-    Server-Antworten werden gedruckt, nie wiederholt: 2xx gespeichert (Exit 0), 4xx abgelehnt (Exit 2),
-    5xx/Netzausfall Warnung (Exit 0 – everydeck darf den Build des Kunden nicht brechen).
+    Without --url/--project/--token only a local check. With all three: POST /api/projects/<id>/changes with the file content.
+    Server answers are printed, never retried: 2xx stored (exit 0), 4xx rejected (exit 2),
+    5xx/outage a warning (exit 0; everydeck must not break the customer's build).
     """
     change = _load(a.change)
     m, _, _ = _load_manifest(a.manifest)
@@ -233,7 +233,7 @@ def cmd_change(a: argparse.Namespace) -> int:
             return 2
         print(json.dumps({**out, "status": "unreachable", "http": e.code, "warning": detail[:200]}, indent=1))
         return 0
-    except Exception as e:  # Netzausfall von everydeck blockiert den Build nicht (docs/02)
+    except Exception as e:  # an everydeck outage does not block the build
         print(json.dumps({**out, "status": "unreachable", "warning": str(e)[:200]}, indent=1))
         return 0
 
@@ -241,12 +241,12 @@ def cmd_change(a: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="everydeck-check")
     sub = p.add_subparsers(dest="cmd", required=True)
-    v = sub.add_parser("validate"); v.add_argument("manifest"); v.add_argument("--repo", default=None, help="app repository: detect building blocks (dependencies, config, code hints) that must appear in coverage[]"); v.add_argument("--db", default=None, help="B31: database URL (the read role is enough; or EVERYDECK_SCHEMA_DB_URL) – every table of the database must be in the Befund, evidence 'database' is checked against it"); v.set_defaults(fn=cmd_validate)
+    v = sub.add_parser("validate"); v.add_argument("manifest"); v.add_argument("--repo", default=None, help="app repository: detect building blocks (dependencies, config, code hints) that must appear in coverage[]"); v.add_argument("--db", default=None, help="database URL (the read role is enough; or EVERYDECK_SCHEMA_DB_URL); every table of the database must be in the Befund, evidence 'database' is checked against it"); v.set_defaults(fn=cmd_validate)
     d = sub.add_parser("drift"); d.add_argument("manifest"); d.add_argument("--repo", default="."); d.add_argument("--freeze", action="store_true"); d.set_defaults(fn=cmd_drift)
-    ra = sub.add_parser("reanchor", help="B37: move every place of the Befund from its commit to HEAD (git diff, text, symbol) – nothing guessed; unresolved places are listed")
+    ra = sub.add_parser("reanchor", help="move every place of the Befund from its commit to HEAD (git diff, text, symbol); nothing guessed; unresolved places are listed")
     ra.add_argument("befund"); ra.add_argument("--repo", default="."); ra.add_argument("--base", default=None, help="commit the places refer to (default: commit of the Befund)"); ra.add_argument("--out", default=None); ra.add_argument("--write", action="store_true", help="write the re-anchored Befund back to its file"); ra.set_defaults(fn=cmd_reanchor)
-    rd = sub.add_parser("reads", help="B29: the cross-check of display locations – every table named in a frontend string: main navigation (with access path), technical (with reason) or open"); rd.add_argument("befund"); rd.add_argument("--repo", required=True); rd.add_argument("--markdown", action="store_true"); rd.set_defaults(fn=cmd_reads)
-    pub = sub.add_parser("publish"); pub.add_argument("manifest"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list – use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: a Befund goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of a Befund against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
+    rd = sub.add_parser("reads", help="the cross-check of display locations: every table named in a frontend string: main navigation (with access path), technical (with reason) or open"); rd.add_argument("befund"); rd.add_argument("--repo", required=True); rd.add_argument("--markdown", action="store_true"); rd.set_defaults(fn=cmd_reads)
+    pub = sub.add_parser("publish"); pub.add_argument("manifest"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list; use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: a Befund goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of a Befund against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
     ch = sub.add_parser("change", help="check everydeck-change.json against manifest, repo and HEAD; optionally publish it")
     ch.add_argument("change"); ch.add_argument("--manifest", required=True); ch.add_argument("--repo", default="."); ch.add_argument("--sha", default=None)
     ch.add_argument("--url"); ch.add_argument("--project"); ch.add_argument("--token"); ch.set_defaults(fn=cmd_change)

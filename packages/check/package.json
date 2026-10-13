@@ -1,6 +1,6 @@
 {
   "name": "@everydeck/check",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "everydeck skeleton: reads the facts of an app repository (tables, pages, routes, flows, each with its place in the code) into everydeck/everydeck-befund.json",
   "license": "MIT",
   "homepage": "https://everydeck.ai",

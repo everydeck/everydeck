@@ -1,9 +1,9 @@
-"""B22 Schnitt B – Abdeckungstabelle des Vorschlags (Spiegel von packages/domain/src/coverage.ts).
+"""Coverage table of the proposal (mirror of everydeck's coverage rules).
 
-`coverage[]` im Vorschlag `{ manifest, local_check, coverage }`: jedes Merkmal, jede Objektart, jede Admin-Funktion und jeder Ablauf aus dem
-Inventar mit Baustein und genau einem Ausgang (managed, measured, hint, not_everydeck mit Grund, later mit Grund, false_positive mit Grund und Fundstelle: kein solcher Baustein) und Fundstelle. Ein erkannter
-Baustein mit Ausgang managed/measured braucht seine Pflichtdeklaration im Manifest. Gleiche Meldungen wie everydeck, damit der Agent sie vor dem
-Einreichen sieht.
+`coverage[]` in the proposal `{ manifest, local_check, coverage }`: every feature, object type, admin function and flow from the
+inventory with its building block and exactly one outcome (managed, measured, hint, not_everydeck with a reason, later with a reason, false_positive with a reason and place: no such block) and a place. A detected
+block with outcome managed/measured needs its required declaration in the manifest. The same messages as everydeck, so the agent sees them before
+submitting.
 """
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from typing import Any
 BLOCK_IDS = ("login", "people_roles", "organizations", "content_status", "moderation", "chats", "uploads", "search", "payments", "email",
              "push", "ai", "jobs", "imports", "bookings", "settings", "platforms")
 COVERAGE_KINDS = ("feature", "object", "admin_function", "flow")
-COVERAGE_OUTCOMES = ("managed", "measured", "hint", "not_everydeck", "later", "false_positive")   # false_positive: Treffer ist kein solcher Baustein – Grund mit Fundstelle
+COVERAGE_OUTCOMES = ("managed", "measured", "hint", "not_everydeck", "later", "false_positive")   # false_positive: the hit is no such block; reason with a place
 PUSH_REGISTER_CAPABILITY = "push.register_device"
 MESSAGES_FEATURE = "messages"
 _ID = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
 
 
 def validate_coverage(v: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    """Form: liefert (gültige Einträge, Fehler)."""
+    """Shape: returns (valid entries, errors)."""
     if v is None:
         return [], []
     if not isinstance(v, list) or len(v) > 400:
@@ -50,7 +50,7 @@ def validate_coverage(v: Any) -> tuple[list[dict[str, Any]], list[str]]:
             mine.append(f"{at}: block must be one of {', '.join(BLOCK_IDS)}")
         outcome = o.get("outcome")
         if outcome not in COVERAGE_OUTCOMES:
-            mine.append(f"{at}: outcome must be one of {', '.join(COVERAGE_OUTCOMES)} – nothing is left without one")
+            mine.append(f"{at}: outcome must be one of {', '.join(COVERAGE_OUTCOMES)}; nothing is left without one")
         if outcome in ("not_everydeck", "later") and not s("reason", 600):
             mine.append(f"{at}: {outcome} needs a reason (max 600 chars)")
         if outcome == "false_positive" and not s("reason", 600):
@@ -74,7 +74,7 @@ CORE_BLOCKS = ("login", "payments", "chats", "push", "platforms", "ai")
 
 
 def manifest_blocks(m: dict[str, Any]) -> list[tuple[str, str]]:
-    """Bausteine, die das Manifest selbst verrät (Spiegel von manifestBlocks): (block, because)."""
+    """Blocks the manifest itself reveals (mirror of manifestBlocks): (block, because)."""
     out: dict[str, str] = {}
 
     def add(b: str | None, why: str) -> None:
@@ -110,22 +110,22 @@ def manifest_blocks(m: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def coverage_questions(entries: list[dict[str, Any]]) -> list[str]:
-    """Kernbausteine mit later/not_everydeck: keine Betreiberfrage (Entscheiden statt fragen, 07.10.2026) – everydeck zeigt dem Betreiber einen sichtbaren
-    Hinweis mit einem Auftrag für den Agenten. Hier als Hinweis, damit der Agent weiß, was der Betreiber sieht. false_positive zeigt nichts."""
-    return [f"coverage {e['id']}: {e['block']} left out ({e['outcome']}) – the owner sees a visible hint with a prompt for you, no question; your reason: {e.get('reason', '')}"
+    """Core blocks with later/not_everydeck: no question to the operator (decide instead of asking); everydeck shows the operator a visible
+    hint with a prompt for the agent. Returned here as a note so the agent knows what the operator sees. false_positive shows nothing."""
+    return [f"coverage {e['id']}: {e['block']} left out ({e['outcome']}); the owner sees a visible hint with a prompt for you, no question; your reason: {e.get('reason', '')}"
             for e in entries if e["outcome"] in ("later", "not_everydeck") and e["block"] in CORE_BLOCKS]
 
 
 def coverage_errors(m: dict[str, Any], entries: list[dict[str, Any]], detected: list[tuple[str, str]] | None = None) -> list[str]:
-    """Abdeckung gegen das Manifest: unabhängig erkannte Bausteine (Manifest, Repo-Scan) brauchen einen Eintrag; Verweise; Pflichtdeklarationen (managed/measured)."""
+    """Coverage against the manifest: independently detected blocks (manifest, repo scan) need an entry; references; required declarations (managed/measured)."""
     errs: list[str] = []
     covered = {e["block"] for e in entries}
     for b, why in manifest_blocks(m):
         if b not in covered:
-            errs.append(f"coverage: block {b} is visible in the manifest ({why}) but has no entry – add one with its outcome")
+            errs.append(f"coverage: block {b} is visible in the manifest ({why}) but has no entry; add one with its outcome")
     for b, where in (detected or []):
         if b not in covered:
-            errs.append(f"coverage: block {b} was detected in the repository ({where}) but has no entry – add one with its outcome")
+            errs.append(f"coverage: block {b} was detected in the repository ({where}) but has no entry; add one with its outcome")
     objects = m.get("objects", []) or []
     caps = m.get("capabilities", []) or []
     actions = m.get("actions", []) or []
@@ -160,7 +160,7 @@ def coverage_errors(m: dict[str, Any], entries: list[dict[str, Any]], detected: 
         b = e["block"]
         if b == "chats":
             if not any(MESSAGES_FEATURE in (a.get("capabilities") or []) for a in (m.get("adapters") or [])):
-                errs.append(f"{at}: chats need message metadata – an adapter with feature `{MESSAGES_FEATURE}` (everydeck.messageSent in the app)")
+                errs.append(f"{at}: chats need message metadata: an adapter with feature `{MESSAGES_FEATURE}` (everydeck.messageSent in the app)")
             if e.get("object_type") and not (has_role(e["object_type"], "person") and has_role(e["object_type"], "ref")):
                 errs.append(f"{at}: a conversation object needs fields with role person (the other party) and ref (what it is about)")
         elif b == "moderation":
@@ -169,13 +169,13 @@ def coverage_errors(m: dict[str, Any], entries: list[dict[str, Any]], detected: 
         elif b == "push":
             reg = next((c for c in caps if c.get("id") == PUSH_REGISTER_CAPABILITY), None)
             if not reg:
-                errs.append(f"{at}: push needs the flow `{PUSH_REGISTER_CAPABILITY}` (register a device, with a result step) – without it everydeck cannot verify a push repair")
+                errs.append(f"{at}: push needs the flow `{PUSH_REGISTER_CAPABILITY}` (register a device, with a result step); without it everydeck cannot verify a push repair")
             elif not any(s.get("role") == "result" and s.get("signal") for s in (reg.get("steps") or [])):
                 errs.append(f"{at}: flow `{PUSH_REGISTER_CAPABILITY}` needs a result step with a server signal")
         elif b == "payments":
             rev = [o for o in objects if o.get("area") == "revenue"]
             if not any(any(f.get("role") == "amount" for f in (o.get("fields") or [])) and any(s.get("revenue") == "paying" for s in (o.get("statuses") or [])) for o in rev):
-                errs.append(f"{at}: payments measured need a revenue object with role amount and a status with revenue paying – or outcome hint (then everydeck shows the revenue prompt)")
+                errs.append(f"{at}: payments measured need a revenue object with role amount and a status with revenue paying, or outcome hint (then everydeck shows the revenue prompt)")
         elif b == "email":
             if not any(c.get("kind") == "mail" for c in caps):
                 errs.append(f"{at}: e-mail needs a flow with kind mail (requested → handed over / failed)")

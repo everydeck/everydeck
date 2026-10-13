@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""B29 (vierte Runde) – Fakten aus Python-Dateien über den Syntaxbaum (ast), für das Befund-Gerüst (befund-reads.mjs).
-Liest je Datei: FastAPI/Starlette-Router (APIRouter(prefix=…)), Routen-Dekoratoren (@x.get("/pfad")) mit ihrem Handler, include_router(…, prefix=…),
-Importe (für die Auflösung von Modulen und Funktionen), SQLAlchemy-Modelle (__tablename__) und je Funktion die Datenzugriffe:
-  .table("x") / .from_("x") / .from("x") (supabase-py), .rpc("fn"), SQL in Zeichenketten (FROM/JOIN, ohne DELETE FROM), select(Model) /
-  session.query(Model) / Model.query, sowie alle aufgerufenen Namen (damit das Gerüst Aufrufe in andere Funktionen und Module verfolgt).
-Aufruf: python3 befund-ast.py <repo> <datei> [<datei> …]   → JSON auf stdout. Nichts wird bewertet, nichts geschrieben.
+"""Facts from Python files through the syntax tree (ast), for the Befund skeleton (befund-reads.mjs).
+Reads per file: FastAPI/Starlette routers (APIRouter(prefix=…)), route decorators (@x.get("/path")) with their handler, include_router(…, prefix=…),
+imports (to resolve modules and functions), SQLAlchemy models (__tablename__) and per function the data accesses:
+  .table("x") / .from_("x") / .from("x") (supabase-py), .rpc("fn"), SQL in strings (FROM/JOIN, without DELETE FROM), select(Model) /
+  session.query(Model) / Model.query, plus all called names (so the skeleton can follow calls into other functions and modules).
+Usage: python3 befund-ast.py <repo> <file> [<file> …]   → JSON on stdout. Nothing is judged, nothing is written.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def dotted(node: ast.AST) -> str | None:
 def const_str(node: ast.AST) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
-    if isinstance(node, ast.JoinedStr):   # f-string: nur die festen Teile
+    if isinstance(node, ast.JoinedStr):   # f-string: only the fixed parts
         return "".join(v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str))
     return None
 
@@ -42,7 +42,7 @@ def sql_reads(text: str) -> list[str]:
     out: list[str] = []
     for m in SQL_READ.finditer(text):
         name = m.group(2)
-        # "DELETE FROM x" ist kein Lesen; "UPDATE … FROM y" liest y
+        # "DELETE FROM x" is not a read; "UPDATE … FROM y" reads y
         before = text[max(0, m.start() - 12):m.start()].lower()
         if m.group(1).lower() == "from" and before.rstrip().endswith("delete") and name in deleted:
             continue
@@ -57,8 +57,8 @@ SQL_WORDS = {"select", "from", "where", "join", "on", "as", "and", "or", "not", 
 
 
 def select_columns(s: str | None, base_line: int) -> list[dict] | str:
-    """B31 Schnitt A: Spalten einer supabase-Auswahl .select("a, b, rel(c)") – je Name die Zeile, in der er steht; "*" oder keine Liste = alle.
-    Eingebettete Beziehungen (rel(…)) gehören zu einer anderen Tabelle und zählen hier nicht."""
+    """Columns of a supabase select .select("a, b, rel(c)"): per name the line it is on; "*" or no list = all.
+    Embedded relations (rel(…)) belong to another table and do not count here."""
     if s is None or not s.strip(): return "*"
     out: list[dict] = []; depth = 0; cur = ""; start = 0
     def flush(item: str, at: int) -> None:
@@ -78,8 +78,8 @@ def select_columns(s: str | None, base_line: int) -> list[dict] | str:
 
 
 def sql_columns(text: str, base_line: int) -> dict:
-    """B31 Schnitt A: Spalten einer SQL-Abfrage je gelesener Tabelle – SELECT-Liste bis FROM; Bezeichner mit Zeile (gegen die Spalten des Befunds
-    geprüft im Gerüst). "*" bzw. "alias.*" = alle Spalten. Nur einfache Abfragen; was nicht eindeutig ist, zählt als Kandidat für alle Tabellen der Abfrage."""
+    """Columns of an SQL query per table read: SELECT list up to FROM; identifiers with their line (checked against the Befund columns
+    in the skeleton). "*" or "alias.*" = all columns. Simple queries only; anything ambiguous counts as a candidate for every table of the query."""
     out: dict = {}
     for m in re.finditer(r"\bselect\b([\s\S]*?)\bfrom\b([\s\S]*?)(?=\bwhere\b|\bgroup\b|\border\b|\blimit\b|;|\)|$)", text, re.I):
         lst, frm = m.group(1), m.group(2)
@@ -106,7 +106,7 @@ def sql_columns(text: str, base_line: int) -> dict:
 
 
 def chain(node: ast.Call) -> list[tuple[str, ast.Call]]:
-    """Methodenkette von außen nach innen: supabase.table("x").select("*").execute() → [(execute, …), (select, …), (table, …)]"""
+    """Method chain from outside in: supabase.table("x").select("*").execute() → [(execute, …), (select, …), (table, …)]"""
     out: list[tuple[str, ast.Call]] = []; cur: ast.AST = node
     while isinstance(cur, ast.Call) and isinstance(cur.func, ast.Attribute):
         out.append((cur.func.attr, cur)); cur = cur.func.value
@@ -114,7 +114,7 @@ def chain(node: ast.Call) -> list[tuple[str, ast.Call]]:
 
 
 class FnFacts(ast.NodeVisitor):
-    """Datenzugriffe und Aufrufe innerhalb einer Funktion. Lesen oder Schreiben folgt aus der Methodenkette hinter .table()/.from_()."""
+    """Data accesses and calls inside a function. Read or write follows from the method chain after .table()/.from_()."""
 
     def __init__(self) -> None:
         self.tables: list[dict] = []; self.rpcs: list[dict] = []; self.sql: list[dict] = []; self.models: list[dict] = []
@@ -135,7 +135,7 @@ class FnFacts(ast.NodeVisitor):
                 if s:
                     after = [a for a, _ in ch[:i]]; w = next((a for a in after if a in WRITE), None)
                     entry = {"name": s, "line": call.lineno, "kind": "write" if w else "read", "via": f"{attr}(…).{w}(…)" if w else attr}
-                    if not w:   # B31 Schnitt A: welche Spalten die Auswahl liest (.select("a, b") → a, b; ohne Liste alle)
+                    if not w:   # which columns the select reads (.select("a, b") → a, b; without a list all)
                         sel = next((c for a, c in ch[:i] if a == "select"), None)
                         arg = sel.args[0] if sel is not None and sel.args else None
                         entry["columns"] = select_columns(const_str(arg) if arg is not None else None, getattr(arg, "lineno", call.lineno)) if sel is not None else "*"
@@ -178,7 +178,7 @@ class FnFacts(ast.NodeVisitor):
 
 
 def col_key(node: ast.AST) -> str | None:
-    """x.get("col") / x["col"] → "col" (der Wert einer Spalte aus einer gelesenen Zeile)"""
+    """x.get("col") / x["col"] → "col" (the value of a column from a row read)"""
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" and node.args:
         return const_str(node.args[0])
     if isinstance(node, ast.Subscript):
@@ -187,18 +187,18 @@ def col_key(node: ast.AST) -> str | None:
 
 
 def flow_facts(fn: ast.AST, imports: dict, module_returns: dict | None = None) -> dict:
-    """B31 E1 – Setzstellen und Anbieter-Kennungen einer Funktion (nur Fakten):
-    writes: Spalten, die die Funktion in einer Änderung schreibt (.table("t").update({…}) / .upsert / .insert, auch über ein Dict, das vorher gefüllt wird),
-            mit `provider`, wenn der Wert aus dem Aufruf eines Anbieterpakets stammt (cid = stripe.Customer.create(…)["id"] → {"stripe_customer_id": cid});
-    passes: Spalten, deren Wert die Funktion einem Anbieterpaket übergibt (stripe.Customer.retrieve(org.get("stripe_customer_id")))."""
-    mods = {k: v.split(":")[0].split(".")[0] for k, v in imports.items() if not v.startswith(".")}   # Name → oberstes Modul
+    """Write places and provider IDs of a function (facts only):
+    writes: columns the function writes in a change (.table("t").update({…}) / .upsert / .insert, also through a dict filled beforehand),
+            with `provider` if the value comes from a call to a provider package (cid = stripe.Customer.create(…)["id"] → {"stripe_customer_id": cid});
+    passes: columns whose value the function passes to a provider package (stripe.Customer.retrieve(org.get("stripe_customer_id")))."""
+    mods = {k: v.split(":")[0].split(".")[0] for k, v in imports.items() if not v.startswith(".")}   # name → top-level module
     assigns: dict = {}; dict_sets: dict = {}
     for n in ast.walk(fn):
         if isinstance(n, ast.Assign):
             for t in n.targets:
                 if isinstance(t, ast.Name):
                     assigns.setdefault(t.id, []).append(n.value)
-                    if isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and (module_returns or {}).get(n.value.func.id): mods[t.id] = module_returns[n.value.func.id]   # stripe = _stripe() – die Funktion gibt das Modul zurück
+                    if isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and (module_returns or {}).get(n.value.func.id): mods[t.id] = module_returns[n.value.func.id]   # stripe = _stripe(): the function returns the module
                 if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
                     k = const_str(t.slice)
                     if k: dict_sets.setdefault(t.value.id, []).append((k, n.value, n.lineno))
@@ -217,7 +217,7 @@ def flow_facts(fn: ast.AST, imports: dict, module_returns: dict | None = None) -
             for r in rhss:
                 m = provider_call(r) or next((prov[x.id] for x in ast.walk(r) if isinstance(x, ast.Name) and x.id in prov), None)
                 if m: prov[v] = m; break
-    col_of: dict = {}; derived: dict = {}   # derived: Variable → Spalten, aus deren aktuellem Wert sie berechnet ist (new = int(org.get("topup_credits")) + n)
+    col_of: dict = {}; derived: dict = {}   # derived: variable → columns whose current value it is computed from (new = int(org.get("topup_credits")) + n)
     for v, rhss in assigns.items():
         for r in rhss:
             k = col_key(r)
@@ -233,7 +233,7 @@ def flow_facts(fn: ast.AST, imports: dict, module_returns: dict | None = None) -
     def touches(node: ast.AST, column: str) -> bool:
         return any((col_key(x) == column) or (isinstance(x, ast.Name) and column in derived.get(x.id, set())) for x in ast.walk(node))
     def from_itself(node: ast.AST, column: str, depth: int = 0) -> bool:
-        """Rechnung mit dem bisherigen Wert (+, -, *): new = int(org.get("topup_credits")) + n – nicht schon ein Wert aus einem Dict mit demselben Schlüssel"""
+        """Computation with the previous value (+, -, *): new = int(org.get("topup_credits")) + n; not merely a value from a dict with the same key"""
         if any(isinstance(x, ast.BinOp) and isinstance(x.op, (ast.Add, ast.Sub, ast.Mult)) and touches(x, column) for x in ast.walk(node)): return True
         if depth < 3:
             for x in ast.walk(node):
@@ -260,16 +260,16 @@ def flow_facts(fn: ast.AST, imports: dict, module_returns: dict | None = None) -
                 e = {"table": tbl, "column": k, "line": line, "op": w[0]}
                 m = value_provider(v)
                 if m: e["provider"] = m
-                if from_itself(v, k): e["self"] = True   # der neue Wert folgt aus dem bisherigen (Guthaben, Zähler)
+                if from_itself(v, k): e["self"] = True   # the new value follows from the previous one (credits, counters)
                 writes.append(e)
         d = dotted(n.func) or ""; head = d.split(".")[0]
         if head in mods and "." in d:
-            # nur ein Positionsargument, das selbst die Spalte ist (stripe.Customer.retrieve(org["stripe_customer_id"])) – ein Wert in einem Dict oder
-            # als Schlüsselwort (resend.Emails.send({"subject": …}), stripe.Customer.create(email=…)) ist Inhalt, den die App übergibt, keine Kennung
+            # only a positional argument that is the column itself (stripe.Customer.retrieve(org["stripe_customer_id"])); a value in a dict or
+            # as a keyword (resend.Emails.send({"subject": …}), stripe.Customer.create(email=…)) is content the app passes, not an ID
             for x in n.args:
                 direct = col_key(x); via = col_of.get(x.id) if isinstance(x, ast.Name) else None
                 if direct: passes.append({"column": direct, "line": getattr(x, "lineno", n.lineno), "provider": mods[head]})
-                elif via: passes.append({"column": via[0], "line": via[1] or n.lineno, "provider": mods[head]})   # Stelle, an der die Spalte genannt ist
+                elif via: passes.append({"column": via[0], "line": via[1] or n.lineno, "provider": mods[head]})   # place where the column is named
     return {"writes": writes, "passes": passes}
 
 
@@ -280,9 +280,9 @@ def kw(node: ast.Call, key: str) -> str | None:
 
 
 def money_places(tree: ast.AST, imports: dict) -> list:
-    """B32 (O3): Geld in Python – babel.numbers.format_currency(wert, "EUR") formatiert einen Wert als Währung; eine Funktion der App zählt nur,
-    wenn ihr Körper das nachweislich mit einem ihrer Parameter tut (nie am Namen). Wert = Spalte einer gelesenen Zeile (row["price"], row.get("price"),
-    row.price); Währung = Literal, Spalte derselben Zeile oder ein Parameter, den der Aufrufer füllt; sonst keine."""
+    """Money in Python: babel.numbers.format_currency(value, "EUR") formats a value as a currency; a function of the app counts only
+    if its body provably does that with one of its parameters (never by its name). Value = column of a row read (row["price"], row.get("price"),
+    row.price); currency = literal, column of the same row or a parameter the caller fills; otherwise none."""
     def is_fmt(call: ast.Call) -> bool:
         name = dotted(call.func) or ""
         if name.split(".")[-1] != "format_currency": return False
@@ -292,7 +292,7 @@ def money_places(tree: ast.AST, imports: dict) -> list:
     params = {id(f): [a.arg for a in f.args.args] for f in fns}
     owner: dict = {}
     for f in fns:
-        for x in ast.walk(f): owner[id(x)] = f   # innerste zuletzt: ast.walk geht außen nach innen, die innere Funktion überschreibt
+        for x in ast.walk(f): owner[id(x)] = f   # innermost last: ast.walk goes from outside in, the inner function overwrites
     def core(n):
         while True:
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("float", "int", "Decimal", "round") and n.args: n = n.args[0]; continue
@@ -357,7 +357,7 @@ def analyse(path: str) -> dict:
                 if isinstance(st, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__tablename__" for t in st.targets):
                     s = const_str(st.value)
                     if s: out["models"][node.name] = s
-    for node in tree.body:   # Modulebene: Router, include_router, App, Konstanten
+    for node in tree.body:   # module level: routers, include_router, app, constants
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
             name = dotted(node.value.func) or ""
             if name.endswith("APIRouter") or name.endswith("Router"):
@@ -370,7 +370,7 @@ def analyse(path: str) -> dict:
             s = const_str(node.value)
             if s and re.search(r"\b(select|from|join)\b", s, re.I):
                 out["consts"][node.targets[0].id] = sql_reads(s)
-    # B31 E1: Funktionen, die ein importiertes Modul zurückgeben (def _stripe(): import stripe as m; return m)
+    # functions that return an imported module (def _stripe(): import stripe as m; return m)
     module_returns: dict = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

@@ -1,20 +1,20 @@
-"""B22 Schnitt B (Nachbesserung 2) – unabhängige Erkennung von Bausteinen im Repo der App.
+"""Independent detection of building blocks in the app's repository.
 
-Statt der Liste des Agenten zu vertrauen, liest everydeck-check Abhängigkeiten und eindeutige Code-Hinweise: package.json (auch in Unterordnern wie
-functions/ oder apps/*), requirements*.txt und pyproject.toml, pubspec.yaml, Podfile und build.gradle, Expo- und Capacitor-Konfiguration,
-Erweiterungs-Manifeste; dazu wenige eindeutige Importe im Code (firebase/messaging, firebase/auth, firebase/storage, supabase.auth, Storage-
-Clients). Jeder so erkannte Baustein muss in der Abdeckungstabelle stehen (mit welchem Ausgang auch immer), sonst lehnt `validate --repo` ab.
-Erkannt wird nur, was eindeutig ist; ein Treffer ist ein Hinweis mit Fundstelle, kein Urteil.
+Instead of trusting the agent's list, everydeck-check reads dependencies and unambiguous code hints: package.json (also in subfolders such as
+functions/ or apps/*), requirements*.txt and pyproject.toml, pubspec.yaml, Podfile and build.gradle, Expo and Capacitor configuration,
+extension manifests; plus a few unambiguous imports in the code (firebase/messaging, firebase/auth, firebase/storage, supabase.auth, storage
+clients). Every block detected this way must appear in the coverage table (with whatever outcome), otherwise `validate --repo` rejects.
+Only what is unambiguous is detected; a hit is a hint with a place, not a verdict.
 
-Schema-Erkennung (Nachbesserung 07.10.): Chats und Moderation stecken selten in einer Bibliothek, aber fast immer im Schema. Darum liest
-everydeck-check Tabellen- und Collection-Namen aus SQL-Migrationen (CREATE TABLE), Prisma (model, @@map), Drizzle (pgTable/mysqlTable/sqliteTable),
-Supabase-Typen (Database.public.Tables), SQLAlchemy (__tablename__), Firestore-Regeln (match /name/{id}) und Firestore-Aufrufen (collection('name'))
-und bildet die Namen wortweise auf Bausteine ab (SCHEMA_WORDS): messages/chats/conversations → chats, reports/flags/moderation → moderation,
+Schema detection: chats and moderation rarely live in a library, but almost always in the schema. So
+everydeck-check reads table and collection names from SQL migrations (CREATE TABLE), Prisma (model, @@map), Drizzle (pgTable/mysqlTable/sqliteTable),
+Supabase types (Database.public.Tables), SQLAlchemy (__tablename__), Firestore rules (match /name/{id}) and Firestore calls (collection('name'))
+and maps the names word by word to blocks (SCHEMA_WORDS): messages/chats/conversations → chats, reports/flags/moderation → moderation,
 bookings/reservations → bookings, subscriptions/invoices/payments → payments, push/device_tokens → push, organizations/teams/memberships →
-organizations, settings/config → settings, uploads/files/attachments → uploads, users/accounts/sessions → login (eigener Login mit Sitzungstabelle),
-people/members/roles → people_roles (zusammengesetzte Namen wie team_members zählen über ihr erstes Wort: organizations). Dazu Bibliotheken und Aufrufe
-für Passwörter und Tokens (bcrypt, argon2, scrypt/pbkdf2, passlib, jsonwebtoken, jose, iron-session, lucia, passport) → login.
-Ein Fehltreffer bekommt vom Agenten einen Eintrag not_everydeck mit Grund.
+organizations, settings/config → settings, uploads/files/attachments → uploads, users/accounts/sessions → login (own login with a session table),
+people/members/roles → people_roles (compound names such as team_members count by their first word: organizations). Plus libraries and calls
+for passwords and tokens (bcrypt, argon2, scrypt/pbkdf2, passlib, jsonwebtoken, jose, iron-session, lucia, passport) → login.
+For a false hit the agent writes an entry not_everydeck with a reason.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from pathlib import Path
 
 SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", ".next", ".expo", "coverage", "__pycache__", ".venv", "venv", "Pods", ".everydeck", "everydeck"}
 
-# Abhängigkeit → Baustein (npm). Präfix-Treffer mit "*".
+# dependency → block (npm). Prefix match with "*".
 NPM: dict[str, str] = {
     "stripe": "payments", "@stripe/*": "payments", "@paddle/*": "payments", "@lemonsqueezy/*": "payments", "@paypal/*": "payments", "razorpay": "payments", "@mollie/*": "payments",
     "openai": "ai", "@anthropic-ai/*": "ai", "@google/generative-ai": "ai", "@google/genai": "ai", "ai": "ai", "@ai-sdk/*": "ai", "langchain": "ai", "@langchain/*": "ai", "cohere-ai": "ai", "@mistralai/*": "ai", "replicate": "ai", "groq-sdk": "ai",
@@ -50,7 +50,7 @@ PY: dict[str, str] = {
 }
 PUB: dict[str, str] = {"firebase_messaging": "push", "flutter_local_notifications": "push", "onesignal_flutter": "push", "firebase_auth": "login", "flutter_stripe": "payments", "stripe_flutter": "payments", "image_picker": "uploads", "firebase_storage": "uploads", "google_generative_ai": "ai", "flutter": "platforms"}
 NATIVE: list[tuple[str, str]] = [("FirebaseMessaging", "push"), ("firebase-messaging", "push"), ("OneSignal", "push")]
-# eindeutige Importe/Aufrufe im Code
+# unambiguous imports/calls in the code
 CODE: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"""['"]firebase/messaging['"]|getMessaging\("""), "push", "firebase/messaging"),
     (re.compile(r"""['"]firebase/auth['"]|firebase-admin/auth|signInWithEmailAndPassword\(|signInWithPopup\("""), "login", "firebase/auth"),
@@ -61,7 +61,7 @@ CODE: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"""stripe\.Webhook\.construct_event|stripe\.webhooks\.constructEvent|/webhooks?/stripe|/stripe/webhooks?|stripe-signature"""), "payments", "stripe webhook"),
 ]
 CODE_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".dart", ".vue", ".svelte"}
-# Schema: Wort im Tabellen-/Collection-Namen (nach _ und CamelCase zerlegt, Einzahl wie Mehrzahl) → Baustein
+# schema: word in the table/collection name (split at _ and CamelCase, singular and plural) → block
 SCHEMA_WORDS: dict[str, str] = {
     "message": "chats", "messages": "chats", "chat": "chats", "chats": "chats", "conversation": "chats", "conversations": "chats",
     "report": "moderation", "reports": "moderation", "reporting": "moderation", "reportings": "moderation", "flag": "moderation", "flags": "moderation", "moderation": "moderation",
@@ -74,10 +74,10 @@ SCHEMA_WORDS: dict[str, str] = {
     "user": "login", "users": "login", "account": "login", "accounts": "login", "session": "login", "sessions": "login",
     "people": "people_roles", "person": "people_roles", "persons": "people_roles", "member": "people_roles", "members": "people_roles", "role": "people_roles", "roles": "people_roles",
 }
-SCHEMA_NAMES: dict[str, str] = {"device_tokens": "push", "devices_tokens": "push", "fcm_tokens": "push", "apns_tokens": "push"}   # ganze Namen
+SCHEMA_NAMES: dict[str, str] = {"device_tokens": "push", "devices_tokens": "push", "fcm_tokens": "push", "apns_tokens": "push"}   # whole names
 SQL_CREATE = re.compile(r"""create\s+table\s+(?:if\s+not\s+exists\s+)?(?:(?:"?[A-Za-z_][\w]*"?)\.)?"?([A-Za-z_][\w]*)"?""", re.I)
 SQL_DROP = re.compile(r"""drop\s+table\s+(?:if\s+exists\s+)?(?:(?:"?[A-Za-z_][\w]*"?)\.)?"?([A-Za-z_][\w]*)"?""", re.I)
-# B36: ALTER TABLE x RENAME TO y – im Endzustand heißt die Tabelle y (wie DROP TABLE, in Dateireihenfolge)
+# ALTER TABLE x RENAME TO y: in the final state the table is named y (like DROP TABLE, in file order)
 SQL_RENAME = re.compile(r"""alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:(?:"?[A-Za-z_][\w]*"?)\.)?"?([A-Za-z_][\w]*)"?\s+rename\s+to\s+"?([A-Za-z_][\w]*)"?""", re.I)
 PRISMA_MODEL = re.compile(r"(?m)^\s*model\s+([A-Za-z_]\w*)\s*\{|@@map\(\s*['\"]([A-Za-z_]\w*)['\"]\s*\)")
 DRIZZLE_TABLE = re.compile(r"""\b(?:pgTable|mysqlTable|sqliteTable)\(\s*['"]([A-Za-z_]\w*)['"]""")
@@ -111,7 +111,7 @@ def _walk(repo: Path, names: set[str], max_depth: int = 3):
 
 
 def schema_block(name: str) -> str | None:
-    """Baustein zu einem Tabellen-/Collection-Namen – nur über ganze Wörter, nie über Teilzeichenketten (profiles ≠ files)."""
+    """Block for a table/collection name; only by whole words, never by substrings (profiles is not files)."""
     low = name.lower()
     if low in SCHEMA_NAMES:
         return SCHEMA_NAMES[low]
@@ -123,7 +123,7 @@ def schema_block(name: str) -> str | None:
 
 
 def _supabase_tables(text: str) -> list[str]:
-    """Schlüssel direkt unter `Tables: {` in generierten Supabase-Typen (Database.public.Tables) – nicht Views, nicht Functions, keine Spalten."""
+    """Keys directly under `Tables: {` in generated Supabase types (Database.public.Tables); not Views, not Functions, no columns."""
     out: list[str] = []
     for m in re.finditer(r"Tables:\s*\{", text):
         depth = 0
@@ -137,7 +137,7 @@ def _supabase_tables(text: str) -> list[str]:
 
 
 def detect_schema(repo: Path) -> list[tuple[str, str]]:
-    """(Baustein, Fundstelle) aus Tabellen- und Collection-Namen; je Baustein die erste Fundstelle."""
+    """(block, place) from table and collection names; the first place per block."""
     found: dict[str, str] = {}
 
     def add(name: str, kind: str, rel: Path) -> None:
@@ -174,7 +174,7 @@ def detect_schema(repo: Path) -> list[tuple[str, str]]:
 
 
 def detect_blocks(repo: Path) -> list[Detected]:
-    """Bausteine aus Abhängigkeiten, Konfiguration und eindeutigen Code-Hinweisen; je Baustein die erste Fundstelle."""
+    """Blocks from dependencies, configuration and unambiguous code hints; the first place per block."""
     found: dict[str, str] = {}
 
     def add(block: str, where: str) -> None:
@@ -218,7 +218,7 @@ def detect_blocks(repo: Path) -> list[Detected]:
                 add("platforms", f"extension {rel}")
         except Exception:
             pass
-    # Code-Hinweise: nur eindeutige Importe/Aufrufe, begrenzt auf Quellcode
+    # code hints: only unambiguous imports/calls, limited to source code
     for p in repo.rglob("*"):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in CODE_EXT or p.stat().st_size > 400_000:
@@ -230,7 +230,7 @@ def detect_blocks(repo: Path) -> list[Detected]:
         for rx, b, label in CODE:
             if b not in found and rx.search(text):
                 add(b, f"{label} in {rel}")
-    # Schema: Tabellen und Collections – Chats und Moderation stehen selten in einer Bibliothek
+    # schema: tables and collections; chats and moderation rarely live in a library
     for b, where in detect_schema(repo):
         add(b, where)
     return [Detected(b, w) for b, w in sorted(found.items())]

@@ -1,13 +1,13 @@
-"""everydeck-check change (B9): Änderungsverständnis kommt vom Coding-Agenten, CI prüft es mechanisch.
+"""everydeck-check change: the understanding of a change comes from the coding agent, CI checks it mechanically.
 
-Der Kunde pflegt je relevantem Commit eine `everydeck-change.json` (Schema `schemas/change.schema.json`). Geprüft wird:
-- Form (JSON Schema 2020-12, keine Zusatzfelder),
-- Referenzen: jede `capability_id` steht im Manifest, jeder Nachweis-`path` ist eine Datei im Repo, ein `symbol` kommt
-  als Text in dieser Datei vor (einfache Textsuche mit Wortgrenzen; bei `Class.method` reicht es, wenn jeder Teil vorkommt),
-- Bindung: `sha` ist `git rev-parse HEAD` des Repos (oder der explizit übergebene SHA), ein optionaler `manifest_digest`
-  ist der Digest des mitgegebenen Manifests.
-Was eine Diff-Prüfung nicht leisten kann – neue Funktionen von sich aus erkennen –, leistet sie auch hier nicht: die
-Beschreibung stammt vom Agenten, everydeck-check stellt nur sicher, dass sie zur Revision, zum Build und zum Code passt.
+The customer maintains an `everydeck-change.json` per relevant commit (schema `schemas/change.schema.json`). Checked are:
+- shape (JSON Schema 2020-12, no extra fields),
+- references: every `capability_id` is in the manifest, every evidence `path` is a file in the repo, a `symbol` appears
+  as text in that file (plain text search with word boundaries; for `Class.method` it is enough that each part appears),
+- binding: `sha` is `git rev-parse HEAD` of the repo (or the SHA passed explicitly), an optional `manifest_digest`
+  is the digest of the given manifest.
+What a diff check cannot do (detect new features on its own), it does not do here either: the
+description comes from the agent, everydeck-check only makes sure it matches the revision, the build and the code.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _schema() -> dict[str, Any]:
 
 
 def validate_change(change: Any) -> list[str]:
-    """Formprüfung gegen change.schema.json; Fehlerpfade wie bei `validate_manifest` (`$` für die Wurzel)."""
+    """Shape check against change.schema.json; error paths as in `validate_manifest` (`$` for the root)."""
     v = Draft202012Validator(_schema(), format_checker=FormatChecker())
     return [f"{'/'.join(str(p) for p in e.path) or '$'}: {e.message}" for e in v.iter_errors(change)]
 
@@ -55,7 +55,7 @@ def _sha_matches(claimed: str, reference: str) -> bool:
 
 @dataclass
 class ChangeReport:
-    sha: str | None                      # SHA, gegen den geprüft wurde (HEAD des Repos oder --sha)
+    sha: str | None                      # SHA checked against (HEAD of the repo or --sha)
     digest_of_manifest: str | None
     errors: list[str] = field(default_factory=list)
 
@@ -68,9 +68,9 @@ class ChangeReport:
 
 
 def check_change(change: Any, manifest: dict[str, Any], repo: Path, expected_sha: str | None = None) -> ChangeReport:
-    """Vollständige Prüfung einer Änderungsbeschreibung gegen Manifest und Repo.
+    """Full check of a change description against manifest and repo.
 
-    `expected_sha` (CLI `--sha`) ersetzt `git rev-parse HEAD`; ohne beides ist die Bindung nicht prüfbar und ein Fehler.
+    `expected_sha` (CLI `--sha`) replaces `git rev-parse HEAD`; without either, the binding cannot be checked and is an error.
     """
     repo = Path(repo).resolve()
     reference_sha = expected_sha.strip() if expected_sha else git_head(repo)
@@ -85,7 +85,7 @@ def check_change(change: Any, manifest: dict[str, Any], repo: Path, expected_sha
     schema_errs = validate_change(change)
     if schema_errs:
         rep.errors.extend(schema_errs)
-        return rep  # Struktur unklar – Referenzprüfungen wären Rauschen
+        return rep  # structure unclear; reference checks would be noise
 
     caps = {c["id"] for c in manifest.get("capabilities", []) if isinstance(c, dict) and "id" in c}
     seen: set[str] = set()
@@ -113,7 +113,7 @@ def check_change(change: Any, manifest: dict[str, Any], repo: Path, expected_sha
                 rep.errors.append(f"affected/{i}/evidence/{j}: symbol {sym} not found in {ev['path']}")
 
     if reference_sha is None:
-        rep.errors.append(f"sha: cannot determine HEAD of {repo} (not a git checkout?) – pass --sha explicitly")
+        rep.errors.append(f"sha: cannot determine HEAD of {repo} (not a git checkout?); pass --sha explicitly")
     elif not _sha_matches(change["sha"], reference_sha):
         origin = "--sha" if expected_sha else "git rev-parse HEAD"
         rep.errors.append(f"sha: {change['sha']} does not match {origin} {reference_sha}")
