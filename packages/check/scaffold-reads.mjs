@@ -1,4 +1,4 @@
-// Display places through the syntax tree instead of text patterns. Part of the Befund skeleton (befund-skeleton.mjs), facts only:
+// Display places through the syntax tree instead of text patterns. Part of the app map scaffold (scaffold.mjs), facts only:
 //   frontend reads a table directly:      supabase.from('x' as never).select(…), .table('x'), Firestore collection(db, 'x'), prisma.x.findMany(), db.select().from(x), SQL in strings
 //   through an SQL function:               .rpc('fn')            → the tables fn reads in the final state of the migrations (FROM/JOIN, not DELETE/INSERT/UPDATE)
 //   through an Edge Function:              functions.invoke('n') → the tables supabase/functions/n reads
@@ -9,7 +9,7 @@
 //                                          what counts is what the handler reads, also through called functions in other modules
 //   Writes (insert/update/delete/upsert, POST/PUT/PATCH/DELETE) are not display places; they and every other mention of a table name
 //   in a frontend string appear, for tables without a display place, as tables[].not_shown[] with a reason and place (cross-check in everydeck-check).
-// TypeScript compiler API for TS/JS/TSX/JSX (from the app's repo or next to this tool), `ast` for Python (befund-ast.py). If a tool is missing,
+// TypeScript compiler API for TS/JS/TSX/JSX (from the app's repo or next to this tool), `ast` for Python (scaffold-ast.py). If a tool is missing,
 // the skeleton stops with a message; nothing is dropped silently.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { dirname, join, resolve, relative } from 'node:path';
 // Import resolution and reachability from the app's entry point: the same rule as in everydeck-check (bundled)
 import { codeMention, moduleResolver, reachability } from './rules/everydeck-rules.mjs';   // rule bundle inside the package (build output)
 // follow the value to the display place (image, link, date, text field, text with line breaks)
-import { analyseDisplay } from './befund-display.mjs';
+import { analyseDisplay } from './scaffold-display.mjs';
 
 export const BACKEND_DIR = /(^|\/)(backend|server|api|functions|supabase|migrations|scripts|prisma|db|database|test|tests|__tests__|e2e|cypress)(\/|$)/;
 const TEST_FILE = /\.(test|spec|stories)\.[tj]sx?$|(^|\/)(__tests__|e2e|cypress|tests?)\//;
@@ -87,13 +87,13 @@ export function sqlKnowledge(sqlTexts) {
   return { views, fns };
 }
 
-/** Everything an analysis returns: { shown[], not_shown[], routes[] }; table names are already mapped to the Befund (tableKey). */
+/** Everything an analysis returns: { shown[], not_shown[], routes[] }; table names are already mapped to the app map (tableKey). */
 export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   const repo = resolve(repo0); const files = files0.map((f) => resolve(f));   // absolute paths: imports resolve to absolute paths
   const rel = (p) => relative(repo, p); const text = (p) => readFileSync(p, 'utf8');
   const srcOf = new Map(); const read = (p) => { if (!srcOf.has(p)) srcOf.set(p, text(p)); return srcOf.get(p); };
   const { views, fns } = sqlKnowledge([...files.filter((p) => p.endsWith('.sql')).sort().map(read), ...files.filter((p) => p.endsWith('.py') && /alembic|migrations|versions/.test(p)).sort().map(read)]);
-  // view → tables of the Befund (recursive through views), SQL function → tables (recursive through called functions)
+  // view → tables of the app map (recursive through views), SQL function → tables (recursive through called functions)
   const viewTables = (name, seen = new Set()) => { if (seen.has(name)) return []; seen.add(name); const k = tableKey(name); if (k) return [k]; const v = views.get(name); return v ? v.flatMap((t) => viewTables(t, seen)) : []; };
   const fnTables = (name, seen = new Set()) => { if (seen.has(name)) return []; seen.add(name); const f = fns.get(name); if (!f) return []; return [...f.reads.flatMap((t) => viewTables(t, new Set(seen))), ...f.calls.filter((c) => fns.has(c)).flatMap((c) => fnTables(c, seen))]; };
   const uniq = (xs) => [...new Set(xs)];
@@ -218,9 +218,9 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
           routes.push({ pattern: pattern(joinPath(usePrefix.get(p) ?? '', path)), method, file: r, line: lineOf(sf, n), access }); } }
       ts.forEachChild(n, visit); }; visit(sf); }
 
-  // ── Backend routes (Python): facts from befund-ast.py, prefixes through APIRouter(prefix) and include_router(prefix) along the imports ──
+  // ── Backend routes (Python): facts from scaffold-ast.py, prefixes through APIRouter(prefix) and include_router(prefix) along the imports ──
   let py = {};
-  if (pyFiles.length) { try { py = JSON.parse(execFileSync('python3', ['-I', new URL('./befund-ast.py', import.meta.url).pathname, repo, '-'], { input: pyFiles.join('\n'), encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })); } catch (e) { throw new Error(`python3 with the ast module is required for ${pyFiles.length} Python files: ${String(e.message ?? e).split('\n')[0]}`); } }
+  if (pyFiles.length) { try { py = JSON.parse(execFileSync('python3', ['-I', new URL('./scaffold-ast.py', import.meta.url).pathname, repo, '-'], { input: pyFiles.join('\n'), encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })); } catch (e) { throw new Error(`python3 with the ast module is required for ${pyFiles.length} Python files: ${String(e.message ?? e).split('\n')[0]}`); } }
   const pyRel = Object.keys(py); const pyFile = (r) => py[r];
   const pyModuleFile = (fromRel, mod) => {   // 'app.routers.persons' / '.services' → file (relative to an ancestor of the importing file)
     let base = fromRel.split('/').slice(0, -1); if (mod.startsWith('.')) { const up = mod.match(/^\.+/)[0].length - 1; base = base.slice(0, base.length - up); mod = mod.slice(up + 1); }
@@ -245,7 +245,7 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
     return out; };
   for (const r of pyRel) for (const rt of pyFile(r).routes ?? []) { const router = rt.receiver && pyFile(r).routers?.[rt.receiver]; const pre = joinPath(includePrefix.get(`${r}#${rt.receiver}`) ?? '', router?.prefix ?? ''); routes.push({ pattern: pattern(joinPath(pre, rt.path)), method: rt.method, file: r, line: rt.line, access: pyAccessOfFn(r, rt.handler) }); }
 
-  // ── Access → tables of the Befund (view, function, Edge Function, route) ──
+  // ── Access → tables of the app map (view, function, Edge Function, route) ──
   const edgeCache = new Map();
   const edgeTables = (name) => { if (edgeCache.has(name)) return edgeCache.get(name); edgeCache.set(name, []); const dir = files.find((p) => /\/functions\/[^/]+\/index\.[tj]s$/.test(p) && p.split('/').at(-2) === name); if (!dir) return [];
     const acc = accessOfFn(dir, parse(dir)); const t = uniq(acc.filter((a) => a.kind === 'read' && a.what !== 'route').flatMap((a) => tablesOf(a).map((x) => x.table))); edgeCache.set(name, t); return t; };
@@ -273,12 +273,49 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   // ── Reachability: a frontend file counts only if an entry point of the app reaches it through imports (index.html → <script src>,
   //    route files of a framework, package.json main …). Without an entry point the rule decides nothing. everydeck-check checks the same rule.
   const reach = reachability(ts, fsx, frontend); const reachable = reach.reachable;
+  // ── Pages: the file behind each route (React Router <Route path element={<C/>}>, a route object { path, element | Component | lazy }, also
+  //    lazy(() => import('…'))), and the static imports of every frontend file an entry reaches (for the description of each page)
+  const page_files = []; const import_graph = {};
+  const dynImport = (x) => { let out = null; const v = (y) => { if (!out && ts.isCallExpression(y) && y.expression.kind === ts.SyntaxKind.ImportKeyword && y.arguments[0] && ts.isStringLiteralLike(y.arguments[0])) out = y.arguments[0].text; ts.forEachChild(y, v); }; v(x); return out; };
+  for (const p of frontend) { if (!reachable.has(p)) continue; const sf = parse(p); const imps = importsOf(sf, p);
+    import_graph[rel(p)] = [...new Set([...imps.values()].map((x) => rel(x.file)))];
+    const lazyOf = new Map();
+    const visitL = (n) => { if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) { const c = unwrap(n.initializer); if (ts.isCallExpression(c) && /^(lazy|loadable|dynamic|lazyWithRetry|lazyRetry)$/.test(calleeName(c) ?? '') && c.arguments[0]) { const spec = dynImport(c.arguments[0]); const f = spec ? resolveModule(p, spec) : null; if (f) lazyOf.set(n.name.text, f); } } ts.forEachChild(n, visitL); }; visitL(sf);
+    // a component defined in the routes file itself (function PropertyRoute() { … return <PropertyPage /> }): the first imported page it renders
+    const localDecl = new Map();
+    for (const st of sf.statements) { if (ts.isFunctionDeclaration(st) && st.name) localDecl.set(st.name.text, st); if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name) && d.initializer && (ts.isArrowFunction(unwrap(d.initializer)) || ts.isFunctionExpression(unwrap(d.initializer)))) localDecl.set(d.name.text, d.initializer); }
+    const firstImported = (node) => { let out = null; const v = (x) => { if (out) return; if (ts.isJsxSelfClosingElement(x) || ts.isJsxOpeningElement(x)) { const tag = x.tagName.getText(sf); const f = /^[A-Z]/.test(tag) ? lazyOf.get(tag) ?? imps.get(tag)?.file : null; if (f) { out = f; return; } } ts.forEachChild(x, v); }; v(node); return out; };
+    const fileOf = (name) => (name ? lazyOf.get(name) ?? imps.get(name)?.file ?? (localDecl.has(name) ? firstImported(localDecl.get(name)) : null) : null);
+    const compOf = (x) => { x = x && unwrap(x); if (!x) return null; if (ts.isConditionalExpression(x)) return compOf(x.whenTrue); if (ts.isJsxSelfClosingElement(x)) return x.tagName.getText(sf); if (ts.isJsxElement(x)) return x.openingElement.tagName.getText(sf); if (ts.isIdentifier(x)) return x.text; return null; };
+    const visit = (n) => {
+      if ((ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) && n.tagName.getText(sf) === 'Route') {
+        let path = null, comp = null;
+        for (const a of n.attributes.properties) { if (!ts.isJsxAttribute(a) || !a.initializer) continue; const nm = a.name.getText(sf); const init = ts.isJsxExpression(a.initializer) ? a.initializer.expression : a.initializer;
+          if (nm === 'path' && init && ts.isStringLiteralLike(init)) path = init.text; if ((nm === 'element' || nm === 'component' || nm === 'Component') && init) comp = compOf(init); }
+        const f = fileOf(comp); if (path && f) page_files.push({ path: rel(p), line: lineOf(sf, n), pattern: path, file: rel(f) });
+      }
+      if (ts.isObjectLiteralExpression(n)) {
+        let path = null, comp = null, lazySpec = null;
+        for (const pr of n.properties) { if (!ts.isPropertyAssignment(pr) || !pr.name) continue; const nm = pr.name.getText(sf);
+          if (nm === 'path' && ts.isStringLiteralLike(pr.initializer)) path = pr.initializer.text; if (nm === 'element' || nm === 'component' || nm === 'Component') comp = compOf(pr.initializer); if (nm === 'lazy') lazySpec = dynImport(pr.initializer); }
+        const f = fileOf(comp) ?? (lazySpec ? resolveModule(p, lazySpec) : null); if (path && path.startsWith('/') && f) page_files.push({ path: rel(p), line: lineOf(sf, n), pattern: path, file: rel(f) });
+      }
+      ts.forEachChild(n, visit); };
+    visit(sf); }
   // ── Frontend: display places (reads) and mentions (for not_shown) ──
   const shown = []; const mentions = [];   // mentions: { table, path, line, reason }
   const colReads = [];   // { table, cols, path, line, via } per frontend read
   const props = new Map();   // property names the frontend accesses (x.name, x?.name, x['name'], { name } = x) → first place
   const nameRes = [...tables.keys()].map((t) => [t, new RegExp(`(^|[^A-Za-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_]|$)`)]);
+  // Writes of the browser (flow candidates): a write to a table (insert/update/upsert/delete, Firestore, ORM, SQL) or a request with POST/PUT/PATCH/DELETE to a
+  // route of the app's own backend (with the handler's place), in files an entry of the app reaches
+  const browser_writes = [];
+  const writeKind = (via) => { const m = /\.(insert|update|upsert|delete)\(|\bin (addDoc|setDoc|updateDoc|deleteDoc)\(|\.(create\w*|update\w*|delete\w*|upsert)\(…\)$|^sql (insert|update|delete)/.exec(via ?? ''); if (!m) return null;
+    if (m[1]) return m[1]; if (m[2]) return { addDoc: 'insert', setDoc: 'upsert', updateDoc: 'update', deleteDoc: 'delete' }[m[2]]; if (m[3]) return /^create/.test(m[3]) ? 'insert' : /^update/.test(m[3]) ? 'update' : /^delete/.test(m[3]) ? 'delete' : 'upsert'; return m[4]; };
   for (const p of frontend) { const sf = parse(p); const r = rel(p); const acc = []; collect(sf, sf, acc);
+    if (reachable.has(p)) for (const a of acc) { if (a.kind !== 'write') continue;
+      if (a.what === 'table_or_view') { const t = tableKey(a.name); const k = writeKind(a.via); if (t && k) browser_writes.push({ table: t, kind: k, path: r, line: a.line, symbol: a.name }); }
+      else if (a.what === 'route' && a.method && a.method !== 'GET') { const rt = matchRoute(a.name, a.base); if (rt) browser_writes.push({ kind: 'request', route: `${a.method} ${rt.pattern}`, handler: { path: rt.file, line: rt.line }, path: r, line: a.line, symbol: a.name }); } }
     const seenRead = new Set(); const unreachable = !reachable.has(p);
     if (!unreachable) for (const a of acc) {
       if (a.what === 'route' && a.loose && acc.some((b) => !b.loose && b.what === 'route' && b.line === a.line && b.name === a.name)) continue;
@@ -301,9 +338,9 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   }
   const shownTables = new Set(shown.map((s) => s.table));
   // ── Write places: where the app changes a column after creation (fact with a place). TS/JS: supabase .update/.upsert({…}) (also through a
-  //    variable holding an object), Firestore updateDoc(doc(db, 'x', id), {…}), Prisma x.update({ data: {…} }), SQL UPDATE x SET a = …; Python from befund-ast.py.
+  //    variable holding an object), Firestore updateDoc(doc(db, 'x', id), {…}), Prisma x.update({ data: {…} }), SQL UPDATE x SET a = …; Python from scaffold-ast.py.
   //    Also provider IDs (Python): columns whose value comes from a provider call or is passed to a provider.
-  const column_writes = []; const provider_columns = [];
+  const column_writes = []; const provider_columns = []; const column_inserts = [];
   const keysOf = (sf, obj) => (obj && ts.isObjectLiteralExpression(obj) ? obj.properties.filter((p) => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && p.name && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))).map((p) => ({ name: p.name.text, line: lineOf(sf, p.name) })) : []);
   const varObject = (sf, name) => { let found = null; const v = (n) => { if (!found && ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name && n.initializer && ts.isObjectLiteralExpression(unwrap(n.initializer))) found = unwrap(n.initializer); ts.forEachChild(n, v); }; v(sf); return found; };
   for (const p of [...new Set([...frontend, ...backendJs])]) { const sf = parse(p); const r = rel(p);
@@ -321,7 +358,7 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
       ts.forEachChild(n, visit); };
     visit(sf); }
   for (const r of pyRel) for (const fn of Object.values(pyFile(r).functions ?? {})) {
-    for (const w of fn.writes ?? []) { const t = tableKey(w.table); if (!t) continue; if (w.op !== 'insert') column_writes.push({ table: t, column: w.column, path: r, line: w.line, via: `table(…).${w.op}(…)`, ...(w.self ? { self: true } : {}) }); if (w.provider) provider_columns.push({ table: t, column: w.column, provider: w.provider, path: r, line: w.line, how: 'result' }); }
+    for (const w of fn.writes ?? []) { const t = tableKey(w.table); if (!t) continue; if (w.op === 'insert') column_inserts.push({ table: t, column: w.column, path: r, line: w.line }); if (w.op !== 'insert') column_writes.push({ table: t, column: w.column, path: r, line: w.line, via: `table(…).${w.op}(…)`, ...(w.self ? { self: true } : {}) }); if (w.provider) provider_columns.push({ table: t, column: w.column, provider: w.provider, path: r, line: w.line, how: 'result' }); }
     const readT = uniq((fn.tables ?? []).map((x) => tableKey(x.name)).filter(Boolean));
     for (const ps of fn.passes ?? []) provider_columns.push({ tables: readT, column: ps.column, provider: ps.provider, path: r, line: ps.line, how: 'passed' });
   }
@@ -392,6 +429,6 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   const readsAt = (file, line) => readsByLine.get(`${rel(file)}:${line}`) ?? null;
   const readColumns = new Map(); for (const cr of colReads) if (!readColumns.has(cr.table)) readColumns.set(cr.table, new Set((tables.get(cr.table)?.columns ?? []).map((c) => c.name)));
   const shownAs = ts && frontend.length ? analyseDisplay({ ts, files: frontend, reachable, parse, rel, lineOf, unwrap, strOf, resolveModule, tableColumns: readColumns, tableKey, readsAt, allFiles: files, read, valuesOf: (t, c) => { const tb = tables.get(t); const col = tb?.columns.find((x) => x.name === c); return [...new Set([...(col?.enum ?? []).map((e) => e.value), ...(tb?.status_column === c ? (tb.statuses ?? []).map((x) => x.value) : [])])]; } }) : { places: [], ends: [], labels: [] };
-  for (const r of pyRel) for (const m of pyFile(r).money ?? []) money.push({ ...m, path: r, via: m.via.replace(/at line (\d+)/, `at ${r}:$1`).slice(0, 160) });   // Python: befund-ast.py money_places
-  return { display: shownAs.places, display_ends: shownAs.ends, value_labels: shownAs.labels ?? [], name_chains: shownAs.nameChains ?? [], reach: { decided: reach.decided, entries: reach.entries.map((e) => ({ path: rel(e.path), fact: e.fact })), unreachable: reach.unreachable }, shown, not_shown, columns_shown, money, column_writes, provider_columns, routes: routes.map((r) => ({ pattern: r.pattern, method: r.method, file: r.file, line: r.line, reads: uniq(r.access.filter((a) => a.kind === 'read' && a.what !== 'route').flatMap((a) => tablesOf(a).map((x) => x.table))) })), views: [...views.keys()], sql_functions: [...fns.keys()], unreachable: reach.unreachable.map((u) => u.path) };
+  for (const r of pyRel) for (const m of pyFile(r).money ?? []) money.push({ ...m, path: r, via: m.via.replace(/at line (\d+)/, `at ${r}:$1`).slice(0, 160) });   // Python: scaffold-ast.py money_places
+  return { browser_writes, page_files, import_graph, column_inserts, display: shownAs.places, display_ends: shownAs.ends, value_labels: shownAs.labels ?? [], name_chains: shownAs.nameChains ?? [], reach: { decided: reach.decided, entries: reach.entries.map((e) => ({ path: rel(e.path), fact: e.fact })), unreachable: reach.unreachable }, shown, not_shown, columns_shown, money, column_writes, provider_columns, routes: routes.map((r) => ({ pattern: r.pattern, method: r.method, file: r.file, line: r.line, reads: uniq(r.access.filter((a) => a.kind === 'read' && a.what !== 'route').flatMap((a) => tablesOf(a).map((x) => x.table))) })), views: [...views.keys()], sql_functions: [...fns.keys()], unreachable: reach.unreachable.map((u) => u.path) };
 }

@@ -27,9 +27,9 @@ def run_rule(rule: str, payload: dict[str, Any], timeout: float = 120) -> dict[s
     return json.loads(p.stdout)
 
 
-def befund_rule_errors(doc: dict[str, Any]) -> list[str]:
-    """The check everydeck runs when a Befund is submitted (checkBefund): shape, references, result signal, derivation, derived manifest."""
+def app_map_rule_errors(doc: dict[str, Any]) -> list[str]:
+    """The check everydeck runs when an app map is submitted: shape, references, result signal, derivation, derived manifest."""
     try:
-        return list(run_rule("befund", {"input": doc}).get("errors", []))
+        return list(run_rule("app_map", {"input": doc}).get("errors", []))
     except RulesUnavailable as e:
         return [f"everydeck rules: {e}"]

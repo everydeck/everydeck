@@ -3,8 +3,8 @@
  *   1. `<link rel="apple-touch-icon" | "icon" | "shortcut icon" href>` in the HTML entry files (Vite `index.html`, `public/index.html` ...),
  *   2. icons in the web manifest (`icons[].src`, largest first),
  *   3. Next.js: `app/icon.*`, `app/apple-icon.*` (also under `src/app/`); Expo: `expo.icon` in `app.json`.
- * The file goes into the Befund (`app.icon`) with its place, media type, SHA-256 and content (Base64, at most 96 KiB); everydeck stores a copy
- * for the "Your apps" card and does not pass the content on into the stored Befund. No file: no icon (the card shows the first letter).
+ * The file goes into the app map (`app.icon`) with its place, media type, SHA-256 and content (Base64, at most 96 KiB); everydeck stores a copy
+ * for the "Your apps" card and does not pass the content on into the stored app map. No file: no icon (the card shows the first letter).
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';

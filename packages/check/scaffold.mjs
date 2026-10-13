@@ -1,22 +1,23 @@
 #!/usr/bin/env node
-// Befund skeleton from the repo: a tool for the coding agent that reads only facts with their place in the code (file:line) and judges nothing.
-//   everydeck-scaffold <repo> [--db <database url, a read-only role is enough>] [--out everydeck/everydeck-befund.json] [--merge <existing Befund>]   (without --out: output to stdout, nothing is written into the repo)
-// With --db (or EVERYDECK_SCHEMA_DB_URL) the skeleton reads the schema from the database first (befund-db.mjs); the migrations are the places.
+// app map scaffold from the repo: a tool for the coding agent that reads only facts with their place in the code (file:line) and judges nothing.
+//   everydeck-scaffold <repo> [--db <database url, a read-only role is enough>] [--out everydeck/app-map.json] [--merge <existing app map>]   (without --out: output to stdout, nothing is written into the repo)
+// With --db (or EVERYDECK_SCHEMA_DB_URL) the skeleton reads the schema from the database first (scaffold-db.mjs); the migrations are the places.
 // Reads: tables and columns from SQL migrations (CREATE TABLE … (…), ALTER TABLE … ADD COLUMN, CHECK (col IN (…)), REFERENCES, DEFAULT; final state: DROP TABLE and DROP COLUMN remove, RENAME COLUMN renames, CREATE TABLE … AS SELECT * FROM takes over the columns; schemas other than public; auth.users as foreign key, also from policies auth.uid() = column),
 //        Alembic (op.create_table) and Firestore rules (match /name/{id}); packages from package.json/requirements*.txt (only provider packages
 //        that everydeck-check knows); API routes (Express/Fastify/Hono calls, FastAPI decorators, Next.js app/api/**/route.ts); pages
 //        (Next.js app/**/page.tsx, Expo Router app/**.tsx, React Router <Route path>); platforms (capacitor.config.*, app.json, ios/, android/).
-//        Display places from every data access of the frontend through the syntax tree (befund-reads.mjs: TypeScript compiler API, Python ast), also .rpc, functions.invoke,
+//        Display places from every data access of the frontend through the syntax tree (scaffold-reads.mjs: TypeScript compiler API, Python ast), also .rpc, functions.invoke,
 //        Realtime, views, API calls with template strings against the backend routes; writes and mentions as not_shown[] with a reason.
 // What the tool cannot read (visible elements, write places, functions with rights, flows, identity, channels), the agent adds
-// with places; `--merge` keeps these parts from an existing Befund and renews only the skeleton parts.
+// with places; `--merge` keeps these parts from an existing app map and renews only the skeleton parts.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { analyseReads } from './befund-reads.mjs';
-import { findIcon } from './befund-icon.mjs';
+import { analyseReads } from './scaffold-reads.mjs';
+import { findIcon } from './scaffold-icon.mjs';
+import { profileTables, shownNameColumn } from './rules/everydeck-rules.mjs';
 
-const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: befund-skeleton.mjs <repo> [--db <url>] [--out file] [--merge file]'); process.exit(2); }
+const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: scaffold.mjs <repo> [--db <url>] [--out file] [--merge file]'); process.exit(2); }
 const opt = (k) => (args.includes(k) ? args[args.indexOf(k) + 1] : null);
 const SKIP = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', '.next', '.expo', 'coverage', '__pycache__', '.venv', 'venv', 'Pods', '.everydeck', 'everydeck', 'everydeck-outbox', 'supabase_types']);
 const files = [];
@@ -61,7 +62,7 @@ function enumValues(list, file, baseLine) {   // each value with the line it is 
 }
 function applyEnum(t, colName, list, file, line) { const c = t.columns.find((x) => x.name === colName); if (c) c.enum = enumValues(list, file, line); }
 const stripSql = (src) => src.replace(/--[^\n]*/g, (m) => ' '.repeat(m.length));   // strip comments, line numbers stay
-// Migrations in file order: only the final state of the schema counts; a table dropped later (DROP TABLE) is not in the Befund
+// Migrations in file order: only the final state of the schema counts; a table dropped later (DROP TABLE) is not in the app map
 for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
   const src = stripSql(text(f));
   for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\s+select\s+\*\s+from\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) {   // CREATE TABLE … AS SELECT * FROM y: the same columns as y
@@ -178,7 +179,7 @@ for (const f of files.filter((p) => p.endsWith('.rules'))) { const src = text(f)
 const dbUrl = opt('--db') ?? process.env.EVERYDECK_SCHEMA_DB_URL ?? null;
 let catalog = null;
 if (dbUrl) {
-  const { readCatalog, checkValues } = await import('./befund-db.mjs');
+  const { readCatalog, checkValues } = await import('./scaffold-db.mjs');
   catalog = await readCatalog(dbUrl, repo, files);
   const dbEv = (symbol) => ({ path: 'database', line: 1, symbol: symbol.slice(0, 160) });
   const key = (schema, name) => `${schema}.${name}`;
@@ -232,7 +233,7 @@ const fnDefs = new Map(); const trigDefs = new Map();   // also used for the cop
       ops.push({ at: m.index, run: () => fnDefs.set(m[1].toLowerCase(), { name: m[1], args, trigger: /returns\s+trigger/i.test(rest.slice(0, tag.index)), body: src.slice(bodyStart, bodyEnd), bodyAt: bodyStart, src, file: rel(f) }) });
     }
     for (const m of src.matchAll(/drop\s+function\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => fnDefs.delete(m[1].toLowerCase()) });
-    for (const m of src.matchAll(/create\s+(?:or\s+replace\s+)?trigger\s+"?(\w+)"?\s+(before|after|instead\s+of)\s+[\s\S]*?\bon\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?[\s\S]*?execute\s+(?:function|procedure)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => trigDefs.set(`${m[3]}:${m[1]}`.toLowerCase(), { table: m[3], when: m[2].toLowerCase(), fn: m[4].toLowerCase() }) });
+    for (const m of src.matchAll(/create\s+(?:or\s+replace\s+)?trigger\s+"?(\w+)"?\s+(before|after|instead\s+of)\s+([\s\S]*?)\bon\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?[\s\S]*?execute\s+(?:function|procedure)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => trigDefs.set(`${m[4]}:${m[1]}`.toLowerCase(), { table: m[4], when: m[2].toLowerCase(), fn: m[5].toLowerCase(), name: m[1], event: (/insert|update|delete/i.exec(m[3])?.[0] ?? 'update').toLowerCase(), place: { path: rel(f), line: lineOf(src, m.index) } }) });
     for (const m of src.matchAll(/drop\s+trigger\s+(?:if\s+exists\s+)?"?(\w+)"?\s+on\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => trigDefs.delete(`${m[2]}:${m[1]}`.toLowerCase()) });
     for (const m of src.matchAll(/drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => { for (const k of [...trigDefs.keys()]) if (k.startsWith(`${m[1].toLowerCase()}:`)) trigDefs.delete(k); } });
     for (const op of ops.sort((a, b) => a.at - b.at)) op.run();
@@ -240,7 +241,7 @@ const fnDefs = new Map(); const trigDefs = new Map();   // also used for the cop
   // Functions and triggers that exist only in the database (not in the migrations): place "database"
   if (catalog) {
     for (const f of catalog.functions) if (!fnDefs.has(f.name.toLowerCase())) fnDefs.set(f.name.toLowerCase(), { name: f.name, args: f.args ?? '', trigger: !!f.returns_trigger, body: f.src ?? '', bodyAt: 0, src: f.src ?? '', file: 'database' });
-    for (const dt of catalog.tables) for (const g of dt.triggers) { const k = `${dt.name}:${g.name}`.toLowerCase(); if (!trigDefs.has(k)) trigDefs.set(k, { table: dt.name, when: g.before ? 'before' : 'after', fn: g.function.toLowerCase() }); }
+    for (const dt of catalog.tables) for (const g of dt.triggers) { const k = `${dt.name}:${g.name}`.toLowerCase(); if (!trigDefs.has(k)) trigDefs.set(k, { table: dt.name, when: g.before ? 'before' : 'after', fn: g.function.toLowerCase(), name: g.name, event: g.insert ? 'insert' : g.update ? 'update' : 'delete', place: { path: 'database', line: 1 } }); }
   }
   const refers = (expr, name) => new RegExp(`(^|[^A-Za-z0-9_.])"?${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"?([^A-Za-z0-9_]|$)`, 'i').test(expr);
   for (const fd of fnDefs.values()) {
@@ -295,10 +296,10 @@ for (const f of files.filter((p) => /\.(ts|tsx|js|mjs|cjs|py)$/.test(p) && !TEST
   for (const m of src.matchAll(re)) { if (m[2].includes('${')) continue; /* template strings are client calls, not routes */ const pat = pattern(m[2]); if (!api_routes.some((x) => x.pattern === pat && x.method === m[1].toUpperCase())) api_routes.push({ pattern: pat, method: m[1].toUpperCase(), evidence: { path: r, line: lineOf(src, m.index) } }); }
   const parts = r.split('/');
   if (parts.includes('api') && /^route\.(ts|js)$/.test(parts.at(-1))) { const i = parts.indexOf('api'); const pat = pattern('/' + parts.slice(i, -1).join('/')); if (!api_routes.some((x) => x.pattern === pat)) api_routes.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
-  if (/^app\//.test(r) && /\/page\.(tsx|jsx|ts|js)$/.test(r) && !parts.includes('api')) { const pat = pattern('/' + parts.slice(1, -1).join('/')); if (!screens.some((x) => x.pattern === pat)) screens.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
-  if (/^app\//.test(r) && /\.(tsx|jsx)$/.test(r) && !/\/page\.|_layout|\+not-found|\+html/.test(r) && !parts.includes('api') && !/\.test\./.test(r) && existsSync(join(repo, 'app.json'))) { const pat = pattern('/' + r.replace(/^app\//, '').replace(/\.(tsx|jsx)$/, '').replace(/\/index$/, '')); if (!screens.some((x) => x.pattern === pat)) screens.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
-  for (const m of src.matchAll(/<Route\s+[^>]*path=["'](\/[^"']*)["']/g)) { const pat = pattern(m[1]); if (!screens.some((x) => x.pattern === pat)) screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
-  for (const m of src.matchAll(/\{\s*path:\s*['"](\/[^'"]*)['"]/g)) { const pat = pattern(m[1]); if (!screens.some((x) => x.pattern === pat)) screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
+  if (/^app\//.test(r) && /\/page\.(tsx|jsx|ts|js)$/.test(r) && !parts.includes('api')) { const pat = pattern('/' + parts.slice(1, -1).join('/')); screens.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
+  if (/^app\//.test(r) && /\.(tsx|jsx)$/.test(r) && !/\/page\.|_layout|\+not-found|\+html/.test(r) && !parts.includes('api') && !/\.test\./.test(r) && existsSync(join(repo, 'app.json'))) { const pat = pattern('/' + r.replace(/^app\//, '').replace(/\.(tsx|jsx)$/, '').replace(/\/index$/, '')); screens.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
+  for (const m of src.matchAll(/<Route\s+[^>]*path=["'](\/[^"']*)["']/g)) { const pat = pattern(m[1]); screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
+  for (const m of src.matchAll(/\{\s*path:\s*['"](\/[^'"]*)['"]/g)) { const pat = pattern(m[1]); screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
 }
 // ── Platforms ──
 const platforms = [];
@@ -308,8 +309,11 @@ if (!platforms.length && files.some((p) => /package\.json$/.test(p))) platforms.
 if (components.some((c) => /^(pg|postgres|asyncpg|sqlalchemy|psycopg|@prisma\/client|drizzle-orm)/.test(c.package))) platforms.push({ id: 'server', runtime: files.some((p) => p.endsWith('.py')) ? 'python' : 'node', evidence: components.find((c) => /^(pg|postgres|asyncpg|sqlalchemy|psycopg|@prisma\/client|drizzle-orm)/.test(c.package)).evidence });
 
 const BLOCKS = ['login', 'people_roles', 'organizations', 'content_status', 'moderation', 'chats', 'uploads', 'search', 'payments', 'email', 'push', 'ai', 'jobs', 'imports', 'bookings', 'settings', 'platforms'];
-const merge = opt('--merge') && existsSync(opt('--merge')) ? JSON.parse(readFileSync(opt('--merge'), 'utf8')) : null;
-// ── Display places: every data access in the frontend, through the syntax tree (befund-reads.mjs) ──
+// The app map was called everydeck/everydeck-befund.json before: an existing setup with only the old file is still merged; the result goes only to --out
+const OLD_NAME = 'everydeck-befund.json';
+const mergeFile = (() => { const m = opt('--merge'); if (!m) return null; if (existsSync(m)) return m; const old = join(m, '..', OLD_NAME); return /(^|[\\/])app-map\.json$/.test(m) && existsSync(old) ? old : null; })();
+const merge = mergeFile ? JSON.parse(readFileSync(mergeFile, 'utf8')) : null;
+// ── Display places: every data access in the frontend, through the syntax tree (scaffold-reads.mjs) ──
 // Direct (supabase.from('x' as never), Firestore, ORM, SQL), through .rpc('fn') → tables of the SQL function, functions.invoke('n') → tables of the Edge
 // Function, Realtime postgres_changes, views → base tables, API calls (`${API_BASE}/persons/${id}` → /persons/:p) → tables that the route
 // handler reads (FastAPI: path parameters, APIRouter(prefix), include_router; Express: app.use). Each place: shown[] { path, line, element: "data", via, symbol }.
@@ -325,9 +329,12 @@ for (const r of reads.routes) { const entry = { pattern: r.pattern, method: r.me
   const i = api_routes.findIndex((x) => x.evidence.path === r.file && x.evidence.line === r.line && (!x.method || x.method === r.method));   // same place (the decorator): full pattern instead of the path
   if (i >= 0) api_routes[i] = entry; else if (!api_routes.some((x) => x.pattern === r.pattern && x.method === r.method)) api_routes.push(entry); }
 for (let i = api_routes.length - 1; i >= 0; i--) if (api_routes.findIndex((x) => x.pattern === api_routes[i].pattern && x.method === api_routes[i].method) !== i) api_routes.splice(i, 1);   // one pattern per method
-// Pages only from files the app's entry point reaches; the rest are listed as unreachable[] in the Befund (everydeck-check checks the same rule)
+// Pages only from files the app's entry point reaches; the rest are listed as unreachable[] in the app map (everydeck-check checks the same rule)
 const unreachablePaths = new Set(reads.reach.unreachable.map((u) => u.path));
 for (let i = screens.length - 1; i >= 0; i--) if (unreachablePaths.has(screens[i].evidence.path)) screens.splice(i, 1);
+{ // one place per page: a route with a page file behind it (React Router, route object) before any other mention (a sitemap script), else the first one
+  const routed = new Set((reads.page_files ?? []).map((x) => `${x.path}:${x.line}`)); const isRouted = (x) => routed.has(`${x.evidence.path}:${x.evidence.line}`);
+  for (let i = screens.length - 1; i >= 0; i--) { const first = screens.findIndex((x) => x.pattern === screens[i].pattern && (isRouted(x) || !screens.some((y) => y.pattern === x.pattern && isRouted(y)))); if (first !== i) screens.splice(i, 1); } }
 for (const s of reads.shown) addShown(s.table, s);
 // Display places per column (element data, place = where the column is named or read); the read scope contains only columns with a display place
 // Write places (columns[].written) and IDs of other systems (columns[].external_id: the value comes from a call to a provider package or is passed to it)
@@ -342,7 +349,7 @@ for (const pc of reads.provider_columns) {
   for (const tn of cands) { const c = tables.get(tn)?.columns.find((x) => x.name === pc.column); if (c && !c.pk && !c.fk && !c.external_id) c.external_id = { component: comp.id, evidence: { path: pc.path, line: pc.line } }; }
 }
 for (const cs of reads.columns_shown) { const c = tables.get(cs.table)?.columns.find((x) => x.name === cs.column); if (!c) continue; c.shown ??= []; if (c.shown.length < 3 && !c.shown.some((x) => x.path === cs.path && x.line === cs.line)) c.shown.push({ path: cs.path, line: cs.line, element: 'data', symbol: cs.column, via: cs.via }); }
-// Money: where the app formats a value as a currency (befund-reads.mjs: Intl.NumberFormat/toLocaleString with style currency, own functions
+// Money: where the app formats a value as a currency (scaffold-reads.mjs: Intl.NumberFormat/toLocaleString with style currency, own functions
 // only with such a call in the body). The property belongs to the column of the same name if the column is a number and the frontend reads its table;
 // the currency is in the call (currency) or in a column of the same table (currency_column); otherwise no currency, nothing guessed.
 const readTables = new Set(reads.columns_shown.map((x) => x.table));
@@ -350,7 +357,7 @@ for (const m of reads.money) for (const [tn, t] of tables) { if (!readTables.has
   c.shown ??= []; if (c.shown.filter((x) => x.element === 'money').length >= 2 || c.shown.some((x) => x.element === 'money' && x.path === m.path && x.line === m.line)) continue;
   const curCol = m.currency_prop && t.columns.some((x) => x.name === m.currency_prop) ? m.currency_prop : null;
   c.shown.push({ path: m.path, line: m.line, element: 'money', ...(m.currency ? { currency: m.currency } : curCol ? { currency_column: curCol } : {}), symbol: m.prop, via: m.via }); }
-// Display kind from the place where the app shows the value (befund-display.mjs: <img src>, background image, <a href>, <textarea>, text with
+// Display kind from the place where the app shows the value (scaffold-display.mjs: <img src>, background image, <a href>, <textarea>, text with
 // line breaks or Markdown, date formatters), through maps, variables and props back to the property; the property belongs to the column of the same
 // name in a table the frontend reads, with a type that can hold the value. What cannot be traced is listed in display_ends[].
 const holds = { image: /char|text|json|\[\]/i, link: /char|text/i, textarea: /char|text/i, long_text: /char|text/i, date: /date|time|char|text/i };
@@ -376,7 +383,7 @@ const nameRuleOf = (identity) => { const nameCol = identity?.fields?.display_nam
   return steps.length ? { steps, evidence: [...chains].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line).slice(0, 5).map((c) => ({ path: c.path, line: c.line, symbol: c.symbol })) } : null; };
 for (const m of reads.not_shown) { const t = tables.get(m.table); if (!t) continue; t.not_shown ??= []; if (t.not_shown.length < 100 && !t.not_shown.some((x) => x.path === m.path && x.line === m.line)) t.not_shown.push({ path: m.path, line: m.line, fact: m.fact }); }
 
-// Tables of the existing Befund that the skeleton does not know (added by the agent) stay, unless the database says they do not exist
+// Tables of the existing app map that the skeleton does not know (added by the agent) stay, unless the database says they do not exist
 const keptOld = (merge?.tables ?? []).filter((x) => !tables.has(x.name) && (!catalog || catalog.tables.some((d) => d.name === x.name)));
 const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.tables?.find((x) => x.name === t.name); if (!old) return t; const keep = (old.shown ?? []).filter((x) => x.element !== 'data'); const { not_shown: _dropped, shown: _old, ...rest } = old; return { ...rest, defined: t.defined, ...(keep.length || t.shown ? { shown: [...keep, ...(t.shown ?? [])].slice(0, 60) } : {}), ...(t.not_shown ? { not_shown: t.not_shown } : {}), columns: [...t.columns.map((c) => { const oc = old.columns.find((x) => x.name === c.name); if (!oc) return c; const keepShown = (oc.shown ?? []).filter((x) => x.element !== 'data' && !(c.shown ?? []).some((y) => y.element === x.element && y.path === x.path && y.line === x.line));   /* what the skeleton finds again itself (money), not twice */ const shownAll = [...keepShown, ...(c.shown ?? [])].slice(0, 12); return { ...c, ...(oc.external_id && !c.external_id ? { external_id: oc.external_id } : {}), ...(oc.contact && !c.contact ? { contact: oc.contact } : {}), ...(shownAll.length ? { shown: shownAll } : {}) };   /* the agent's contact fact stays */ }), ...old.columns.filter((x) => !t.columns.some((c) => c.name === x.name) && !(catalog && t.kind === 'table'))] }; }), ...keptOld];   // the agent's column display places (heading, money …) stay, the skeleton renews data places; with --db only the database columns count   // skeleton parts (data display places, not_shown) are renewed; agent entries and columns added by the agent (e.g. Firestore) stay
 // ── Copies of contact data and messages. If an SQL function of the app writes a value marked as contact (also shortened
@@ -430,18 +437,173 @@ const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.ta
     }
   }
 }
+// ── Name source of people and organizations: the table whose key references the provider's user (profiles.id → auth.users), the name column the app shows
+//    from it (with its place), the login provider from the packages, and memberships: a table with a reference to the person and one to a table whose name the
+//    app shows. Facts only, the same rule the setup requires (rules bundle). What the agent described stays; a missing name or membership list is added.
+const AUTH_PACKAGES = [[/^@supabase\/(supabase-js|ssr|auth-helpers-[a-z]+)$|^supabase$/i, 'supabase_auth'], [/^firebase(-admin)?$/i, 'firebase_auth'], [/^next-auth$|^@auth\//i, 'authjs'], [/^@clerk\//i, 'clerk']];
+const identityProposal = (() => {
+  const profiles = profileTables({ tables: mergedTables }); const profile = profiles.find((t) => shownNameColumn(t)) ?? (profiles.length === 1 ? profiles[0] : null);
+  if (!profile) return null;
+  const auth = components.map((c) => ({ c, p: AUTH_PACKAGES.find(([re]) => re.test(c.package))?.[1] })).find((x) => x.p);
+  const name = shownNameColumn(profile);
+  const isPerson = (c) => !!c.fk && (/^auth\.users$/i.test(c.fk.table) || c.fk.table === profile.name);
+  const memberships = mergedTables.filter((t) => t.name !== profile.name).flatMap((t) => { const person = t.columns.find(isPerson); const org = t.columns.find((c) => c.fk && !isPerson(c) && c !== person);
+    const orgT = org ? mergedTables.find((x) => x.name === org.fk.table) : null; return person && orgT && shownNameColumn(orgT) && t.columns.filter((c) => c.fk).length === 2 ? [{ table: t.name, person_column: person.name, org_table: orgT.name, evidence: { path: t.defined.path, line: t.defined.line } }] : []; });
+  return { provider: auth?.p ?? 'supabase_auth', evidence: auth ? { path: auth.c.evidence.path, line: auth.c.evidence.line } : { path: profile.defined.path, line: profile.defined.line }, table: profile.name, auth_table: 'auth.users',
+    ...(name ? { fields: { display_name: name } } : {}), ...(memberships.length ? { memberships: memberships.slice(0, 5) } : {}) };
+})();
+const identityOut = (() => {
+  const id = merge && 'identity' in merge ? merge.identity : identityProposal;   // the agent's null (no login) stays null
+  if (!id) return null;
+  const p = identityProposal && (!id.table || id.table === identityProposal.table) ? identityProposal : null;
+  const fields = id.fields?.display_name || !p?.fields?.display_name ? id.fields : { ...(id.fields ?? {}), display_name: p.fields.display_name };
+  return { ...id, ...(fields ? { fields } : {}), ...(!id.memberships && p?.memberships ? { memberships: p.memberships } : {}) };
+})();
+// ── Flow candidates: every write of the browser (to a table or a route of the app's backend), every AFTER trigger of the app (not everydeck's own; BEFORE
+//    triggers only keep columns) and every place where the app signs people up or in or resets a password (required: these are always flows). The agent
+//    describes each one as a flow or sets left_out with the reason; everydeck-check and everydeck refuse one without either. --merge keeps the reasons.
+const AUTH_CALLS = [
+  ['sign_up', /\.auth\.(signUp)\s*\(|\b(createUserWithEmailAndPassword)\s*\(|\b(useSignUp)\s*\(|<(SignUp)\b|\.auth\.(sign_up)\s*\(/],
+  ['sign_in', /\.auth\.(signIn(?:WithPassword|WithOtp|WithOAuth|WithIdToken|WithSSO)?|verifyOtp)\s*\(|\b(signInWith(?:EmailAndPassword|Popup|Redirect|EmailLink|PhoneNumber|Credential))\s*\(|\b(useSignIn)\s*\(|<(SignIn)\b|\.auth\.(sign_in_with_(?:password|otp|oauth|id_token)|verify_otp)\s*\(|\b(signIn)\s*\(\s*['"]/],
+  ['password_reset', /\.auth\.(resetPasswordForEmail)\s*\(|\b(sendPasswordResetEmail)\s*\(|\.auth\.(reset_password_(?:email|for_email))\s*\(/],
+];
+const byPlace = (a, b) => a.path.localeCompare(b.path) || a.line - b.line;
+const candidates = [];
+const addCand = (c) => { if (!candidates.some((x) => x.id === c.id)) candidates.push(c); };
+const unreachableSet = new Set(reads.reach.unreachable.map((u) => u.path));
+const codeFiles = files.filter((p) => /\.(ts|tsx|js|jsx|mjs|cjs|py|vue|svelte)$/.test(p) && !/\.d\.ts$/.test(p) && !TEST_PATH.test(rel(p)) && !unreachableSet.has(rel(p))).sort();
+// ── Money and AI, facts with their places (no connection to any provider). The payment provider (its package or its address in the code) with the
+//    places where the app talks to it: checkout, webhook, subscription, customer, portal. Tables with money: a column the app shows as money (with the
+//    currency column), a column with an identifier of the provider, or a table the payment code writes (in a file with a call to the provider, or within
+//    60 lines after the webhook). AI: the clients and calls of openai, anthropic, google genai, openrouter, mistral, groq and the ai-sdk, with the model
+//    where the code names it. No table becomes money by its name.
+const PAY = [
+  { provider: 'stripe', pkg: /^(stripe|@stripe\/[\w.-]+)$/i, host: /api\.stripe\.com/, calls: [
+    ['checkout', /\b(stripe\.checkout\.(?:sessions|Session)\.create|stripe\.paymentIntents\.create|stripe\.PaymentIntent\.create|redirectToCheckout)\s*\(/],
+    ['webhook', /\b(stripe\.webhooks\.constructEvent(?:Async)?|stripe\.Webhook\.construct_event)\s*\(/],
+    ['subscription', /\b(stripe\.(?:subscriptions|Subscription)\.(?:create|modify|update|cancel|del|retrieve))\s*\(/],
+    ['customer', /\b(stripe\.(?:customers|Customer)\.(?:create|modify|update|retrieve))\s*\(/],
+    ['portal', /\b(stripe\.billing_?[pP]ortal\.(?:sessions|Session)\.create)\s*\(/]] },
+  { provider: 'paddle', pkg: /^@paddle\//i, host: /(?:sandbox-)?api\.paddle\.com/, calls: [['checkout', /\b(Paddle\.Checkout\.open)\s*\(/], ['webhook', /\b(\w+\.webhooks\.unmarshal)\s*\(/]] },
+  { provider: 'lemonsqueezy', pkg: /^@lemonsqueezy\//i, host: /api\.lemonsqueezy\.com/, calls: [['checkout', /\b(createCheckout)\s*\(/]] },
+  { provider: 'revenuecat', pkg: /^(react-native-purchases|@revenuecat\/[\w.-]+)$/i, host: /api\.revenuecat\.com/, calls: [['checkout', /\b(Purchases\.purchase(?:Package|Product|StoreProduct))\s*\(/]] },
+  { provider: 'midtrans', pkg: /^(midtrans-client|midtransclient)$/i, host: /(?:app|api)(?:\.sandbox)?\.midtrans\.com/, calls: [['checkout', /\b(\w+\.createTransaction(?:Token)?|\w+\.create_transaction(?:_token)?)\s*\(/], ['webhook', /\b(\w+\.transaction\.notification)\s*\(/]] },
+  { provider: 'xendit', pkg: /^(xendit-node|xendit|xendit-python)$/i, host: /api\.xendit\.co/, calls: [['checkout', /\b(\w+\.createInvoice|\w+\.create_invoice)\s*\(/]] },
+  { provider: 'paypal', pkg: /^@paypal\//i, host: /api-m\.(?:sandbox\.)?paypal\.com/, calls: [['checkout', /\b(paypal\.Buttons)\s*\(/]] },
+  { provider: 'mollie', pkg: /^(@mollie\/api-client|mollie-api-python)$/i, host: /api\.mollie\.com/, calls: [['checkout', /\b(\w+\.payments\.create)\s*\(/]] },
+  { provider: 'razorpay', pkg: /^razorpay$/i, host: /api\.razorpay\.com/, calls: [['checkout', /\b(\w+\.orders?\.create)\s*\(/]] },
+];
+const AI = [
+  { provider: 'anthropic', client: /\b((?:Async)?Anthropic(?:Bedrock|Vertex)?)\s*\(/, call: /\.(messages\.(?:create|stream))\s*\(/, needs: /anthropic/i },
+  { provider: 'google', client: /\b(GoogleGenerativeAI|GoogleGenAI|genai\.Client|genai\.GenerativeModel)\s*\(/, call: /\.(generateContent(?:Stream)?|models\.generate_content|generate_content)\s*\(/ },
+  { provider: 'mistral', client: /\b(Mistral(?:Client)?)\s*\(/, call: /\.(chat\.complete(?:Async)?|chat\.stream)\s*\(/, needs: /mistral/i },
+  { provider: 'groq', client: /\b((?:Async)?Groq)\s*\(/, call: null },
+  { provider: 'openai', client: /\b((?:Async)?(?:Azure)?OpenAI)\s*\(/, call: /\.(chat\.completions\.create|chat\.completions\.parse|responses\.create|completions\.create|embeddings\.create|images\.generate|audio\.transcriptions\.create)\s*\(/ },
+];
+const AI_SDK_CALL = /\b(generateText|streamText|generateObject|streamObject|embedMany)\s*\(/;
+const AI_HOSTS = [[/api\.openai\.com/, 'openai'], [/api\.anthropic\.com/, 'anthropic'], [/generativelanguage\.googleapis\.com/, 'google'], [/openrouter\.ai\/api/, 'openrouter'], [/api\.mistral\.ai/, 'mistral'], [/api\.groq\.com/, 'groq'], [/api\.together\.xyz/, 'together']];
+const payProviders = []; const aiCalls = [];
+for (const P of PAY) {
+  const comp = components.find((c) => P.pkg.test(c.package)); const calls = [];
+  for (const f of codeFiles) { const ls = text(f).split('\n'); ls.forEach((l, i) => { if (/^\s*(\/\/|#|\*)/.test(l)) return;
+    for (const [kind, re] of P.calls) { const m = re.exec(l); if (m && (comp || P.provider === 'stripe' || ls.some((x) => P.host.test(x)))) calls.push({ kind, evidence: { path: rel(f), line: i + 1, symbol: m[1] } }); }
+    const h = P.host.exec(l); if (h && /['"`]/.test(l)) calls.push({ kind: 'api', evidence: { path: rel(f), line: i + 1, symbol: h[0] } }); }); }
+  if (!comp && !calls.length) continue;
+  payProviders.push({ provider: P.provider, ...(comp ? { component: comp.id } : {}), evidence: comp ? { path: comp.evidence.path, line: comp.evidence.line, symbol: comp.package } : calls[0].evidence, calls: calls.slice(0, 50) });
+}
+for (const f of codeFiles) {
+  const src = text(f); const ls = src.split('\n'); const usesAiSdk = /from\s+['"]ai['"]|require\(\s*['"]ai['"]\s*\)/.test(src);
+  const viaHost = AI_HOSTS.find(([re]) => re.test(src) && (re.source.includes('openrouter') || re.source.includes('groq') || re.source.includes('together')))?.[1] ?? null;   // an OpenAI client pointed at another provider
+  const modelNear = (i) => { for (let j = i; j < Math.min(ls.length, i + 7); j++) { const m = /\bmodel\s*[:=]\s*["'`]([\w.:\/@-]{2,80})["'`]/.exec(ls[j]); if (m) return { value: m[1], evidence: { path: rel(f), line: j + 1, symbol: m[1] } }; } return null; };
+  ls.forEach((l, i) => { if (/^\s*(\/\/|#|\*)/.test(l)) return;
+    for (const A of AI) {
+      if (A.needs && !A.needs.test(src)) continue;
+      const c = A.client.exec(l); if (c) aiCalls.push({ provider: A.provider === 'openai' && viaHost ? viaHost : A.provider, kind: 'client', evidence: { path: rel(f), line: i + 1, symbol: c[1] } });
+      const k = A.call?.exec(l); if (k) { const model = modelNear(i); aiCalls.push({ provider: A.provider === 'openai' && viaHost ? viaHost : A.provider, kind: 'call', evidence: { path: rel(f), line: i + 1, symbol: k[1] }, ...(model ? { model } : {}) }); }
+    }
+    const s2 = usesAiSdk ? AI_SDK_CALL.exec(l) : null; if (s2) { const model = modelNear(i); aiCalls.push({ provider: 'ai_sdk', kind: 'call', evidence: { path: rel(f), line: i + 1, symbol: s2[1] }, ...(model ? { model } : {}) }); }
+    for (const [re, provider] of AI_HOSTS) { const h = re.exec(l); if (h && /['"`]/.test(l)) aiCalls.push({ provider, kind: 'call', evidence: { path: rel(f), line: i + 1, symbol: h[0] } }); }
+  });
+}
+const payComponents = new Set(payProviders.map((p) => p.component).filter(Boolean));
+const moneyTables = [];
+const addMoney = (table, because, evidence, columns) => { if (!moneyTables.some((x) => x.table === table) && mergedTables.some((t) => t.name === table)) moneyTables.push({ table, because, evidence, ...(columns?.length ? { columns: [...new Set(columns)] } : {}) }); };
+for (const t of mergedTables) { const cols = t.columns.filter((c) => (c.shown ?? []).some((x) => x.element === 'money')); if (!cols.length) continue;
+  const s0 = cols[0].shown.find((x) => x.element === 'money'); addMoney(t.name, 'shown_as_money', { path: s0.path, line: s0.line, symbol: cols[0].name }, [...cols.map((c) => c.name), ...cols.flatMap((c) => c.shown.filter((x) => x.element === 'money' && x.currency_column).map((x) => x.currency_column))]); }
+for (const t of mergedTables) for (const c of t.columns) if (c.external_id && payComponents.has(c.external_id.component)) addMoney(t.name, 'provider_id', { path: c.external_id.evidence.path, line: c.external_id.evidence.line, symbol: c.name }, [c.name]);
+// The payment code: a file with a call to the provider (not only the webhook), and around the webhook its function plus the functions of the same file it
+// calls (by name, transitively). Top-level blocks: a definition at the start of a line (def, function, const name = (…) =>) up to the next one.
+const payFiles = new Set(payProviders.flatMap((p) => p.calls.filter((c) => c.kind !== 'webhook' && c.kind !== 'api').map((c) => c.evidence.path)));
+const payRanges = new Map();   // path → [[from, to]] of lines
+const DEF = /^(?:export\s+)?(?:async\s+)?(?:def|function)\s+([A-Za-z_]\w*)|^(?:export\s+)?(?:const|let)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?(?:\(|function|[A-Za-z_]\w*\s*=>)/;
+for (const h of payProviders.flatMap((p) => p.calls.filter((c) => c.kind === 'webhook').map((c) => c.evidence))) {
+  if (payFiles.has(h.path)) continue;
+  const ls = text(join(repo, h.path)).split('\n'); const blocks = [];
+  ls.forEach((l, i) => { const m = DEF.exec(l); if (m) blocks.push({ name: m[1] ?? m[2], from: i + 1 }); });
+  blocks.forEach((b, i) => { b.to = i + 1 < blocks.length ? blocks[i + 1].from - 1 : ls.length; });
+  const start = [...blocks].reverse().find((b) => b.from <= h.line); if (!start) continue;
+  const seen = new Set([start]); const queue = [start];
+  while (queue.length) { const b = queue.shift(); const body = ls.slice(b.from, b.to).join('\n'); for (const o of blocks) if (!seen.has(o) && new RegExp(`\\b${o.name}\\s*\\(`).test(body)) { seen.add(o); queue.push(o); } }
+  payRanges.set(h.path, [...(payRanges.get(h.path) ?? []), ...[...seen].map((b) => [b.from, b.to])]);
+}
+const inPay = (path, line) => payFiles.has(path) || (payRanges.get(path) ?? []).some(([a, b]) => line >= a && line <= b);
+const writtenIn = new Set(reads.column_writes.filter((w) => inPay(w.path, w.line)).map((w) => w.table));
+for (const f of [...new Set([...payFiles, ...payRanges.keys()])].sort()) {
+  text(join(repo, f)).split('\n').forEach((l, i) => { if (!inPay(f, i + 1)) return;
+    for (const m of l.matchAll(/\.(?:table|from)\(\s*["'`]([A-Za-z_]\w*)["'`]|\b(?:from|into|update|join)\s+"?(?:public\.)?"?([A-Za-z_]\w*)/gi)) { const t = tableKey(m[1] ?? m[2]); if (t) addMoney(t, writtenIn.has(t) ? 'written_with_provider' : 'used_with_provider', { path: f, line: i + 1, symbol: m[1] ?? m[2] }); } });
+}
+const keyOf = (x) => `${x.provider}|${x.kind ?? ''}|${x.evidence?.path}:${x.evidence?.line}`;
+const money = payProviders.length || moneyTables.length || merge?.money ? { providers: [...payProviders, ...(merge?.money?.providers ?? []).filter((o) => !payProviders.some((p) => p.provider === o.provider))], tables: [...moneyTables, ...(merge?.money?.tables ?? []).filter((o) => !moneyTables.some((t) => t.table === o.table) && mergedTables.some((t) => t.name === o.table))].slice(0, 200) } : null;
+const aiOut = [...aiCalls, ...(merge?.ai_calls ?? []).filter((o) => !aiCalls.some((a) => keyOf(a) === keyOf(o)))].slice(0, 200);
+const authPlaces = [];
+for (const f of codeFiles) { const ls = text(f).split('\n'); ls.forEach((l, i) => { if (/^\s*(\/\/|#|\*)/.test(l)) return; for (const [kind, re] of AUTH_CALLS) { const m = re.exec(l); if (m) authPlaces.push({ kind, path: rel(f), line: i + 1, symbol: m.slice(1).find(Boolean) }); } }); }
+for (const a of authPlaces.sort(byPlace)) addCand({ id: `auth:${a.kind}`, source: 'auth', kind: a.kind, evidence: { path: a.path, line: a.line, symbol: a.symbol }, required: true });
+for (const r of api_routes.filter((x) => x.method === 'POST' || !x.method).sort((a, b) => byPlace(a.evidence, b.evidence))) {   // an own login: the app's routes for it (not required: the route name is the fact)
+  const kind = /(^|\/)(register|sign-?up|signup)$/i.test(r.pattern) ? 'sign_up' : /(^|\/)(login|sign-?in|signin)$/i.test(r.pattern) ? 'sign_in' : /(forgot|reset)[-_]?password|password[-_]?reset/i.test(r.pattern) ? 'password_reset' : null;
+  if (kind) addCand({ id: `auth:${kind}`, source: 'auth', kind, evidence: { path: r.evidence.path, line: r.evidence.line, symbol: r.pattern.split('/').pop() } });
+}
+for (const p of payProviders) for (const c of p.calls.filter((x) => x.kind === 'checkout' || x.kind === 'webhook').sort((a, b) => byPlace(a.evidence, b.evidence))) addCand({ id: `payment:${c.kind}`, source: 'payment', kind: c.kind, evidence: c.evidence, required: true });
+for (const w of [...(reads.browser_writes ?? [])].sort(byPlace)) addCand(w.route ? { id: `browser_write:${w.route}`, source: 'browser_write', kind: 'request', route: w.route, handler: w.handler, evidence: { path: w.path, line: w.line, symbol: w.symbol } }
+  : { id: `browser_write:${w.kind}:${w.table}`, source: 'browser_write', kind: w.kind, table: w.table, evidence: { path: w.path, line: w.line, symbol: w.symbol } });
+for (const td of [...trigDefs.values()].filter((t) => t.place).sort((a, b) => byPlace(a.place, b.place))) {
+  if (td.when !== 'after' || /^everydeck/i.test(td.fn) || /^everydeck/i.test(td.name) || !mergedTables.some((t) => t.name === td.table) || (merge?.everydeck_tables ?? []).some((y) => y.table === td.table)) continue;
+  addCand({ id: `trigger:${td.table}:${td.name}`, source: 'trigger', kind: td.event, table: td.table, evidence: { ...td.place, symbol: td.name } });
+}
+const flowCandidates = candidates.slice(0, 500).map((c) => { const old = (merge?.flow_candidates ?? []).find((x) => x.id === c.id); return old?.left_out ? { ...c, left_out: old.left_out } : c; });
+// ── Page descriptions (screens[].described) from facts: the file behind the route (or the route file of the framework) and its own imports, two levels
+//    deep, without modules more than three pages share; the tables they show and the flows of the app map that start there. The agent's description stays.
+const pageFileOf = new Map((reads.page_files ?? []).map((x) => [`${x.path}:${x.line}`, x.file]));
+const closureOf = (file) => { const out = [file]; let frontier = [file]; for (let d = 0; d < 2; d++) { const next = []; for (const f of frontier) for (const g of (reads.import_graph ?? {})[f] ?? []) if (!out.includes(g)) { out.push(g); next.push(g); } frontier = next; } return out; };
+const pageClosures = screens.map((sc) => { const f = pageFileOf.get(`${sc.evidence.path}:${sc.evidence.line}`) ?? (/^app\//.test(sc.evidence.path) ? sc.evidence.path : null); return f ? closureOf(f) : null; });
+const sharedBy = new Map(); for (const c of pageClosures) for (const f of c ?? []) sharedBy.set(f, (sharedBy.get(f) ?? 0) + 1);
+const shownIn = new Map(); for (const x of reads.shown) { if (!shownIn.has(x.path)) shownIn.set(x.path, new Set()); shownIn.get(x.path).add(x.table); }
+const describedOf = (i) => { const c = pageClosures[i]; if (!c) return null; const own = new Set(c.filter((f, j) => j === 0 || (sharedBy.get(f) ?? 0) <= 3));
+  return { works_with: [...new Set([...own].flatMap((f) => [...(shownIn.get(f) ?? [])]))].sort(), flows: (merge?.flows ?? []).filter((fl) => own.has(fl.start?.path)).map((fl) => fl.id).sort() }; };
+// ── Services the backend calls by their API address (a host that starts with api): a component with the address as its package; the column <service>_id of a
+//    table <service>_* that the app writes in a file naming that address carries the service's identifier (external_id). Payment and AI addresses are money and ai_calls.
+const SKIP_HOSTS = /stripe\.com|paddle\.com|lemonsqueezy\.com|revenuecat\.com|midtrans\.com|xendit\.co|paypal\.com|mollie\.com|razorpay\.com|openai\.com|anthropic\.com|googleapis\.com|openrouter\.ai|mistral\.ai|groq\.com|together\.xyz|supabase\.(co|com|in)|localhost/i;
+const services = new Map();   // id → { host, evidence, files }
+for (const f of codeFiles) { const r0 = rel(f); if (!(/(^|\/)(backend|server|api|functions|supabase)(\/|$)/.test(r0) || f.endsWith('.py'))) continue;
+  text(f).split('\n').forEach((l, i) => { for (const m of l.matchAll(/["'`]https?:\/\/((api[\w-]*)\.([\w-]+\.)*([\w-]+)\.[a-z]{2,6})(?=[\/"'`:])/gi)) { const host = m[1].toLowerCase(); if (SKIP_HOSTS.test(host)) continue;
+    const parts = host.split('.'); const id = parts[parts.length - 2].replace(/[^a-z0-9_-]/g, ''); if (!id) continue;
+    const s0 = services.get(id) ?? { host, evidence: { path: r0, line: i + 1, symbol: host }, files: new Set() }; s0.files.add(r0); services.set(id, s0); } }); }
+for (const [id, sv] of services) {
+  if (!components.some((c) => c.id === id)) components.push({ id, package: sv.host, evidence: sv.evidence });
+  for (const t of mergedTables.filter((x) => x.name.startsWith(`${id}_`))) { const c = t.columns.find((x) => x.name === `${id}_id`); if (!c || c.pk || c.fk || c.external_id) continue;
+    const w = [...reads.column_writes, ...(reads.column_inserts ?? [])].filter((x) => x.table === t.name && x.column === c.name).sort(byPlace).find((x) => sv.files.has(x.path)) ?? [...reads.column_writes, ...(reads.column_inserts ?? [])].filter((x) => x.table === t.name && x.column === c.name).sort(byPlace)[0];
+    if (w) c.external_id = { component: id, evidence: { path: w.path, line: w.line, symbol: c.name } }; } }
 // The icon the app itself ships (skeleton part, new on every run; the agent's descriptions under `app` stay)
 const icon = findIcon(repo, files);
 const appOut = (() => { const { icon: _old, ...rest } = merge?.app ?? {}; const a = { ...rest, ...(icon ? { icon } : {}) }; return Object.keys(a).length ? a : null; })();
 const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git:${commit.slice(0, 12)}`, commit, ...(appOut ? { app: appOut } : {}),
-  components: [...components.map((c) => ({ ...c, ...(merge?.components?.find((x) => x.package === c.package)?.call ? { call: merge.components.find((x) => x.package === c.package).call } : {}) })), ...(merge?.components ?? []).filter((x) => !components.some((c) => c.package === x.package))], platforms: merge?.platforms ?? platforms, screens: screens.map((x) => { const d = merge?.screens?.find((y) => y.pattern === x.pattern)?.described; return d ? { ...x, described: d } : x; }), api_routes,   // a page's description (described) stays as long as the page exists
+  components: [...components.map((c) => ({ ...c, ...(merge?.components?.find((x) => x.package === c.package)?.call ? { call: merge.components.find((x) => x.package === c.package).call } : {}) })), ...(merge?.components ?? []).filter((x) => !components.some((c) => c.package === x.package))], platforms: merge?.platforms ?? platforms, screens: screens.map((x, i) => { const d = merge?.screens?.find((y) => y.pattern === x.pattern)?.described ?? describedOf(i); return d ? { ...x, described: d } : x; }), api_routes,   // a page's description (described) stays as long as the page exists
     // components added by the agent (e.g. a package in an Edge Function) stay
   // tables of the everydeck installation named by the agent stay (as long as the table exists)
   ...(reads.reach.unreachable.length ? { unreachable: reads.reach.unreachable.slice(0, 500) } : {}),
   ...((reads.display_ends ?? []).filter((e) => !e.element.startsWith('contact_')).length ? { display_ends: reads.display_ends.filter((e) => !e.element.startsWith('contact_')) } : {}),   // a contact place without a column is not a display fact   // display places whose value cannot be traced to a column (fact, never guessed)   // files no entry point of the app reaches: no page, no display place
   ...(merge?.everydeck_tables ? { everydeck_tables: merge.everydeck_tables.filter((y) => mergedTables.some((t) => t.name === y.table)) } : {}),
   ...(merge?.works_with ? { works_with: merge.works_with.filter((w) => tables.has(w.table) && (!w.part_of || tables.has(w.part_of))) } : {}),   // the agent's description stays; entries for tables that no longer exist in the final state are dropped
-  identity: (() => { const id = merge?.identity ?? null; if (!id) return null; const { name_rule: _old, ...rest } = id; const rule = nameRuleOf(id); return rule ? { ...rest, name_rule: rule } : rest; })(), tables: mergedTables, functions: merge?.functions ?? [], flows: merge?.flows ?? [], ...(merge?.channels ? { channels: merge.channels } : {}), ...(merge?.jobs ? { jobs: merge.jobs } : {}), ...(merge?.payments !== undefined ? { payments: merge.payments } : {}), ...(merge?.adapters ? { adapters: merge.adapters } : {}),
+  identity: (() => { const id = identityOut; if (!id) return null; const { name_rule: _old, ...rest } = id; const rule = nameRuleOf(id); return rule ? { ...rest, name_rule: rule } : rest; })(), tables: mergedTables, functions: merge?.functions ?? [], flows: merge?.flows ?? [], ...(flowCandidates.length ? { flow_candidates: flowCandidates } : {}), money, ...(aiOut.length ? { ai_calls: aiOut } : {}), ...(merge?.channels ? { channels: merge.channels } : {}), ...(merge?.jobs ? { jobs: merge.jobs } : {}), ...(merge?.payments !== undefined ? { payments: merge.payments } : {}), ...(merge?.adapters ? { adapters: merge.adapters } : {}),
   checklist: merge?.checklist ?? BLOCKS.map((block) => ({ block, present: false })) };
 // --types prints the object type names as everydeck derives them (singular of the table name), for triggers, actions, door and cleanup list before submitting
 if (args.includes('--types')) {
@@ -449,7 +611,7 @@ if (args.includes('--types')) {
   const slugOf = (x) => x.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z]+/, '').slice(0, 63) || 'x';
   process.stdout.write(JSON.stringify(Object.fromEntries(out.tables.map((t) => [t.schema && t.schema !== 'public' ? `${t.schema}.${t.name}` : t.name, slugOf(singular(t.name))])), null, 1) + '\n'); process.exit(0);
 }
-// Never write into the repo unasked: without --out the Befund goes to stdout
+// Never write into the repo unasked: without --out the app map goes to stdout
 const outPath = opt('--out');
 if (outPath) writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n'); else process.stdout.write(JSON.stringify(out, null, 1) + '\n');
 console.error(JSON.stringify({ out: outPath, tables: out.tables.length, columns: out.tables.reduce((n, t) => n + t.columns.length, 0), shown: out.tables.filter((t) => (t.shown ?? []).length || t.columns.some((c) => (c.shown ?? []).length)).length, not_shown: out.tables.reduce((n, t) => n + (t.not_shown ?? []).length, 0), components: out.components.length, api_routes: api_routes.length, screens: screens.length, platforms: out.platforms.length, routes_with_reads: reads.routes.filter((r) => r.reads.length).length, views: reads.views.length, sql_functions: reads.sql_functions.length, merged: !!merge }));

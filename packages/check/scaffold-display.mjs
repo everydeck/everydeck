@@ -1,4 +1,4 @@
-// Follow the value: part of the Befund skeleton (called by befund-reads.mjs), facts from the syntax tree only (TypeScript compiler API).
+// Follow the value: part of the app map scaffold (called by scaffold-reads.mjs), facts from the syntax tree only (TypeScript compiler API).
 //
 // Display place (a fact of the place, never a name):
 //   <img src={x}>, a background image (style backgroundImage `url(${x})`)                 → image

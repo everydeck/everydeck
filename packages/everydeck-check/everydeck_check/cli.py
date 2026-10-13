@@ -12,6 +12,26 @@ from . import check_drift, digest, freeze_lock, reference_errors, split_proposal
 from .change import check_change
 
 LOCK_NAME = "everydeck-manifest.lock.json"
+APP_MAP = "everydeck/app-map.json"
+OLD_NAME = "everydeck-befund.json"   # the app map's file name before; an existing setup is still read, nothing is written under it
+
+
+def map_path(arg: str | None) -> tuple[str, str | None]:
+    """The file to read: the given path, without one everydeck/app-map.json. If that does not exist but the same folder has the file under its
+    old name (an existing setup), that one is read, with a note."""
+    p = Path(arg or APP_MAP)
+    if p.exists() or p.name != Path(APP_MAP).name:
+        return str(p), None
+    old = p.parent / OLD_NAME
+    if old.exists():
+        return str(old), f"read {old}, the old name of the app map; everydeck now writes and names only {p}: rename the file (git mv) in your next change"
+    return str(p), None
+
+
+def write_path(path: str) -> str:
+    """Where a changed app map goes: never under the old name, always app-map.json in the same folder."""
+    p = Path(path)
+    return str(p.parent / Path(APP_MAP).name) if p.name == OLD_NAME else path
 
 
 def _load(p: str) -> dict:
@@ -20,11 +40,11 @@ def _load(p: str) -> dict:
 
 def _load_manifest(p: str) -> tuple[dict, dict | None, str]:
     """The file is the proposal `{ manifest, local_check }` or a bare manifest; the manifest is checked.
-    A Befund (1.12-r0) is brought into signal form for drift/change (drift_manifest)."""
+    An app map (1.12-r0) is brought into signal form for drift/change (drift_manifest)."""
     doc = _load(p)
-    from .befund import drift_manifest, is_befund
-    if is_befund(doc):
-        return drift_manifest(doc), None, "befund"
+    from .app_map import drift_manifest, is_app_map
+    if is_app_map(doc):
+        return drift_manifest(doc), None, "app_map"
     m, lc = split_proposal(doc)
     return m, lc, "proposal" if m is not doc else "manifest"
 
@@ -82,14 +102,14 @@ def _coverage_errors(doc: dict, m: dict, form: str, repo: str | None) -> tuple[l
 
 
 def cmd_validate(a: argparse.Namespace) -> int:
-    # a Befund (1.12-r0): shape, references, every place against the repo, completeness (tables, routes, provider packages)
+    # an app map (1.12-r0): shape, references, every place against the repo, completeness (tables, routes, provider packages)
     raw = _load(a.manifest)
-    from .befund import is_befund, validate_befund
-    if is_befund(raw):
+    from .app_map import is_app_map, validate_app_map
+    if is_app_map(raw):
         repo = getattr(a, "repo", None)
         db = getattr(a, "db", None) or os.environ.get("EVERYDECK_SCHEMA_DB_URL")
-        errs = validate_befund(raw, Path(repo).resolve() if repo else None, db)
-        print(json.dumps({"status": "ok" if not errs else "invalid", "form": "befund", "checked_against_repo": bool(repo), "checked_against_database": bool(db), "errors": errs,
+        errs = validate_app_map(raw, Path(repo).resolve() if repo else None, db)
+        print(json.dumps({"status": "ok" if not errs else "invalid", "form": "app_map", "file": a.manifest, **({"note": a.file_note} if a.file_note else {}), "checked_against_repo": bool(repo), "checked_against_database": bool(db), "errors": errs,
                           "counts": {"tables": len(raw.get("tables", [])), "functions": len(raw.get("functions", [])), "flows": len(raw.get("flows", [])), "present": sum(1 for c in raw.get("checklist", []) if c.get("present"))}}, indent=1))
         return 0 if not errs else 2
     m, lc, form = _load_manifest(a.manifest)
@@ -105,10 +125,10 @@ def cmd_validate(a: argparse.Namespace) -> int:
 
 
 def cmd_reads(a: argparse.Namespace) -> int:
-    from .befund import is_befund
+    from .app_map import is_app_map
     from .reads import reads_markdown, reads_table
-    raw = _load(a.befund)
-    if not is_befund(raw): print(json.dumps({"status": "invalid", "errors": ["not a Befund (schema_version 1.12-r0 with tables and checklist)"]})); return 2
+    raw = _load(a.app_map)
+    if not is_app_map(raw): print(json.dumps({"status": "invalid", "errors": ["not an app map (schema_version 1.12-r0 with tables and checklist)"]})); return 2
     rows = reads_table(raw, Path(a.repo).resolve())
     open_rows = [r for r in rows if r["open"]]
     if a.markdown: print(reads_markdown(rows))
@@ -122,27 +142,27 @@ def cmd_drift(a: argparse.Namespace) -> int:
     lock_path = repo / LOCK_NAME
     lock = _load(str(lock_path))["call_sites"] if lock_path.exists() else None
     rep = check_drift(repo, m, lock)
-    out = {"status": rep.status, "head": rep.head, "findings": [f.__dict__ for f in rep.findings], "call_sites": rep.call_sites}
-    # right after approval the code is already ahead of the Befund (adapter, door); "new_build" alone does not prevent freezing;
+    out = {"status": rep.status, "head": rep.head, "findings": [f.__dict__ for f in rep.findings], "call_sites": rep.call_sites, **({"note": a.file_note} if a.file_note else {})}
+    # right after approval the code is already ahead of the app map (adapter, door); "new_build" alone does not prevent freezing;
     # the call sites as of now are recorded. Every other finding (missing signal, job without heartbeat) stays drift.
     only_new_build = bool(rep.findings) and all(f.kind == "new_build" for f in rep.findings)
     if a.freeze and (rep.status != "drift" or only_new_build):
         lock_path.write_text(json.dumps(freeze_lock(rep), indent=1) + "\n", encoding="utf-8")
         out["lock"] = str(lock_path)
-        if only_new_build: out["note"] = "the code moved on since the Befund commit (new_build only); call sites frozen as of now"
+        if only_new_build: out["note"] = "the code moved on since the app map commit (new_build only); call sites frozen as of now"
     print(json.dumps(out, indent=1))
     return 0 if rep.status != "drift" or (a.freeze and only_new_build) else 2
 
 
 def cmd_reanchor(a: argparse.Namespace) -> int:
-    """Move places from the Befund's commit to HEAD (git, text, symbol). Without --out/--write only the report."""
+    """Move places from the app map's commit to HEAD (git, text, symbol). Without --out/--write only the report."""
     from .reanchor import reanchor
-    b = _load(a.befund)
+    b = _load(a.app_map)
     rep = reanchor(b, Path(a.repo), a.base)
     if not rep.get("error"):
         if isinstance(b.get("release_key"), str) and b["release_key"].startswith("git:") and rep["head"]:
-            b["release_key"] = f"git:{rep['head'][:12]}"   # the Befund's version follows the commit (the same form as the SDK release key)
-        target = a.out or (a.befund if a.write else None)
+            b["release_key"] = f"git:{rep['head'][:12]}"   # the app map's version follows the commit (the same form as the SDK release key)
+        target = a.out or (write_path(a.app_map) if a.write else None)
         if target:
             Path(target).write_text(json.dumps(b, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"); rep["out"] = str(target)
     print(json.dumps(rep, indent=1))
@@ -156,18 +176,18 @@ def cmd_publish(a: argparse.Namespace) -> int:
     if not a.token:
         print(json.dumps({"status": "invalid", "errors": ["no key: set EVERYDECK_PUBLISH_KEY or pass --token-file (a setup session key stays in the agent store; submit with everydeck-agent call … POST …/proposals --data-file instead)"]}, indent=1)); return 2
     raw = _load(a.manifest)
-    from .befund import is_befund, validate_befund
-    if is_befund(raw):   # the Befund goes to everydeck as { befund }; everydeck derives
-        errs = validate_befund(raw, Path(getattr(a, "repo", ".")).resolve() if getattr(a, "repo", None) else None)
+    from .app_map import is_app_map, validate_app_map
+    if is_app_map(raw):   # the app map goes to everydeck as { app_map }; everydeck derives
+        errs = validate_app_map(raw, Path(getattr(a, "repo", ".")).resolve() if getattr(a, "repo", None) else None)
         if errs:
             print(json.dumps({"status": "invalid", "errors": errs}, indent=1)); return 2
         req = urllib.request.Request(f"{a.url.rstrip('/')}/api/setup-sessions/{a.session}/proposals" if getattr(a, "session", None) else f"{a.url.rstrip('/')}/api/projects/{a.project}/manifests",
-                                     data=json.dumps({"befund": raw}).encode(), headers={"content-type": "application/json", "authorization": f"Bearer {a.token}"}, method="POST")
+                                     data=json.dumps({"app_map": raw}).encode(), headers={"content-type": "application/json", "authorization": f"Bearer {a.token}"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 body = json.loads(r.read() or b"{}")
                 scope = (body.get("derived") or {}).get("read_scope") or body.get("read_scope")   # the CI path returns it at the top level
-                if scope:   # the read scope for the general read bridge, next to the Befund
+                if scope:   # the read scope for the general read bridge, next to the app map
                     out = Path(a.manifest).resolve().parent / "everydeck-read-scope.json"
                     out.write_text(json.dumps(scope, indent=1) + "\n", encoding="utf-8")
                     body["derived"] = {**body["derived"], "read_scope": str(out)}
@@ -238,19 +258,34 @@ def cmd_change(a: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_footprint(a: argparse.Namespace) -> int:
+    """The footprint of the setup against the commit before it: new and changed files, a lockfile rewritten beyond the new packages, leftovers."""
+    from .footprint import footprint
+    out = footprint(Path(a.repo).resolve(), a.base, fix_lock=a.fix_lock)
+    print(json.dumps(out, indent=1))
+    return 0 if out["status"] == "ok" else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="everydeck-check")
     sub = p.add_subparsers(dest="cmd", required=True)
-    v = sub.add_parser("validate"); v.add_argument("manifest"); v.add_argument("--repo", default=None, help="app repository: detect building blocks (dependencies, config, code hints) that must appear in coverage[]"); v.add_argument("--db", default=None, help="database URL (the read role is enough; or EVERYDECK_SCHEMA_DB_URL); every table of the database must be in the Befund, evidence 'database' is checked against it"); v.set_defaults(fn=cmd_validate)
-    d = sub.add_parser("drift"); d.add_argument("manifest"); d.add_argument("--repo", default="."); d.add_argument("--freeze", action="store_true"); d.set_defaults(fn=cmd_drift)
-    ra = sub.add_parser("reanchor", help="move every place of the Befund from its commit to HEAD (git diff, text, symbol); nothing guessed; unresolved places are listed")
-    ra.add_argument("befund"); ra.add_argument("--repo", default="."); ra.add_argument("--base", default=None, help="commit the places refer to (default: commit of the Befund)"); ra.add_argument("--out", default=None); ra.add_argument("--write", action="store_true", help="write the re-anchored Befund back to its file"); ra.set_defaults(fn=cmd_reanchor)
-    rd = sub.add_parser("reads", help="the cross-check of display locations: every table named in a frontend string: main navigation (with access path), technical (with reason) or open"); rd.add_argument("befund"); rd.add_argument("--repo", required=True); rd.add_argument("--markdown", action="store_true"); rd.set_defaults(fn=cmd_reads)
-    pub = sub.add_parser("publish"); pub.add_argument("manifest"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list; use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: a Befund goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of a Befund against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
+    v = sub.add_parser("validate"); v.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); v.add_argument("--repo", default=None, help="app repository: detect building blocks (dependencies, config, code hints) that must appear in coverage[]"); v.add_argument("--db", default=None, help="database URL (the read role is enough; or EVERYDECK_SCHEMA_DB_URL); every table of the database must be in the app map, evidence 'database' is checked against it"); v.set_defaults(fn=cmd_validate)
+    d = sub.add_parser("drift"); d.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); d.add_argument("--repo", default="."); d.add_argument("--freeze", action="store_true"); d.set_defaults(fn=cmd_drift)
+    ra = sub.add_parser("reanchor", help="move every place of the app map from its commit to HEAD (git diff, text, symbol); nothing guessed; unresolved places are listed")
+    ra.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); ra.add_argument("--repo", default="."); ra.add_argument("--base", default=None, help="commit the places refer to (default: commit of the app map)"); ra.add_argument("--out", default=None); ra.add_argument("--write", action="store_true", help="write the re-anchored app map back to its file"); ra.set_defaults(fn=cmd_reanchor)
+    rd = sub.add_parser("reads", help="the cross-check of display locations: every table named in a frontend string: main navigation (with access path), technical (with reason) or open"); rd.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); rd.add_argument("--repo", required=True); rd.add_argument("--markdown", action="store_true"); rd.set_defaults(fn=cmd_reads)
+    pub = sub.add_parser("publish"); pub.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list; use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: an app map goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of an app map against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
+    fp = sub.add_parser("footprint", help="what the setup added and changed in the repository against --base (the commit before the setup); refuses a rewritten lockfile and leftovers")
+    fp.add_argument("--base", required=True); fp.add_argument("--repo", default="."); fp.add_argument("--fix-lock", action="store_true", help="restore package-lock.json from --base and add only the new packages"); fp.set_defaults(fn=cmd_footprint)
     ch = sub.add_parser("change", help="check everydeck-change.json against manifest, repo and HEAD; optionally publish it")
     ch.add_argument("change"); ch.add_argument("--manifest", required=True); ch.add_argument("--repo", default="."); ch.add_argument("--sha", default=None)
     ch.add_argument("--url"); ch.add_argument("--project"); ch.add_argument("--token"); ch.set_defaults(fn=cmd_change)
     a = p.parse_args(argv)
+    a.file_note = None
+    if a.cmd not in ("change", "footprint"):
+        for attr in ("manifest", "app_map"):
+            if hasattr(a, attr):
+                path, a.file_note = map_path(getattr(a, attr)); setattr(a, attr, path)
     return a.fn(a)
 
 

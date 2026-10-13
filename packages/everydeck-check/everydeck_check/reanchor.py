@@ -1,6 +1,6 @@
 """Re-anchor places that moved, only from facts (git and syntax tree), without approval.
 
-Every place of the Befund (an object with `path` and `line`) holds for the state `commit`. After a change to the app, lines are elsewhere.
+Every place of the app map (an object with `path` and `line`) holds for the state `commit`. After a change to the app, lines are elsewhere.
 everydeck does not see the code; re-anchoring runs where the code is (in the GitHub check or at the agent), in this order:
 
   1. git: the line stayed unchanged between `commit` and HEAD (also in a renamed file) → new line number from the diff.
@@ -27,7 +27,7 @@ def _git(repo: Path, *args: str) -> str | None:
 
 
 def places(doc: Any, at: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
-    """Every place in the Befund with its location (e.g. `flows[0].signals[1].evidence`): an object with file and line (not `database`)."""
+    """Every place in the app map with its location (e.g. `flows[0].signals[1].evidence`): an object with file and line (not `database`)."""
     if isinstance(doc, dict):
         if isinstance(doc.get("path"), str) and isinstance(doc.get("line"), int) and doc["path"] != "database":
             yield at, doc
@@ -64,7 +64,7 @@ def _map_line(hunks: list[tuple[int, int, int, int]], line: int) -> int | None:
 
 
 def _functions(repo: Path, rel: str, text: str) -> list[dict[str, Any]] | None:
-    from .befund import JS_FILE, PY_FILE, _py_functions
+    from .app_map import JS_FILE, PY_FILE, _py_functions
     if PY_FILE.search(rel):
         r = _py_functions(text)
         return r if isinstance(r, list) else None
@@ -79,7 +79,7 @@ def _functions(repo: Path, rel: str, text: str) -> list[dict[str, Any]] | None:
 
 
 def reanchor(b: dict[str, Any], repo: Path, base: str | None = None) -> dict[str, Any]:
-    """Re-anchors all places from `base` (default: the Befund's `commit`) to HEAD; changes `b` and returns the report."""
+    """Re-anchors all places from `base` (default: the app map's `commit`) to HEAD; changes `b` and returns the report."""
     repo = repo.resolve()
     head = (_git(repo, "rev-parse", "HEAD") or "").strip() or None
     base = base or b.get("commit")
@@ -87,7 +87,7 @@ def reanchor(b: dict[str, Any], repo: Path, base: str | None = None) -> dict[str
     if not head:
         rep["error"] = "not a git repository"; return rep
     if not base or _git(repo, "cat-file", "-e", f"{base}^{{commit}}") is None:
-        rep["error"] = f"commit {str(base)[:12]} of the Befund is not in this clone (fetch it: git fetch --depth=1 origin {base})"; return rep
+        rep["error"] = f"commit {str(base)[:12]} of the app map is not in this clone (fetch it: git fetch --depth=1 origin {base})"; return rep
     renames: dict[str, str] = {}; deleted: set[str] = set()
     for ln in (_git(repo, "diff", "-M", "--name-status", "--no-color", base, head) or "").splitlines():
         parts = ln.split("\t")
@@ -112,7 +112,7 @@ def reanchor(b: dict[str, Any], repo: Path, base: str | None = None) -> dict[str
         new_path = renames.get(old_path, old_path)
         if old_path not in changed and new_path == old_path:
             rep["unchanged"] += 1; continue
-        # the file did not exist at the Befund's commit (e.g. a place added by hand after a rename): git cannot
+        # the file did not exist at the app map's commit (e.g. a place added by hand after a rename): git cannot
         # move anything; the place stays as it is and the check judges it
         if old_path not in renames and _git(repo, "cat-file", "-e", f"{base}:{old_path}") is None:
             rep["unchanged"] += 1; rep.setdefault("not_at_base", []).append(at); continue

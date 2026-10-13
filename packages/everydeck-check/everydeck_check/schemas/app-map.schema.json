@@ -1,7 +1,7 @@
 {
  "$schema": "https://json-schema.org/draft/2020-12/schema",
- "$id": "https://everydeck.local/schemas/befund-1.12-r0.json",
- "title": "everydeck Befund 1.12-r0: the exact technical analysis of an app (facts with evidence, nothing judged)",
+ "$id": "https://everydeck.local/schemas/app-map-1.12-r0.json",
+ "title": "everydeck app map 1.12-r0: the exact technical analysis of an app (facts with evidence, nothing judged)",
  "type": "object",
  "additionalProperties": false,
  "required": [
@@ -186,7 +186,34 @@
     "value_labels": {
      "type": "array",
      "maxItems": 400,
-     "items": { "type": "object", "additionalProperties": false, "required": ["value", "label", "evidence"], "properties": { "value": { "type": "string", "minLength": 1, "maxLength": 80 }, "label": { "type": "string", "minLength": 1, "maxLength": 120 }, "lang": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Za-z]{2,4})?$" }, "evidence": { "$ref": "#/$defs/evidence" } } },
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "value",
+       "label",
+       "evidence"
+      ],
+      "properties": {
+       "value": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+       },
+       "label": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 120
+       },
+       "lang": {
+        "type": "string",
+        "pattern": "^[a-z]{2,3}(-[A-Za-z]{2,4})?$"
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     },
      "description": "the text the app shows for a value of this column, from a mapping in the code (an object keyed by the value, a switch, an i18n key built from the value, <option value> under a <select> bound to the column); the place is the text itself (the line in the code or in the translation file); lang is the language of the translation file (file or folder name); without such a mapping the value has no label and stays as it is"
     },
     "external_id": {
@@ -216,14 +243,31 @@
     "written": {
      "type": "array",
      "maxItems": 5,
-     "items": { "$ref": "#/$defs/evidence" },
+     "items": {
+      "$ref": "#/$defs/evidence"
+     },
      "description": "places where the app changes this column after the record exists (supabase .update/.upsert, UPDATE … SET, updateDoc, Prisma update data, a database function that writes a parameter); everydeck lets the owner edit only columns the app itself changes"
     },
     "contact": {
      "type": "object",
      "additionalProperties": false,
-     "required": ["kind", "evidence"],
-     "properties": { "kind": { "enum": ["email", "phone", "ip", "message"] }, "evidence": { "$ref": "#/$defs/evidence" } },
+     "required": [
+      "kind",
+      "evidence"
+     ],
+     "properties": {
+      "kind": {
+       "enum": [
+        "email",
+        "phone",
+        "ip",
+        "message"
+       ]
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      }
+     },
      "description": "the column holds contact data or a message of a person: email (an e-mail address), phone (a phone or messenger number), ip (an IP address), message (a text one person writes to another or to the operators). The place is where the app itself treats the value that way: a link mailto:/tel:/sms:/https://wa.me/, an input of type email or tel, the place that writes the request IP, the form where a person writes the message. Columns of type inet/cidr are IP addresses by their type. everydeck never reads such a column in its read scope; the approval lists it under \"Only you see\"."
     }
    }
@@ -304,10 +348,21 @@
      "items": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "evidence"],
+      "required": [
+       "kind",
+       "evidence"
+      ],
       "properties": {
-       "kind": { "enum": ["database", "error_tracking", "other"] },
-       "evidence": { "$ref": "#/$defs/evidence" }
+       "kind": {
+        "enum": [
+         "database",
+         "error_tracking",
+         "other"
+        ]
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
       }
      },
      "description": "the address or key of a production service written into the code (database URL and key, error-tracking DSN, …), a fact with its place; everydeck shows the owner a hint"
@@ -356,7 +411,7 @@
        "pattern": "^[A-Za-z0-9+/]*={0,2}$"
       }
      },
-     "description": "the icon the app itself serves (link rel icon / apple-touch-icon in an HTML entry, web manifest icons, Next.js app/icon.*, Expo expo.icon) with the place that names it; data = the file in base64 (at most 96 KiB). everydeck keeps a copy for the app card and never stores the data in the Befund."
+     "description": "the icon the app itself serves (link rel icon / apple-touch-icon in an HTML entry, web manifest icons, Next.js app/icon.*, Expo expo.icon) with the place that names it; data = the file in base64 (at most 96 KiB). everydeck keeps a copy for the app card and never stores the data in the app map."
     },
     "name": {
      "type": "object",
@@ -645,10 +700,45 @@
     "name_rule": {
      "type": "object",
      "additionalProperties": false,
-     "required": ["steps", "evidence"],
+     "required": [
+      "steps",
+      "evidence"
+     ],
      "properties": {
-      "steps": { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "object", "additionalProperties": false, "required": ["columns"], "properties": { "columns": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/name" } }, "separator": { "type": "string", "maxLength": 8 } } } },
-      "evidence": { "type": "array", "minItems": 1, "maxItems": 5, "items": { "$ref": "#/$defs/evidence" } }
+      "steps": {
+       "type": "array",
+       "minItems": 1,
+       "maxItems": 6,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "columns"
+        ],
+        "properties": {
+         "columns": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+           "$ref": "#/$defs/name"
+          }
+         },
+         "separator": {
+          "type": "string",
+          "maxLength": 8
+         }
+        }
+       }
+      },
+      "evidence": {
+       "type": "array",
+       "minItems": 1,
+       "maxItems": 5,
+       "items": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
      },
      "description": "how the app builds the name of a person from columns of the identity table, as the app shows it: steps in order (the first with content wins, a fallback), each step the columns joined with the separator of the app (first and last name); evidence = the places that show it; the generator writes it from the code, nothing is guessed; everydeck uses exactly this rule"
     },
@@ -928,8 +1018,21 @@
        "role": {
         "description": "the role string as the code checks it, or a list when the code accepts several roles",
         "oneOf": [
-         { "type": "string", "minLength": 1, "maxLength": 40 },
-         { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 40 } }
+         {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+         },
+         {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 40
+          }
+         }
         ]
        },
        "evidence": {
@@ -1091,6 +1194,15 @@
       "items": {
        "$ref": "#/$defs/shown"
       }
+     },
+     "purpose": {
+      "enum": [
+       "sign_up",
+       "sign_in",
+       "password_reset",
+       "payment"
+      ],
+      "description": "the flow is the app's sign-up, sign-in, password reset or payment: these are always flows when the app has them (flow_candidates with required)"
      }
     }
    }
@@ -1333,10 +1445,17 @@
    "items": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["table", "evidence"],
+    "required": [
+     "table",
+     "evidence"
+    ],
     "properties": {
-     "table": { "$ref": "#/$defs/name" },
-     "evidence": { "$ref": "#/$defs/evidence" }
+     "table": {
+      "$ref": "#/$defs/name"
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     }
     }
    },
    "description": "tables the everydeck installation added to the app (outbox, operator links, the request log of the app bridge) with the place that creates them: everydeck's own, never objects of the app; also tables in everydeck's schemas (everydeck_outbox, everydeck_read, everydeck_bridge) and tables defined in the file of an everydeck adapter"
@@ -1344,13 +1463,66 @@
   "display_ends": {
    "type": "array",
    "maxItems": 200,
-   "items": { "type": "object", "additionalProperties": false, "required": ["element", "path", "line", "fact"], "properties": { "element": { "enum": ["image", "link", "textarea", "long_text", "date"] }, "path": { "type": "string", "minLength": 1, "maxLength": 300 }, "line": { "type": "integer", "minimum": 1 }, "fact": { "type": "string", "minLength": 1, "maxLength": 300 } } },
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "element",
+     "path",
+     "line",
+     "fact"
+    ],
+    "properties": {
+     "element": {
+      "enum": [
+       "image",
+       "link",
+       "textarea",
+       "long_text",
+       "date"
+      ]
+     },
+     "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+     },
+     "line": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "fact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+     }
+    }
+   },
    "description": "places where the app shows a value as an image, link, textarea, text with line breaks or date, but the value cannot be followed back to a column; the fact says where the path ends (a call of a function, a property that is no column, a fixed value); the generator writes it, nothing is guessed"
   },
   "unreachable": {
    "type": "array",
    "maxItems": 500,
-   "items": { "type": "object", "additionalProperties": false, "required": ["path", "fact"], "properties": { "path": { "type": "string", "minLength": 1, "maxLength": 300 }, "fact": { "type": "string", "minLength": 1, "maxLength": 300 } } },
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "path",
+     "fact"
+    ],
+    "properties": {
+     "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+     },
+     "fact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+     }
+    }
+   },
    "description": "frontend files no entry of the app reaches through imports (entries from facts of the project: <script src> of an HTML file, route files of a framework the package.json names, package.json main): no page, no display location; the generator writes it, everydeck-check checks it with the same rule"
   },
   "works_with": {
@@ -1376,6 +1548,225 @@
     }
    },
    "description": "what the users of the app work with: the things they see, create or edit in the UI; one entry per table with the place in the UI (page or component, file:line); part_of names the table whose detail page shows it (CVs with the candidate, members with the workspace) and gets no menu item of its own. This list is the main navigation; every other table is under 'All data'. A description with evidence, no judgement: everydeck-check checks that the place exists and names the table (or carries a display location of the table)"
+  },
+  "flow_candidates": {
+   "type": "array",
+   "maxItems": 500,
+   "description": "written by the scaffold: every write of the browser to a table or an API route, every trigger of the app, every place the app signs people up or in, resets a password, opens a checkout or receives a payment webhook. Each one is a flow of the app map (result.write on its table, its place as the start, or the purpose) or carries left_out with the reason; required ones cannot be left out",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "source",
+     "kind",
+     "evidence"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+     },
+     "source": {
+      "enum": [
+       "browser_write",
+       "trigger",
+       "auth",
+       "payment"
+      ]
+     },
+     "kind": {
+      "enum": [
+       "insert",
+       "update",
+       "upsert",
+       "delete",
+       "request",
+       "sign_up",
+       "sign_in",
+       "password_reset",
+       "checkout",
+       "webhook"
+      ]
+     },
+     "table": {
+      "$ref": "#/$defs/name"
+     },
+     "route": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+     },
+     "handler": {
+      "$ref": "#/$defs/evidence"
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "required": {
+      "type": "boolean"
+     },
+     "left_out": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 300
+     }
+    }
+   }
+  },
+  "money": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "additionalProperties": false,
+   "required": [
+    "providers",
+    "tables"
+   ],
+   "description": "written by the scaffold: the payment provider with the places where the app talks to it, and the tables with money, each with its place; everydeck reads amounts only from the app's own data, never from the provider",
+   "properties": {
+    "providers": {
+     "type": "array",
+     "maxItems": 20,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "provider",
+       "evidence",
+       "calls"
+      ],
+      "properties": {
+       "provider": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+       },
+       "component": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       },
+       "calls": {
+        "type": "array",
+        "maxItems": 50,
+        "items": {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "kind",
+          "evidence"
+         ],
+         "properties": {
+          "kind": {
+           "enum": [
+            "checkout",
+            "webhook",
+            "subscription",
+            "customer",
+            "portal",
+            "api"
+           ]
+          },
+          "evidence": {
+           "$ref": "#/$defs/evidence"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "tables": {
+     "type": "array",
+     "maxItems": 200,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "table",
+       "because",
+       "evidence"
+      ],
+      "properties": {
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "because": {
+        "enum": [
+         "shown_as_money",
+         "provider_id",
+         "written_with_provider",
+         "used_with_provider"
+        ]
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       },
+       "columns": {
+        "type": "array",
+        "maxItems": 40,
+        "items": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 63
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "ai_calls": {
+   "type": "array",
+   "maxItems": 200,
+   "description": "written by the scaffold: AI clients and calls of the app (provider, place, the model where the code names it); everydeck counts numbers only, never prompts or answers",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "provider",
+     "kind",
+     "evidence"
+    ],
+    "properties": {
+     "provider": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+     },
+     "kind": {
+      "enum": [
+       "client",
+       "call"
+      ]
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence"
+     },
+     "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "value",
+       "evidence"
+      ],
+      "properties": {
+       "value": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     }
+    }
+   }
   }
  }
 }

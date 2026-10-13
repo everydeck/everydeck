@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Facts from Python files through the syntax tree (ast), for the Befund skeleton (befund-reads.mjs).
+"""Facts from Python files through the syntax tree (ast), for the app map scaffold (scaffold-reads.mjs).
 Reads per file: FastAPI/Starlette routers (APIRouter(prefix=…)), route decorators (@x.get("/path")) with their handler, include_router(…, prefix=…),
 imports (to resolve modules and functions), SQLAlchemy models (__tablename__) and per function the data accesses:
   .table("x") / .from_("x") / .from("x") (supabase-py), .rpc("fn"), SQL in strings (FROM/JOIN, without DELETE FROM), select(Model) /
   session.query(Model) / Model.query, plus all called names (so the skeleton can follow calls into other functions and modules).
-Usage: python3 befund-ast.py <repo> <file> [<file> …]   → JSON on stdout. Nothing is judged, nothing is written.
+Usage: python3 scaffold-ast.py <repo> <file> [<file> …]   → JSON on stdout. Nothing is judged, nothing is written.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def select_columns(s: str | None, base_line: int) -> list[dict] | str:
 
 
 def sql_columns(text: str, base_line: int) -> dict:
-    """Columns of an SQL query per table read: SELECT list up to FROM; identifiers with their line (checked against the Befund columns
+    """Columns of an SQL query per table read: SELECT list up to FROM; identifiers with their line (checked against the app map columns
     in the skeleton). "*" or "alias.*" = all columns. Simple queries only; anything ambiguous counts as a candidate for every table of the query."""
     out: dict = {}
     for m in re.finditer(r"\bselect\b([\s\S]*?)\bfrom\b([\s\S]*?)(?=\bwhere\b|\bgroup\b|\border\b|\blimit\b|;|\)|$)", text, re.I):

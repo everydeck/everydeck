@@ -1,11 +1,11 @@
-"""Befund (1.12-r0): the exact technical analysis of an app, facts with places, nothing judged.
+"""app map (1.12-r0): the exact technical analysis of an app, facts with places, nothing judged.
 
 everydeck-check checks here mechanically what everydeck cannot check, because everydeck does not see the repo:
   1. Shape (JSON schema) and references (tables, columns, functions, components, flows, checklist exactly once per block).
   2. Every place: the file exists, the line exists, and what is named (symbol, column, status value, pattern, package) is there
-     (in the line itself or at most three lines next to it). Without evidence or with wrong evidence the Befund is rejected, with the place.
+     (in the line itself or at most three lines next to it). Without evidence or with wrong evidence the app map is rejected, with the place.
   3. Completeness against the repo: every table/collection, every route and every provider package detected in the repo must be in the
-     Befund (tables[], screens[]/api_routes[], components[]); otherwise rejection with the name and the place. Nothing silently drops out.
+     app map (tables[], screens[]/api_routes[], components[]); otherwise rejection with the name and the place. Nothing silently drops out.
 No word lists about the app: what a table means, everydeck decides from the evidence (display location, place that sets it, foreign key).
 """
 from __future__ import annotations
@@ -30,11 +30,11 @@ ALEMBIC_OP = re.compile(r"""\bop\.(create_table|drop_table)\(\s*['"]([A-Za-z_]\w
 
 
 def _schema() -> dict[str, Any]:
-    with resources.files("everydeck_check").joinpath("schemas/befund.schema.json").open("r", encoding="utf-8") as f:
+    with resources.files("everydeck_check").joinpath("schemas/app-map.schema.json").open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def is_befund(doc: Any) -> bool:
+def is_app_map(doc: Any) -> bool:
     return isinstance(doc, dict) and doc.get("schema_version") == "1.12-r0" and "tables" in doc and "checklist" in doc
 
 
@@ -51,7 +51,7 @@ def schema_errors(b: dict[str, Any]) -> list[str]:
 
 
 def reference_errors(b: dict[str, Any]) -> list[str]:
-    """Mirror of befundReferenceErrors in the contracts: the same messages, locally before submitting."""
+    """Mirror of the reference check in the contracts: the same messages, locally before submitting."""
     errs: list[str] = []
     tables = {t["name"]: t for t in b.get("tables", [])}
     funcs = b.get("functions", []) or []
@@ -76,7 +76,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         at = f"tables[{i}] {t['name']}"
         if names.count(t["name"]) > 1: errs.append(f"{at}: duplicate table")
         for j, c in enumerate(t["columns"]):
-            if c.get("fk") and c["fk"]["table"] not in tables and c["fk"]["table"] != (b.get("identity") or {}).get("auth_table"): errs.append(f"{at}.columns[{j}] {c['name']}: fk table {c['fk']['table']} is not in the Befund")
+            if c.get("fk") and c["fk"]["table"] not in tables and c["fk"]["table"] != (b.get("identity") or {}).get("auth_table"): errs.append(f"{at}.columns[{j}] {c['name']}: fk table {c['fk']['table']} is not in the app map")
             if c.get("external_id") and c["external_id"]["component"] not in comps: errs.append(f"{at}.columns[{j}] {c['name']}: external_id component {c['external_id']['component']} is not in components")
         if t.get("status_column"):
             col(t["name"], t["status_column"], f"{at}.status_column")
@@ -92,7 +92,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         if fkeys.count(fkeys[i]) > 1: errs.append(f"{at}: duplicate function (same name in {f['evidence']['path']})")
         if f.get("requires", {}).get("kind") == "role" and not _roles(f["requires"]): errs.append(f"{at}: requires.kind role needs the role as the code names it")
         for ch in f.get("changes", []) or []:
-            if ch["table"] not in tables: errs.append(f"{at}: changes table {ch['table']} is not in the Befund")
+            if ch["table"] not in tables: errs.append(f"{at}: changes table {ch['table']} is not in the app map")
             col(ch["table"], ch.get("column"), f"{at}.changes")
             if "to" in ch and not ch.get("column"): errs.append(f"{at}: changes.to needs column")
         if f.get("provider_call") and f["provider_call"]["component"] not in comps: errs.append(f"{at}: provider_call component {f['provider_call']['component']} is not in components")
@@ -101,22 +101,32 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         at = f"flows[{i}] {f['id']}"
         if fids.count(f["id"]) > 1: errs.append(f"{at}: duplicate flow")
         w = f["result"].get("write")
-        if w and w["table"] not in tables: errs.append(f"{at}: result.write table {w['table']} is not in the Befund")
+        if w and w["table"] not in tables: errs.append(f"{at}: result.write table {w['table']} is not in the app map")
         if f["result"].get("provider") and f["result"]["provider"] not in comps: errs.append(f"{at}: result.provider {f['result']['provider']} is not in components")
         ends = {f"end:{e['id']}" for e in f.get("ends", []) or []}
         for s in f.get("signals", []) or []:
             if s["step"].startswith("end:") and s["step"] not in ends: errs.append(f"{at}: signal step {s['step']} names no end")
+    money = b.get("money") or {}
+    for i, m in enumerate(money.get("tables", []) or []):
+        if m["table"] not in tables: errs.append(f"money.tables[{i}] {m['table']}: table {m['table']} is not in the app map")
+        for c in m.get("columns", []) or []: col(m["table"], c, f"money.tables[{i}] {m['table']}")
+    for i, pv in enumerate(money.get("providers", []) or []):
+        if pv.get("component") and pv["component"] not in comps: errs.append(f"money.providers[{i}] {pv['provider']}: component {pv['component']} is not in components")
+    cids = [c["id"] for c in b.get("flow_candidates", []) or []]
+    for i, c in enumerate(b.get("flow_candidates", []) or []):
+        if c.get("table") and c["table"] not in tables: errs.append(f"flow_candidates[{i}] {c['id']}: table {c['table']} is not in the app map")
+        if cids.count(c["id"]) > 1: errs.append(f"flow_candidates[{i}] {c['id']}: listed twice")
     ident = b.get("identity")
     if ident:
-        if ident.get("table") and ident["table"] not in tables: errs.append(f"identity.table {ident['table']} is not in the Befund")
+        if ident.get("table") and ident["table"] not in tables: errs.append(f"identity.table {ident['table']} is not in the app map")
         for k, v in (ident.get("fields") or {}).items():
             if ident.get("table") and v: col(ident["table"], v["column"], f"identity.fields.{k}")
         if ident.get("suspend") and ident.get("table"): col(ident["table"], ident["suspend"]["column"], "identity.suspend")
         for s in (ident.get("suspend", {}).get("set_true_by"), ident.get("suspend", {}).get("set_false_by")):
             if s: fn_ref(s, "identity.suspend")
         for m in ident.get("memberships", []) or []:
-            if m["table"] not in tables: errs.append(f"identity.memberships: table {m['table']} is not in the Befund")
-            if m["org_table"] not in tables: errs.append(f"identity.memberships: org_table {m['org_table']} is not in the Befund")
+            if m["table"] not in tables: errs.append(f"identity.memberships: table {m['table']} is not in the app map")
+            if m["org_table"] not in tables: errs.append(f"identity.memberships: org_table {m['org_table']} is not in the app map")
     for k in ("email", "push"):
         ch = (b.get("channels") or {}).get(k)
         if ch and ch["component"] not in comps: errs.append(f"channels.{k}: component {ch['component']} is not in components")
@@ -125,7 +135,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         if pay["component"] not in comps: errs.append(f"payments.component {pay['component']} is not in components")
         for e in pay.get("events", []) or []:
             if e.get("sets"):
-                if e["sets"]["table"] not in tables: errs.append(f"payments.events {e['event']}: table {e['sets']['table']} is not in the Befund")
+                if e["sets"]["table"] not in tables: errs.append(f"payments.events {e['event']}: table {e['sets']['table']} is not in the app map")
                 col(e["sets"]["table"], e["sets"].get("column"), f"payments.events {e['event']}")
     seen: set[str] = set()
     for e in b.get("checklist", []):
@@ -135,32 +145,32 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         if e["present"] and not has: errs.append(f"checklist {e['block']}: present needs evidence (or tables/flows/functions)")
         if not e["present"] and has: errs.append(f"checklist {e['block']}: not present must carry no evidence")
         for t in e.get("tables", []) or []:
-            if t not in tables: errs.append(f"checklist {e['block']}: table {t} is not in the Befund")
+            if t not in tables: errs.append(f"checklist {e['block']}: table {t} is not in the app map")
         for f in e.get("flows", []) or []:
-            if f not in flows: errs.append(f"checklist {e['block']}: flow {f} is not in the Befund")
+            if f not in flows: errs.append(f"checklist {e['block']}: flow {f} is not in the app map")
         for f in e.get("functions", []) or []:
             fn_ref(f, f"checklist {e['block']}")
     for blk in BLOCKS:
         if blk not in seen: errs.append(f"checklist: block {blk} is missing; answer every block with present true (evidence) or false")
-    # everydeck_tables: tables the everydeck installation created; each must be in the Befund
+    # everydeck_tables: tables the everydeck installation created; each must be in the app map
     for i, y in enumerate(b.get("everydeck_tables") or []):
-        if y["table"] not in {t["name"] for t in b.get("tables", [])}: errs.append(f"everydeck_tables[{i}] {y['table']}: table {y['table']} is not in the Befund")
-    # a described screen names only tables and flows of the Befund (mirror of befundReferenceErrors)
+        if y["table"] not in {t["name"] for t in b.get("tables", [])}: errs.append(f"everydeck_tables[{i}] {y['table']}: table {y['table']} is not in the app map")
+    # a described screen names only tables and flows of the app map (mirror of the reference check in the contracts)
     for i, sc in enumerate(b.get("screens") or []):
         d = sc.get("described")
         if not d: continue
         at = f"screens[{i}] {sc['pattern']}.described"
         for t in d.get("works_with", []):
-            if t not in tables: errs.append(f"{at}: table {t} is not in the Befund")
+            if t not in tables: errs.append(f"{at}: table {t} is not in the app map")
         for f in d.get("flows", []):
             if f not in flows: errs.append(f"{at}: flow {f} is not in flows")
-    # works_with: what the users work with; each table once, part_of another table of the Befund
+    # works_with: what the users work with; each table once, part_of another table of the app map
     ww = b.get("works_with") or []
     for i, w in enumerate(ww):
         at = f"works_with[{i}] {w['table']}"
-        if w["table"] not in tables: errs.append(f"{at}: table {w['table']} is not in the Befund")
+        if w["table"] not in tables: errs.append(f"{at}: table {w['table']} is not in the app map")
         if sum(1 for x in ww if x["table"] == w["table"]) > 1: errs.append(f"{at}: listed twice")
-        if w.get("part_of") and w["part_of"] not in tables: errs.append(f"{at}: part_of {w['part_of']} is not in the Befund")
+        if w.get("part_of") and w["part_of"] not in tables: errs.append(f"{at}: part_of {w['part_of']} is not in the app map")
         if w.get("part_of") == w["table"]: errs.append(f"{at}: part_of names the table itself")
     if not any((s.get("step") == "result") for f in b.get("flows", []) for s in (f.get("signals") or [])):
         errs.append("flows: at least one flow needs a result signal (the code that reports the result to everydeck, with evidence)")
@@ -330,6 +340,18 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         _check_evidence(files, s["evidence"], f"screens[{i}] {s['pattern']}", [], errs)
     for i, r in enumerate(b.get("api_routes", []) or []):
         _check_evidence(files, r["evidence"], f"api_routes[{i}] {r['pattern']}", [], errs)
+    sym = lambda ev: [ev["symbol"]] if ev.get("symbol") else []
+    money = b.get("money") or {}
+    for i, pv in enumerate(money.get("providers", []) or []):
+        _check_evidence(files, pv["evidence"], f"money.providers[{i}] {pv['provider']}", sym(pv["evidence"]), errs)
+        for j, c in enumerate(pv.get("calls", []) or []): _check_evidence(files, c["evidence"], f"money.providers[{i}] {pv['provider']}.calls[{j}]", sym(c["evidence"]), errs)
+    for i, m in enumerate(money.get("tables", []) or []): _check_evidence(files, m["evidence"], f"money.tables[{i}] {m['table']}", sym(m["evidence"]), errs)
+    for i, a in enumerate(b.get("ai_calls", []) or []):
+        _check_evidence(files, a["evidence"], f"ai_calls[{i}] {a['provider']}", sym(a["evidence"]), errs)
+        if a.get("model"): _check_evidence(files, a["model"]["evidence"], f"ai_calls[{i}] {a['provider']}.model", [a["model"]["value"]], errs)
+    for i, c in enumerate(b.get("flow_candidates", []) or []):
+        _check_evidence(files, c["evidence"], f"flow_candidates[{i}] {c['id']}", [c["evidence"]["symbol"]] if c["evidence"].get("symbol") else [], errs)
+        if c.get("handler"): _check_evidence(files, c["handler"], f"flow_candidates[{i}] {c['id']}.handler", [], errs)
     ident = b.get("identity")
     if ident:
         _check_evidence(files, ident["evidence"], "identity", [], errs)
@@ -537,7 +559,7 @@ _REACH: dict[str, dict[str, Any]] = {}
 
 
 def app_reach(repo: Path) -> dict[str, Any]:
-    """Reachability from the entry of the app; the same rule as the Befund skeleton (rule reachable)."""
+    """Reachability from the entry of the app; the same rule as the app map scaffold (rule reachable)."""
     key = str(repo.resolve())
     if key not in _REACH:
         from .rules import RulesUnavailable, run_rule
@@ -578,7 +600,7 @@ def reachability_errors(b: dict[str, Any], repo: Path) -> list[str]:
 
 def detect_frontend_reads(repo: Path, tables: set[str]) -> dict[str, str]:
     """Every table the frontend reads, with its first place: directly (supabase.from, Firestore, ORM) or through an API route
-    whose handler reads it. Such a table needs a display location in the Befund; otherwise it wrongly counts as technical data."""
+    whose handler reads it. Such a table needs a display location in the app map; otherwise it wrongly counts as technical data."""
     lower = {t.lower(): t for t in tables}
     key = lambda n: lower.get(n.lower())
     route_tables: dict[str, set[str]] = {}
@@ -619,15 +641,91 @@ def detect_frontend_reads(repo: Path, tables: set[str]) -> dict[str, str]:
     return out
 
 
+AUTH_CALLS = [
+    ("sign_up", "signs people up", re.compile(r"""\.auth\.signUp\s*\(|\bcreateUserWithEmailAndPassword\s*\(|\buseSignUp\s*\(|<SignUp\b|\.auth\.sign_up\s*\(""")),
+    ("sign_in", "signs people in", re.compile(r"""\.auth\.(?:signIn(?:WithPassword|WithOtp|WithOAuth|WithIdToken|WithSSO)?|verifyOtp)\s*\(|\bsignInWith(?:EmailAndPassword|Popup|Redirect|EmailLink|PhoneNumber|Credential)\s*\(|\buseSignIn\s*\(|<SignIn\b|\.auth\.(?:sign_in_with_(?:password|otp|oauth|id_token)|verify_otp)\s*\(|\bsignIn\s*\(\s*['"]""")),
+    ("password_reset", "resets a password", re.compile(r"""\.auth\.resetPasswordForEmail\s*\(|\bsendPasswordResetEmail\s*\(|\.auth\.reset_password_(?:email|for_email)\s*\(""")),
+]
+FRONTEND_WRITE = re.compile(r"""\.from\(\s*['"`]([A-Za-z_]\w*)['"`]\s*(?:as\s+\w+\s*)?\)""")
+
+
+def flow_candidate_errors(b: dict[str, Any], repo: Path) -> list[str]:
+    """The independent cross-check of the flow candidates: every write of the frontend to a table (Supabase .from('x').insert/update/upsert/delete)
+    and every place the code signs people up or in or resets a password is a candidate of the app map (described or left out with its reason)
+    or a flow describes it. What the candidates themselves need (a flow or left_out) checks everydeck's bundled rule."""
+    errs: list[str] = []
+    tables = {t["name"].lower(): t["name"] for t in b.get("tables", [])}
+    cands = {c["id"] for c in b.get("flow_candidates", []) or []}
+    flows = b.get("flows", []) or []
+    near = lambda ev, path, line: ev["path"] == path and abs(int(ev["line"]) - line) <= LINE_SLACK
+    def described(table: str | None, kind: str | None, path: str, line: int, purpose: str | None = None) -> bool:
+        if purpose: return any(f.get("purpose") == purpose for f in flows)   # a sign-up/sign-in/reset place counts only as a flow with that purpose
+        for f in flows:
+            w = f["result"].get("write")
+            if table and w and w["table"] == table and (kind in (w["kind"], "upsert") or w["kind"] == "upsert"): return True
+            if near(f["start"], path, line) or near(f["result"]["evidence"], path, line): return True
+        return False
+    reach = app_reach(repo); reachable = set(reach.get("reachable", [])) if not reach.get("errors") else None
+    seen: set[str] = set()
+    for rel, text in _files_of(repo, {".tsx", ".jsx", ".vue", ".svelte", ".ts", ".js", ".mjs", ".py"}):
+        r = rel.as_posix()
+        if re.search(r"(^|/)(tests?|__tests__|e2e|cypress)/|\.(test|spec|d)\.[tj]sx?$|(^|/)test_[^/]*\.py$", r): continue
+        if reachable is not None and _is_frontend(rel) and r not in reachable: continue
+        line_of = lambda pos: text.count("\n", 0, pos) + 1
+        if _is_frontend(rel):
+            for m in FRONTEND_WRITE.finditer(text):
+                t = tables.get(m.group(1).lower()); w = WRITE_CHAIN.search(text[m.end():m.end() + 400].split(";")[0])
+                if not t or not w: continue
+                kind = w.group(1); cid = f"browser_write:{kind}:{t}"; ln = line_of(m.start())
+                if cid in cands or cid in seen or described(t, kind, r, ln): continue
+                seen.add(cid); errs.append(f"flow_candidates: the frontend writes {t} ({kind}) at {r}:{ln} but the app map lists no candidate {cid} and no flow describes it; rerun the scaffold with --merge")
+        for i, line in enumerate(text.split("\n")):
+            if re.match(r"^\s*(//|#|\*)", line): continue
+            for kind, verb, re_ in AUTH_CALLS:
+                cid = f"auth:{kind}"
+                if re_.search(line) and cid not in cands and cid not in seen and not described(None, None, r, i + 1, kind):
+                    seen.add(cid); errs.append(f"flow_candidates: the code {verb} at {r}:{i + 1} but the app map lists no candidate {cid} and no flow with purpose {kind}; rerun the scaffold with --merge")
+    return errs
+
+
+AI_CALL = re.compile(r"""\.(chat\.completions\.create|chat\.completions\.parse|responses\.create|embeddings\.create|messages\.create|generateContent|generate_content)\s*\(""")
+PAY_CALL = [("checkout", "opens a checkout", re.compile(r"""\b(stripe\.checkout\.(?:sessions|Session)\.create|stripe\.PaymentIntent\.create|stripe\.paymentIntents\.create|Paddle\.Checkout\.open|Purchases\.purchase(?:Package|Product|StoreProduct))\s*\(""")),
+            ("webhook", "receives the payment provider's webhook", re.compile(r"""\b(stripe\.webhooks\.constructEvent(?:Async)?|stripe\.Webhook\.construct_event)\s*\("""))]
+
+
+def money_ai_errors(b: dict[str, Any], repo: Path) -> list[str]:
+    """The independent cross-check of money and AI: every AI call (OpenAI-compatible, Anthropic, Google) and every checkout or webhook of a payment provider
+    that everydeck-check finds in the code is in the app map (ai_calls, money.providers[].calls) at that place (± 3 lines). Anthropic's messages.create
+    counts only in a file that names anthropic."""
+    errs: list[str] = []
+    ai = [(a["evidence"]["path"], int(a["evidence"]["line"])) for a in b.get("ai_calls", []) or []]
+    pay = [(c["evidence"]["path"], int(c["evidence"]["line"])) for pv in ((b.get("money") or {}).get("providers") or []) for c in pv.get("calls", []) or []]
+    has = lambda xs, r, ln: any(p == r and abs(l - ln) <= LINE_SLACK for p, l in xs)
+    for rel, text in _files_of(repo, {".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"}):
+        r = rel.as_posix()
+        if re.search(r"(^|/)(tests?|__tests__|e2e|cypress)/|\.(test|spec|d)\.[tj]sx?$|(^|/)test_[^/]*\.py$", r): continue
+        for i, line in enumerate(text.split("\n")):
+            if re.match(r"^\s*(//|#|\*)", line): continue
+            m = AI_CALL.search(line)
+            if m and not (m.group(1) == "messages.create" and not re.search(r"anthropic", text, re.I)) and not has(ai, r, i + 1):
+                errs.append(f"ai_calls: the code calls an AI model ({m.group(1)}) at {r}:{i + 1} but the app map has no ai_calls entry there; rerun the scaffold with --merge")
+            for kind, verb, re_ in PAY_CALL:
+                p = re_.search(line)
+                if p and not has(pay, r, i + 1): errs.append(f"money: the code {verb} ({p.group(1)}) at {r}:{i + 1} but money.providers names no call there; rerun the scaffold with --merge")
+    return errs[:50]
+
+
 def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
     errs: list[str] = []
+    errs += flow_candidate_errors(b, repo)
+    errs += money_ai_errors(b, repo)
     declared_tables = {t["name"] for t in b.get("tables", [])}
     for name, where in detect_tables(repo).items():
-        if name not in declared_tables: errs.append(f"tables[]: {where} is not in the Befund; add it with its columns, or it is lost silently")
+        if name not in declared_tables: errs.append(f"tables[]: {where} is not in the app map; add it with its columns, or it is lost silently")
     # if the frontend reads a table, it needs a display location (shown on the table or a column); otherwise rejection
     shown = {t["name"] for t in b.get("tables", []) if t.get("shown") or any(c.get("shown") for c in t.get("columns", []))}
     for name, where in detect_frontend_reads(repo, declared_tables).items():
-        if name not in shown: errs.append(f"tables[] {name}: the frontend reads this table at {where} but the Befund has no display location (shown) for it; add the place, or it counts as technical data wrongly")
+        if name not in shown: errs.append(f"tables[] {name}: the frontend reads this table at {where} but the app map has no display location (shown) for it; add the place, or it counts as technical data wrongly")
     # cross-check, independent of the skeleton's detection: every mention of a table without a display location in a string
     # of the frontend needs a documented reason (not_shown with file and line ± 3); otherwise rejection with the place
     not_shown = {t["name"]: t.get("not_shown") or [] for t in b.get("tables", [])}
@@ -637,15 +735,15 @@ def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
         key = (m["table"], f"{m['path']}:{m['line']}")
         if key in seen_open: continue
         seen_open.add(key)
-        errs.append(f"tables[] {m['table']}: the frontend names this table at {m['path']}:{m['line']} ({m['text'][:60]!r}) but the Befund has neither a display location (shown) nor a fact about the place (not_shown) for it; add the place with what it is (write, label, route of a write request, module no screen imports)")
+        errs.append(f"tables[] {m['table']}: the frontend names this table at {m['path']}:{m['line']} ({m['text'][:60]!r}) but the app map has neither a display location (shown) nor a fact about the place (not_shown) for it; add the place with what it is (write, label, route of a write request, module no screen imports)")
     errs += reachability_errors(b, repo)
     errs += exposure_errors(repo)
     declared_routes = {r["pattern"].rstrip("/") or "/" for r in (b.get("api_routes") or [])} | {s["pattern"].rstrip("/") or "/" for s in (b.get("screens") or [])}
-    for pat, where in detect_routes(repo).items():   # a Befund may carry the full pattern (router prefix + include_router prefix + path); the place here is only the decorator's path
-        if pat not in declared_routes and not any(d.endswith(pat) and pat != "/" for d in declared_routes): errs.append(f"api_routes[]: {where} is not in the Befund (pattern {pat})")
+    for pat, where in detect_routes(repo).items():   # an app map may carry the full pattern (router prefix + include_router prefix + path); the place here is only the decorator's path
+        if pat not in declared_routes and not any(d.endswith(pat) and pat != "/" for d in declared_routes): errs.append(f"api_routes[]: {where} is not in the app map (pattern {pat})")
     declared_pkgs = {c["package"].lower() for c in (b.get("components") or [])}
     for name, where in detect_providers(repo).items():
-        if name.lower() not in declared_pkgs: errs.append(f"components[]: {where} is not in the Befund")
+        if name.lower() not in declared_pkgs: errs.append(f"components[]: {where} is not in the app map")
     return errs
 
 
@@ -683,16 +781,16 @@ def database_tables(url: str) -> set[str]:
 
 
 def database_errors(b: dict[str, Any], db: set[str]) -> list[str]:
-    """Every table of the database is in the Befund (otherwise it drops out silently); everydeck's own schemas do not count."""
+    """Every table of the database is in the app map (otherwise it drops out silently); everydeck's own schemas do not count."""
     declared = {(t.get("schema") or "public") + "." + t["name"] for t in b.get("tables", [])}
     everydeck = {"everydeck", "everydeck_outbox", "everydeck_bridge"}
-    return [f"tables[]: {t} is in the database but not in the Befund; add it with its columns (the generator reads it with --db)" for t in sorted(db) if t not in declared and t.split(".")[0] not in everydeck]
+    return [f"tables[]: {t} is in the database but not in the app map; add it with its columns (the generator reads it with --db)" for t in sorted(db) if t not in declared and t.split(".")[0] not in everydeck]
 
 
 # ── Copies of contact data and messages. If an SQL function of the app (trigger: NEW./OLD., local variables from them;
 #    INSERT … SELECT from the table itself) writes a value documented as contact (also shortened or transformed) into another column, everydeck-check
 #    requires the same fact there. Final state of the migrations in file order (CREATE OR REPLACE: the last version, DROP FUNCTION/TRIGGER remove). The same
-#    rule as the skeleton (befund-skeleton.mjs), separate implementation.
+#    rule as the skeleton (scaffold.mjs), separate implementation.
 _FN_DEF = re.compile(r'create\s+(?:or\s+replace\s+)?function\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(', re.I)
 _FN_DROP = re.compile(r'drop\s+function\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?', re.I)
 _TRG_DEF = re.compile(r'create\s+(?:or\s+replace\s+)?trigger\s+"?(\w+)"?\s+(?:before|after|instead\s+of)\s+[\s\S]*?\bon\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?[\s\S]*?execute\s+(?:function|procedure)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?', re.I)
@@ -830,19 +928,19 @@ def contact_copy_errors(b: dict[str, Any], repo: Path) -> list[str]:
     for (tn, cn), (kind, src, fn, ln, rel) in sorted(need.items()):
         c = next(x for x in tables[tn]["columns"] if x["name"] == cn)
         if not c.get("contact"):
-            errs.append(f'tables[] {tn}.{cn}: function {fn} copies {src} ({kind}) into it at {rel}:{ln}; add columns[].contact {{ "kind": "{kind}", "evidence": {{ "path": "{rel}", "line": {ln} }} }} (npx everydeck-scaffold . --merge everydeck/everydeck-befund.json writes it); everydeck never reads it then')
+            errs.append(f'tables[] {tn}.{cn}: function {fn} copies {src} ({kind}) into it at {rel}:{ln}; add columns[].contact {{ "kind": "{kind}", "evidence": {{ "path": "{rel}", "line": {ln} }} }} (npx everydeck-scaffold . --merge everydeck/app-map.json writes it); everydeck never reads it then')
     return errs
 
 
-def validate_befund(doc: dict[str, Any], repo: Path | None, db: str | None = None) -> list[str]:
+def validate_app_map(doc: dict[str, Any], repo: Path | None, db: str | None = None) -> list[str]:
     global DB_TABLES
     errs = schema_errors(doc)
     if errs: return errs
     errs = reference_errors(doc)
-    # the same check as everydeck on submission (checkBefund, bundled), derivation and derived manifest included
+    # the same check as everydeck on submission (bundled), derivation and derived manifest included
     if not errs:
-        from .rules import befund_rule_errors
-        errs = befund_rule_errors(doc)
+        from .rules import app_map_rule_errors
+        errs = app_map_rule_errors(doc)
     if db and not errs:
         try: DB_TABLES = database_tables(db)
         except RuntimeError as e: return [f"--db: {e}"]
@@ -853,7 +951,7 @@ def validate_befund(doc: dict[str, Any], repo: Path | None, db: str | None = Non
 
 
 def drift_manifest(b: dict[str, Any]) -> dict[str, Any]:
-    """For `everydeck-check drift`: the signals, screens, routes and jobs of the Befund in the form the drift comparison knows (no derivation)."""
+    """For `everydeck-check drift`: the signals, screens, routes and jobs of the app map in the form the drift comparison knows (no derivation)."""
     signals = [{"name": s["name"], "capability_id": f["id"], "label": s["name"], "allowed_source": "server", "location": {"path": s["evidence"]["path"], "symbol": s["evidence"].get("symbol") or s["name"], "commit": b["commit"]}}
                for f in b.get("flows", []) for s in (f.get("signals") or [])]
     return {"schema_version": "1.11-r0", "release_key": b.get("release_key", ""), "capabilities": [{"id": f["id"], "label": f["id"], "kind": "flow", "observation": "instrumented" if f.get("signals") else "proposed"} for f in b.get("flows", [])],

@@ -1,6 +1,6 @@
 /**
  * @everydeck/sdk: the generic read bridge: one endpoint per declared table, declared columns only,
- * with a cursor. The agent no longer writes a bridge per app: it fetches the read scope (`everydeck/everydeck-read-scope.json`, derived from the Befund) and
+ * with a cursor. The agent no longer writes a bridge per app: it fetches the read scope (`everydeck/everydeck-read-scope.json`, derived from the app map) and
  * passes a function `rows` that reads rows from the app's database, through a dedicated reader role (SELECT only). `pgRows(client)` is the
  * ready-made version for `pg` or `postgres` (any client with `query(text, values)`); `pgRights(client, scope)` checks the actual
  * rights of that role at startup (superuser, INSERT/UPDATE/DELETE per table), and the bridge reports them in `rights` instead of claiming them.

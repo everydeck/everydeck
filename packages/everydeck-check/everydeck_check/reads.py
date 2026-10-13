@@ -1,9 +1,9 @@
-"""The independent cross-check of the Befund's display locations.
+"""The independent cross-check of the app map's display locations.
 
-The skeleton (befund-skeleton.mjs) reads data access through the syntax tree. everydeck-check does NOT check with the same detection, but
+The skeleton (scaffold.mjs) reads data access through the syntax tree. everydeck-check does NOT check with the same detection, but
 with its own, deliberately simple string scanner: every table name that appears as a word in a string of a frontend source file
 (without type files, tests and comments) needs either a display location of the table (shown on the table or a column) or a
-documented reason in the Befund (tables[].not_shown[] with file and line). Otherwise the Befund is rejected, with the place.
+documented reason in the app map (tables[].not_shown[] with file and line). Otherwise the app map is rejected, with the place.
 
 Frontend source file (the same definition as in the skeleton, so both sides mean the same): no backend folders (backend, server, api, functions,
 supabase, migrations, scripts, prisma, db, database, test…), no test or type files, .tsx/.jsx/.vue/.svelte everywhere, .ts/.js/.mjs only in
@@ -180,7 +180,7 @@ def frontend_mentions(repo: Path, tables: set[str]) -> list[dict]:
 
 
 def reads_table(b: dict, repo: Path) -> list[dict]:
-    """The cross-check as a table, per table of the Befund: found in the frontend (places), placement (main navigation with access path / technical with reason), evidence.
+    """The cross-check as a table, per table of the app map: found in the frontend (places), placement (main navigation with access path / technical with reason), evidence.
     A row without evidence is open: a mention covered by neither shown nor not_shown."""
     tables = {t["name"]: t for t in b.get("tables", [])}
     mentions = frontend_mentions(repo, set(tables))

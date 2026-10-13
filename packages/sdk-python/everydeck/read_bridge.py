@@ -1,7 +1,7 @@
 """The general read bridge: Python version of the TypeScript SDK (read-bridge.ts), same behavior.
 
 One endpoint per declared table, only declared columns, with a cursor. The agent writes no bridge per app: it takes the read scope
-(`everydeck/everydeck-read-scope.json`, derived from the Befund) and passes a function `rows(table, columns, keys, after, limit)` that reads rows from
+(`everydeck/everydeck-read-scope.json`, derived from the app map) and passes a function `rows(table, columns, keys, after, limit)` that reads rows from
 the app's database through a dedicated reader role (SELECT only). `psycopg_rows(conn)` is the ready-made version for psycopg (2 or 3).
 
     bridge = ReadBridge(scope=json.load(open("everydeck/everydeck-read-scope.json")), token=os.environ["EVERYDECK_READ_BRIDGE_TOKEN"], rows=psycopg_rows(conn))
