@@ -50,6 +50,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.4.3
+
+- **Outbox templates are safe for live databases.** If a capture fails (a wrong trigger argument, a check of the outbox table), the app's own write still goes through; a row lands in `everydeck_outbox.capture_error` instead (signal, table, SQLSTATE and time only; no error text, since it can carry column values). The trigger template uses `CREATE OR REPLACE TRIGGER` and the Supabase schedule no longer calls `cron.unschedule`: applying them again replaces, nothing is dropped (PostgreSQL 14+, pg_cron 1.3+).
+
 ## 0.4.2
 
 - **The outbox relay keeps Supabase's JWT check.** The schedule calls the function with the app's public key as `apikey` (a legacy anon key also as `Authorization: Bearer`), the way Supabase schedules Edge Functions, and sends the invoke token in the header `x-everydeck-invoke-token`. A fourth Vault secret holds the public key: `everydeck_outbox_gateway_key`. No `verify_jwt = false`, no `--no-verify-jwt`. Schedules written for 0.4.1 and earlier keep working with the new handler.

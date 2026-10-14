@@ -4,7 +4,7 @@ The packages an app uses to connect to [everydeck](https://everydeck.ai). Licens
 
 | Package | Registry | Folder | Install |
 |---|---|---|---|
-| `@everydeck/sdk` 0.4.2 | npm | `packages/sdk` | `npm install @everydeck/sdk` |
+| `@everydeck/sdk` 0.4.3 | npm | `packages/sdk` | `npm install @everydeck/sdk` |
 | `@everydeck/check` 0.3.1 (program `everydeck-scaffold`) | npm | `packages/check` | `npx @everydeck/check@0.3.1 . --out everydeck/app-map.json` |
 | `everydeck` 0.4.0 | PyPI | `packages/sdk-python` | `pip install everydeck` |
 | `everydeck-check` 0.3.1 | PyPI | `packages/everydeck-check` | `pip install everydeck-check` |
@@ -17,4 +17,4 @@ A tag `v*` runs `.github/workflows/release.yml`: it builds the four packages and
 
 ## Where the code comes from
 
-This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit 315815ae1d5d). Change the code there, run the script, commit the result here.
+This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit 62841f8db4c2). Change the code there, run the script, commit the result here.

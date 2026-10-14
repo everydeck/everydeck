@@ -49,6 +49,22 @@ END $$;
 --     everydeck needs a run for every result signal, a row without one would be rejected and stay in the outbox
 --   3 person column (subject_ref, e.g. 'assignee_id' or 'user_id')      4 account column (account_ref, '' if none)
 --   5 object type (as declared, e.g. 'work_order')                      6 object ref column (e.g. 'id')
+-- A capture that fails (a wrong argument, a check of the outbox table) never breaks the app's own write. A row goes to capture_error instead
+-- (signal, table, SQLSTATE and time; no error text, which can carry column values), so a missing result is visible, not silent.
+CREATE TABLE IF NOT EXISTS everydeck_outbox.capture_error (
+  id          bigserial PRIMARY KEY,
+  signal      text,
+  table_name  text NOT NULL,
+  sqlstate    text NOT NULL,
+  occurred_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE everydeck_outbox.capture_error ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON everydeck_outbox.capture_error FROM PUBLIC;
+REVOKE ALL ON SEQUENCE everydeck_outbox.capture_error_id_seq FROM PUBLIC;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN EXECUTE 'REVOKE ALL ON everydeck_outbox.capture_error FROM anon, authenticated'; END IF;
+END $$;
+
 -- SECURITY DEFINER: the browser's database role may write the business row; it never gets rights on the outbox itself.
 CREATE OR REPLACE FUNCTION everydeck_outbox.capture() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -76,6 +92,14 @@ BEGIN
     CASE WHEN nullif(TG_ARGV[6], '') IS NULL THEN NULL ELSE left(nullif(r ->> TG_ARGV[6], ''), 128) END,
     pf
   );
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  -- never fail the app's write: record what failed (no column values) and go on
+  BEGIN
+    INSERT INTO everydeck_outbox.capture_error (signal, table_name, sqlstate)
+    VALUES (left(CASE WHEN TG_NARGS > 0 THEN TG_ARGV[0] END, 96), TG_TABLE_NAME, SQLSTATE);
+  EXCEPTION WHEN OTHERS THEN NULL;
+  END;
   RETURN NULL;
 END $$;
 REVOKE ALL ON FUNCTION everydeck_outbox.capture() FROM PUBLIC;

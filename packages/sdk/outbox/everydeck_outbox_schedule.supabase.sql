@@ -15,10 +15,10 @@
 -- Without the URL or the public key the scheduled call does nothing and the job heartbeat stays away; everydeck reports
 -- "job has not reported" after two periods, so a missing secret is visible, not silent.
 
+-- Only adds: cron.schedule with the name of an existing job replaces that job (pg_cron 1.3+), so applying this again needs no unschedule.
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 
-SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'everydeck-outbox-relay';
 SELECT cron.schedule('everydeck-outbox-relay', '* * * * *', $cron$
   SELECT net.http_post(
     url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_relay_url'),
@@ -34,7 +34,6 @@ SELECT cron.schedule('everydeck-outbox-relay', '* * * * *', $cron$
 $cron$);
 
 -- the short schedule: every 5 seconds, only while rows wait (one cheap query, no call otherwise), without the job heartbeat.
-SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'everydeck-outbox-relay-fast';
 SELECT cron.schedule('everydeck-outbox-relay-fast', '5 seconds', $cron$
   SELECT net.http_post(
     url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_relay_url'),
