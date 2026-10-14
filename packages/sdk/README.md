@@ -50,6 +50,11 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.4.4
+
+- **Settings of a server of its own from the Supabase project.** `everydeckFromSupabase(supabaseAdmin, { instanceId: 'api' })` reads endpoint, server key and manifest digest once from `public.everydeck_server_config()` through the server's Supabase client created with the service key, so nothing has to be copied into the hosting dashboard (Render, Railway, Fly, Vercel). `serverConfigFromSupabase(client)` returns the three values. When `EVERYDECK_ENDPOINT`, `EVERYDECK_SERVER_KEY` and `EVERYDECK_MANIFEST_DIGEST` are all set, they win. If the call fails, the client is switched off with a warning that names the function, never a value. Release key `auto` (the commit the host sets).
+- **`outbox/everydeck_server_config.supabase.sql`**: the function, `SECURITY DEFINER` with an empty `search_path`, reading three Vault secrets (`everydeck_endpoint`, `everydeck_ingest_key`, `everydeck_manifest_digest`). Supabase grants `EXECUTE` on new functions in `public` to `anon` and `authenticated` by default privileges; the file revokes it from `PUBLIC`, `anon` and `authenticated` and grants it to `service_role` only.
+
 ## 0.4.3
 
 - **Outbox templates are safe for live databases.** If a capture fails (a wrong trigger argument, a check of the outbox table), the app's own write still goes through; a row lands in `everydeck_outbox.capture_error` instead (signal, table, SQLSTATE and time only; no error text, since it can carry column values). The trigger template uses `CREATE OR REPLACE TRIGGER` and the Supabase schedule no longer calls `cron.unschedule`: applying them again replaces, nothing is dropped (PostgreSQL 14+, pg_cron 1.3+).

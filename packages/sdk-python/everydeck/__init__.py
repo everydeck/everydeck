@@ -48,7 +48,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-__all__ = ["Everydeck", "AfterCommit", "SCHEMA_VERSION", "BATCH_MAX", "error_class_of", "scrub_text", "answer_of"]
+__all__ = ["Everydeck", "AfterCommit", "SCHEMA_VERSION", "BATCH_MAX", "error_class_of", "scrub_text", "answer_of", "server_config_from_supabase"]
 
 SCHEMA_VERSION = "1.3-r0"
 # origin of every event: a server key always reports the platform `server`
@@ -721,6 +721,40 @@ class Everydeck:
             self._warn_cb(msg)
         except Exception:
             pass
+
+    @classmethod
+    def from_supabase(cls, client: Any, *, release_key: str = "auto", on_warning: Callable[[str], None] | None = None, **kwargs: Any) -> "Everydeck":
+        """A client for a server of its own next to a hosted Supabase project: endpoint, server key and manifest digest come from
+        public.everydeck_server_config() through the Supabase client the server already has (service key), unless all three
+        environment variables are set. Release key "auto" (the commit the host sets, e.g. RENDER_GIT_COMMIT). If the call fails, the
+        client is switched off with a warning that names the function and never a value; the app works unchanged.
+        """
+        warn = on_warning or (lambda m: _log.warning(m))
+        try:
+            cfg = server_config_from_supabase(client)
+        except Exception as e:
+            warn(f"everydeck: disabled: could not read public.everydeck_server_config() ({type(e).__name__}); nothing is sent to everydeck")
+            cfg = {"endpoint": "", "server_key": "", "manifest_digest": ""}
+        return cls(cfg.get("endpoint") or "", cfg.get("server_key") or "", release_key=release_key,
+                   manifest_digest=cfg.get("manifest_digest") or "", on_warning=warn, **kwargs)
+
+
+_CONFIG_ENV = (("endpoint", "EVERYDECK_ENDPOINT"), ("server_key", "EVERYDECK_SERVER_KEY"), ("manifest_digest", "EVERYDECK_MANIFEST_DIGEST"))
+
+
+def server_config_from_supabase(client: Any) -> dict[str, Any]:
+    """everydeck settings of a server of its own: the three environment variables when all are set, else one call of
+    public.everydeck_server_config() with the server's Supabase client (supabase-py; only service_role may call it).
+    Returns endpoint, server_key and manifest_digest (a value may be None before everydeck wrote it). Raises when the call fails."""
+    env = {k: os.environ.get(v, "") for k, v in _CONFIG_ENV}
+    if all(env.values()):
+        return env
+    data = client.rpc("everydeck_server_config").execute().data
+    if isinstance(data, list):
+        data = data[0] if data else None
+    if not isinstance(data, dict):
+        raise ValueError("everydeck_server_config returned no object")
+    return {k: data.get(k) for k, _ in _CONFIG_ENV}
 
 
 def _safe_id(line: str) -> str | None:
