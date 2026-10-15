@@ -1598,6 +1598,11 @@
       "minLength": 1,
       "maxLength": 300
      },
+     "redirect": {
+      "type": "string",
+      "pattern": "^/[A-Za-z0-9/_.-]{0,200}$",
+      "description": "password_reset with Supabase Auth: the page of the app for a new password (redirectTo in the code), a path only"
+     },
      "handler": {
       "$ref": "#/$defs/evidence"
      },

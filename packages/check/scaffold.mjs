@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join, relative, dirname } from 'node:path';
 import { analyseReads } from './scaffold-reads.mjs';
 import { findIcon } from './scaffold-icon.mjs';
-import { profileTables, shownNameColumn } from './rules/everydeck-rules.mjs';
+import { detectPeople } from './rules/everydeck-rules.mjs';
 
 const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: scaffold.mjs <repo> [--db <url>] [--out file] [--merge file]'); process.exit(2); }
 const opt = (k) => (args.includes(k) ? args[args.indexOf(k) + 1] : null);
@@ -40,6 +40,7 @@ function parseColumns(body, file, baseLine, t) {
   for (const raw of parts) {
     const nl = (raw.match(/\n/g) ?? []).length; const def = raw.trim(); const firstLine = line + (raw.slice(0, raw.search(/\S/)).match(/\n/g) ?? []).length; line += nl;
     if (!def || /^(constraint|primary\s+key|unique|foreign\s+key|check|exclude|index)\b/i.test(def)) {
+      const pkLine = /^(?:constraint\s+"?\w+"?\s+)?primary\s+key\s*\(([^)]*)\)/i.exec(def); if (pkLine) { const cols = pkLine[1].split(',').map((x) => x.trim().replace(/"/g, '')); for (const c of t.columns) if (cols.includes(c.name)) { c.pk = true; delete c.nullable; } }   // PRIMARY KEY (a, b) as a line of the table
       const chk = /check\s*\(\s*"?([a-z_]\w*)"?\s+in\s*\(([^)]*)\)/i.exec(raw); if (chk) applyEnum(t, chk[1], chk[2], file, firstLine + (raw.slice(0, chk.index).match(/\n/g) ?? []).length);
       continue;
     }
@@ -96,6 +97,12 @@ for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
     for (const part of m[2].split(/,\s*(?=add\s+)/i)) { const c = /add\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?"?([A-Za-z_]\w*)"?\s+(.+)$/is.exec(part.trim()); if (!c || /^constraint$/i.test(c[1]) || t.columns.some((x) => x.name === c[1])) continue; parseColumns(`${c[1]} ${c[2].replace(/,\s*$/, '')}`, f, lineOf(src, m.index + m[0].indexOf(part)), t); }
   }
   for (const m of src.matchAll(/alter\s+table\s+(?:only\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+add\s+constraint\s+\w+\s+check\s*\(\s*"?(\w+)"?\s+in\s*\(([^)]*)\)/gi)) { const t = tables.get(m[1]); if (t) applyEnum(t, m[2], m[3], f, lineOf(src, m.index + m[0].indexOf(m[3]))); }
+  // Keys added after the table (pg_dump style): ALTER TABLE [ONLY] x ADD [CONSTRAINT name] PRIMARY KEY (…) / FOREIGN KEY (col) REFERENCES schema.table(col)
+  for (const m of src.matchAll(/alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+add\s+(?:constraint\s+"?\w+"?\s+)?(primary\s+key|foreign\s+key)\s*\(([^)]*)\)(?:\s*references\s+(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s*(?:\(\s*"?([A-Za-z_]\w*)"?\s*\))?)?/gi)) {
+    const t = tables.get(m[1]); if (!t) continue; const cols = m[3].split(',').map((x) => x.trim().replace(/"/g, ''));
+    if (/^primary/i.test(m[2])) { for (const c of t.columns) if (cols.includes(c.name)) { c.pk = true; delete c.nullable; } }
+    else if (cols.length === 1 && m[5]) { const c = t.columns.find((x) => x.name === cols[0]); if (c) c.fk = { table: qualified(m[4], m[5]), ...(m[6] ? { column: m[6] } : {}) }; }
+  }
 }
 // ── Change column: a column the database sets on every change, through a BEFORE UPDATE trigger whose function sets NEW.column = now()
 //    or is moddatetime('column'). Fact with a place (columns[].updated); the read scope gets it as `changed` and allows changed_since.
@@ -437,28 +444,6 @@ const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.ta
     }
   }
 }
-// ── Name source of people and organizations: the table whose key references the provider's user (profiles.id → auth.users), the name column the app shows
-//    from it (with its place), the login provider from the packages, and memberships: a table with a reference to the person and one to a table whose name the
-//    app shows. Facts only, the same rule the setup requires (rules bundle). What the agent described stays; a missing name or membership list is added.
-const AUTH_PACKAGES = [[/^@supabase\/(supabase-js|ssr|auth-helpers-[a-z]+)$|^supabase$/i, 'supabase_auth'], [/^firebase(-admin)?$/i, 'firebase_auth'], [/^next-auth$|^@auth\//i, 'authjs'], [/^@clerk\//i, 'clerk']];
-const identityProposal = (() => {
-  const profiles = profileTables({ tables: mergedTables }); const profile = profiles.find((t) => shownNameColumn(t)) ?? (profiles.length === 1 ? profiles[0] : null);
-  if (!profile) return null;
-  const auth = components.map((c) => ({ c, p: AUTH_PACKAGES.find(([re]) => re.test(c.package))?.[1] })).find((x) => x.p);
-  const name = shownNameColumn(profile);
-  const isPerson = (c) => !!c.fk && (/^auth\.users$/i.test(c.fk.table) || c.fk.table === profile.name);
-  const memberships = mergedTables.filter((t) => t.name !== profile.name).flatMap((t) => { const person = t.columns.find(isPerson); const org = t.columns.find((c) => c.fk && !isPerson(c) && c !== person);
-    const orgT = org ? mergedTables.find((x) => x.name === org.fk.table) : null; return person && orgT && shownNameColumn(orgT) && t.columns.filter((c) => c.fk).length === 2 ? [{ table: t.name, person_column: person.name, org_table: orgT.name, evidence: { path: t.defined.path, line: t.defined.line } }] : []; });
-  return { provider: auth?.p ?? 'supabase_auth', evidence: auth ? { path: auth.c.evidence.path, line: auth.c.evidence.line } : { path: profile.defined.path, line: profile.defined.line }, table: profile.name, auth_table: 'auth.users',
-    ...(name ? { fields: { display_name: name } } : {}), ...(memberships.length ? { memberships: memberships.slice(0, 5) } : {}) };
-})();
-const identityOut = (() => {
-  const id = merge && 'identity' in merge ? merge.identity : identityProposal;   // the agent's null (no login) stays null
-  if (!id) return null;
-  const p = identityProposal && (!id.table || id.table === identityProposal.table) ? identityProposal : null;
-  const fields = id.fields?.display_name || !p?.fields?.display_name ? id.fields : { ...(id.fields ?? {}), display_name: p.fields.display_name };
-  return { ...id, ...(fields ? { fields } : {}), ...(!id.memberships && p?.memberships ? { memberships: p.memberships } : {}) };
-})();
 // ── Flow candidates: every write of the browser (to a table or a route of the app's backend), every AFTER trigger of the app (not everydeck's own; BEFORE
 //    triggers only keep columns) and every place where the app signs people up or in or resets a password (required: these are always flows). The agent
 //    describes each one as a flow or sets left_out with the reason; everydeck-check and everydeck refuse one without either. --merge keeps the reasons.
@@ -554,10 +539,20 @@ for (const f of [...new Set([...payFiles, ...payRanges.keys()])].sort()) {
 }
 const keyOf = (x) => `${x.provider}|${x.kind ?? ''}|${x.evidence?.path}:${x.evidence?.line}`;
 const money = payProviders.length || moneyTables.length || merge?.money ? { providers: [...payProviders, ...(merge?.money?.providers ?? []).filter((o) => !payProviders.some((p) => p.provider === o.provider))], tables: [...moneyTables, ...(merge?.money?.tables ?? []).filter((o) => !moneyTables.some((t) => t.table === o.table) && mergedTables.some((t) => t.name === o.table))].slice(0, 200) } : null;
+// ── People: the same rule everydeck uses (detectPeople in the rules bundle). The table with one row per account (its key references auth.users; with
+//    several, the one with a name the app shows, then with a name column, then the most referenced), the name column the app shows, e-mail and phone
+//    (everydeck never reads them), memberships, and the login provider from the packages. What the agent described adds to it and never replaces it:
+//    an agent's null (no login) or another table does not overrule the schema; a field the agent names with its place stays.
+const identityOut = detectPeople({ tables: mergedTables, components, money, ...(merge && 'identity' in merge ? { identity: merge.identity } : {}) }).identity;
 const aiOut = [...aiCalls, ...(merge?.ai_calls ?? []).filter((o) => !aiCalls.some((a) => keyOf(a) === keyOf(o)))].slice(0, 200);
 const authPlaces = [];
-for (const f of codeFiles) { const ls = text(f).split('\n'); ls.forEach((l, i) => { if (/^\s*(\/\/|#|\*)/.test(l)) return; for (const [kind, re] of AUTH_CALLS) { const m = re.exec(l); if (m) authPlaces.push({ kind, path: rel(f), line: i + 1, symbol: m.slice(1).find(Boolean) }); } }); }
-for (const a of authPlaces.sort(byPlace)) addCand({ id: `auth:${a.kind}`, source: 'auth', kind: a.kind, evidence: { path: a.path, line: a.line, symbol: a.symbol }, required: true });
+// The page the app sends people to after a password reset email (redirectTo or redirect_to of the call, within its next lines): only a path
+//    from a literal in the code (an address keeps only its path, a template keeps what follows its last placeholder); a variable gives nothing
+const redirectNear = (ls, i) => { for (let j = i; j < Math.min(ls.length, i + 6); j++) { const m = /\bredirect_?[tT]o\b\s*[:=]\s*(['"`])([^'"`]*)\1/.exec(ls[j]); if (!m) continue;
+  const v = m[2].includes('}') ? m[2].slice(m[2].lastIndexOf('}') + 1) : m[2].replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, ''); const p = v.split(/[?#]/)[0];
+  return /^\/[A-Za-z0-9/_.-]{0,200}$/.test(p) ? p : null; } return null; };
+for (const f of codeFiles) { const ls = text(f).split('\n'); ls.forEach((l, i) => { if (/^\s*(\/\/|#|\*)/.test(l)) return; for (const [kind, re] of AUTH_CALLS) { const m = re.exec(l); if (m) { const redirect = kind === 'password_reset' ? redirectNear(ls, i) : null; authPlaces.push({ kind, path: rel(f), line: i + 1, symbol: m.slice(1).find(Boolean), ...(redirect ? { redirect } : {}) }); } } }); }
+for (const a of authPlaces.sort(byPlace)) addCand({ id: `auth:${a.kind}`, source: 'auth', kind: a.kind, ...(a.redirect ? { redirect: a.redirect } : {}), evidence: { path: a.path, line: a.line, symbol: a.symbol }, required: true });
 for (const r of api_routes.filter((x) => x.method === 'POST' || !x.method).sort((a, b) => byPlace(a.evidence, b.evidence))) {   // an own login: the app's routes for it (not required: the route name is the fact)
   const kind = /(^|\/)(register|sign-?up|signup)$/i.test(r.pattern) ? 'sign_up' : /(^|\/)(login|sign-?in|signin)$/i.test(r.pattern) ? 'sign_in' : /(forgot|reset)[-_]?password|password[-_]?reset/i.test(r.pattern) ? 'password_reset' : null;
   if (kind) addCand({ id: `auth:${kind}`, source: 'auth', kind, evidence: { path: r.evidence.path, line: r.evidence.line, symbol: r.pattern.split('/').pop() } });

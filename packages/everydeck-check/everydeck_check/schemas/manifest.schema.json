@@ -932,7 +932,7 @@
                       "type": "boolean"
                     }
                   },
-                  "description": "1.11-r0: editability. Default: editable. Everything an admin of the app normally changes (titles, texts, prices, images, categories …) can be edited in everydeck once the object type has its management set (objects[].manage). Locked for good: identifiers and references (role ref, person, limit), login data, money outside an app function (role amount) and fields with managed_in; `editable: true` on them is an error. The agent may lock a single field with `editable: false` and a `reason`. `risk` (default green, amber for money) and `reason_required` change how the owner operates it."
+                  "description": "1.11-r0: editability. Default: editable. Everything an admin of the app normally changes (titles, texts, prices, images, categories …) can be edited in everydeck once the object type has its management set (objects[].manage). Locked for good: identifiers, references and owners (role ref, person), login data and fields with managed_in; `editable: true` on them is an error. Amounts and limits are editable like any other field. The agent may lock a single field with `editable: false` and a `reason`. `risk` (default green, amber for money) and `reason_required` change how the owner operates it."
                 },
                 "managed_in": {
                   "type": "object",

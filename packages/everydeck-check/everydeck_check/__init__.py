@@ -83,7 +83,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
     return [f"{'/'.join(str(p) for p in e.path) or '$'}: {e.message}" for e in v.iter_errors(manifest)]
 
 
-LOCKED_ROLES = ("ref", "person", "limit", "amount")
+LOCKED_ROLES = ("ref", "person")
 
 
 def field_editable(o: dict[str, Any], f: dict[str, Any]) -> bool:
@@ -378,7 +378,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
             browser_errors.add(be)
     # 1.11-r0: field kinds, rules, editability, manage block (mirror of contracts)
     v111 = at_least("1.11-r0")
-    locked_roles = ("ref", "person", "limit", "amount")
+    locked_roles = LOCKED_ROLES
     for o in objects:
         field_names = {f.get("name") for f in o.get("fields", []) or []}
         status_values = {st.get("value") for st in o.get("statuses", []) or []}
@@ -406,7 +406,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
                 errs.append(f"{at}: edit/managed_in require schema_version 1.11-r0")
             ed = f.get("edit") or {}
             if ed.get("editable") and f.get("role") in locked_roles:
-                errs.append(f"{at}: a field with role {f.get('role')} is never editable (identifiers, references, money outside an app function)")
+                errs.append(f"{at}: a field with role {f.get('role')} is never editable (identifiers, references and owners)")
             if ed.get("editable") and f.get("managed_in"):
                 errs.append(f"{at}: managed_in and editable exclude each other")
             if ed.get("editable") and not o.get("manage"):

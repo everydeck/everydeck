@@ -18,3 +18,12 @@ Commands:
 - `publish <app_map> --url <everydeck> --project <id>` and `change`: send the facts to everydeck.
 
 everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rules.mjs`) and run with `node` (18 or newer). Python 3.11 or newer. License: MIT.
+
+## Changes
+
+### 0.3.2
+
+- `validate` derives people from the schema with the same rule as everydeck: the profile table (one row per account), people without a login (records with a person's name and an e-mail or phone, not money), memberships with a role.
+- A table without a known primary key is identified by its `id` column before any foreign key.
+- `flow_candidates[].redirect` on `password_reset`: the page of the app a password reset email leads to.
+- Amounts and limits are editable; locked for good are identifiers, references and owners (`LOCKED_ROLES = ("ref", "person")`).
