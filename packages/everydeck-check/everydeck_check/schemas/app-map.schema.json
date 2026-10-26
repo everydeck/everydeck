@@ -1171,6 +1171,10 @@
         },
         "evidence": {
          "$ref": "#/$defs/evidence"
+        },
+        "source": {
+         "const": "browser",
+         "description": "ES1: the signal is sent from browser code with the browser SDK (everydeck.signal(name, ctx.operationId)); without it only a server key may send it"
         }
        }
       }
@@ -1200,9 +1204,10 @@
        "sign_up",
        "sign_in",
        "password_reset",
-       "payment"
+       "payment",
+       "verification"
       ],
-      "description": "the flow is the app's sign-up, sign-in, password reset or payment: these are always flows when the app has them (flow_candidates with required)"
+      "description": "the flow is the app's sign-up, sign-in, password reset or payment: these are always flows when the app has them (flow_candidates with required); verification: the identity check of a person by a provider (e.g. Didit), never required"
      }
     }
    }
@@ -1552,7 +1557,7 @@
   "flow_candidates": {
    "type": "array",
    "maxItems": 500,
-   "description": "written by the scaffold: every write of the browser to a table or an API route, every trigger of the app, every place the app signs people up or in, resets a password, opens a checkout or receives a payment webhook. Each one is a flow of the app map (result.write on its table, its place as the start, or the purpose) or carries left_out with the reason; required ones cannot be left out",
+   "description": "written by the scaffold: every write of the browser to a table or an API route, every trigger of the app, every place the app signs people up or in, resets a password, opens a checkout or receives a payment webhook. Each one is a flow of the app map (result.write on its table, its place as the start, or the purpose) or carries left_out with the reason; required ones cannot be left out. EV1: left_out is a note and keeps the candidate open and visible; close it with outcomes[] (covered_by a flow that explains it, or not_applicable with a place)",
    "items": {
     "type": "object",
     "additionalProperties": false,
@@ -1616,6 +1621,12 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 300
+     },
+     "way": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "description": "CV2: one of several ways of the same kind (id <kind>@<way>): the sign-in method (password, code, oauth, sso, otherwise the method), or the file of a write or checkout; only a flow on this way (its start or result at this place) explains it"
      }
     }
    }
@@ -1630,7 +1641,7 @@
     "providers",
     "tables"
    ],
-   "description": "written by the scaffold: the payment provider with the places where the app talks to it, and the tables with money, each with its place; everydeck reads amounts only from the app's own data, never from the provider",
+   "description": "the payment provider with the places where the app talks to it, and the tables with money, each with its place (the scaffold writes what it finds, the agent adds tables without a provider with a reason); everydeck reads amounts only from the app's own data, never from the provider",
    "properties": {
     "providers": {
      "type": "array",
@@ -1706,7 +1717,9 @@
          "shown_as_money",
          "provider_id",
          "written_with_provider",
-         "used_with_provider"
+         "used_with_provider",
+         "refers_to_money",
+         "described_by_agent"
         ]
        },
        "evidence": {
@@ -1720,7 +1733,214 @@
          "minLength": 1,
          "maxLength": 63
         }
+       },
+       "reason": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300,
+        "description": "because described_by_agent: what in the code shows that the table holds money (e.g. the price list the upgrade form reads, the plan an admin grants after a bank transfer)"
+       },
+       "holds": {
+        "enum": [
+         "plans",
+         "purchases",
+         "requests",
+         "prices"
+        ],
+        "description": "what a row is: a plan or subscription that runs for a period (plans), a one-off purchase such as an order, a ticket, a boost or a credit pack (purchases), a request to buy that waits for payment (requests), or the app's own price list (prices)"
+       },
+       "roles": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "columns of this table by their meaning for money; each must be a column of the table",
+        "properties": {
+         "amount": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "currency": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "period": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "product": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "buyer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "object": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "time": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "start": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "end": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         }
+        }
+       },
+       "currency": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "value",
+         "evidence"
+        ],
+        "description": "the one currency the code uses for this table (e.g. a formatter or a column name with the code), when no column holds it",
+        "properties": {
+         "value": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+         },
+         "evidence": {
+          "$ref": "#/$defs/evidence"
+         }
+        }
+       },
+       "minor_unit": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "evidence"
+        ],
+        "description": "the amounts are stored in the smallest unit of the currency (cents), with the place that shows it (e.g. division by 100, Stripe unit_amount)",
+        "properties": {
+         "evidence": {
+          "$ref": "#/$defs/evidence"
+         }
+        }
+       },
+       "statuses": {
+        "type": "array",
+        "maxItems": 40,
+        "description": "what a value of the status (or of roles.period's table status column) means for money, each with the place in the code",
+        "items": {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "value",
+          "means",
+          "evidence"
+         ],
+         "properties": {
+          "value": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 100
+          },
+          "means": {
+           "enum": [
+            "paid",
+            "free",
+            "ended",
+            "requested",
+            "refunded",
+            "failed"
+           ]
+          },
+          "column": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 63
+          },
+          "evidence": {
+           "$ref": "#/$defs/evidence"
+          }
+         }
+        }
+       },
+       "price": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "table",
+         "key",
+         "amounts",
+         "evidence"
+        ],
+        "description": "the amount is not in this table but in the app's own price list: roles.product names the row of the price list by its key column; amounts per period (the period comes from roles.period)",
+        "properties": {
+         "table": {
+          "$ref": "#/$defs/name"
+         },
+         "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "amounts": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+           "month": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63
+           },
+           "year": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63
+           },
+           "once": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63
+           }
+          }
+         },
+         "currency": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+         },
+         "evidence": {
+          "$ref": "#/$defs/evidence"
+         }
+        }
+       },
+       "log": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "evidence"
+        ],
+        "description": "CV2: the table only logs events (for example the stored webhook events of the provider): no row is a plan, a purchase, a request or a price, so it has no holds; with the place where the app writes or reads it as a log. An entry with neither holds (and the columns that carry money) nor log keeps the money part open",
+        "properties": {
+         "evidence": {
+          "$ref": "#/$defs/evidence"
+         }
+        }
        }
+      },
+      "not": {
+       "required": [
+        "holds",
+        "log"
+       ]
       }
      }
     }
@@ -1764,6 +1984,425 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 80
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     }
+    }
+   }
+  },
+  "outcomes": {
+   "type": "array",
+   "maxItems": 500,
+   "description": "EV1: the outcome of each open part everydeck found (ids from everydeck-check validate, field open[].id). covered_by: the flow that explains this concrete operation; not_applicable: why it does not apply, with a place in the code that shows it. Both close the part. deferred and unsupported keep it open and visible to the owner; a text such as 'later' never closes anything. covered_by may name further parts in also (ids from open[], each listed explicitly) that the same flow explains in exactly the same way, for example the same report sent from several pages; parts not listed stay open",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 200
+     },
+     "covered_by": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+     },
+     "also": {
+      "type": "array",
+      "maxItems": 500,
+      "uniqueItems": true,
+      "description": "Further ids this covered_by answers, each listed (never all parts of a kind silently)",
+      "items": {
+       "type": "string",
+       "minLength": 3,
+       "maxLength": 200
+      }
+     },
+     "not_applicable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "reason",
+       "evidence"
+      ],
+      "properties": {
+       "reason": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 300
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     },
+     "deferred": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 300
+     },
+     "unsupported": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 300
+     }
+    },
+    "oneOf": [
+     {
+      "required": [
+       "covered_by"
+      ]
+     },
+     {
+      "required": [
+       "not_applicable"
+      ]
+     },
+     {
+      "required": [
+       "deferred"
+      ]
+     },
+     {
+      "required": [
+       "unsupported"
+      ]
+     }
+    ],
+    "dependentRequired": {
+     "also": [
+      "covered_by"
+     ]
+    }
+   }
+  },
+  "inventory": {
+   "type": "object",
+   "additionalProperties": false,
+   "description": "EV1: written by everydeck-check validate --repo (do not edit): what everydeck-check found in the repo itself, with the version of the tool, the commit and a digest; everydeck compares it with the app map",
+   "required": [
+    "scanner",
+    "commit",
+    "digest",
+    "scanned",
+    "blocks",
+    "providers",
+    "candidates",
+    "tables"
+   ],
+   "properties": {
+    "scanner": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 80
+    },
+    "commit": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "maxLength": 64
+    },
+    "digest": {
+     "type": "string",
+     "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "scanned": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "files",
+      "skipped",
+      "unsupported"
+     ],
+     "properties": {
+      "files": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "skipped": {
+       "type": "array",
+       "maxItems": 50,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "path",
+         "why"
+        ],
+        "properties": {
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         },
+         "why": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+         }
+        }
+       }
+      },
+      "unsupported": {
+       "type": "array",
+       "maxItems": 20,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "language",
+         "files",
+         "example"
+        ],
+        "properties": {
+         "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+         },
+         "files": {
+          "type": "integer",
+          "minimum": 1
+         },
+         "example": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         }
+        }
+       }
+      },
+      "not_checked": {
+       "type": "array",
+       "maxItems": 50,
+       "description": "CV2: files that may carry a schedule everydeck-check does not read (another host's file that names one, or a known file it cannot read); schedules set only in a dashboard are not in the repo",
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "path",
+         "why"
+        ],
+        "properties": {
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         },
+         "why": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+         }
+        }
+       }
+      }
+     }
+    },
+    "blocks": {
+     "type": "array",
+     "maxItems": 17,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "block",
+       "evidence"
+      ],
+      "properties": {
+       "block": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32
+       },
+       "evidence": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       }
+      }
+     }
+    },
+    "providers": {
+     "type": "array",
+     "maxItems": 100,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "package",
+       "block",
+       "evidence"
+      ],
+      "properties": {
+       "package": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 120
+       },
+       "block": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32
+       },
+       "evidence": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       }
+      }
+     }
+    },
+    "candidates": {
+     "type": "array",
+     "maxItems": 500,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "id",
+       "source",
+       "kind",
+       "evidence"
+      ],
+      "properties": {
+       "id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+       },
+       "source": {
+        "enum": [
+         "browser_write",
+         "trigger",
+         "auth",
+         "payment"
+        ]
+       },
+       "kind": {
+        "enum": [
+         "insert",
+         "update",
+         "upsert",
+         "delete",
+         "request",
+         "sign_up",
+         "sign_in",
+         "password_reset",
+         "checkout",
+         "webhook"
+        ]
+       },
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       },
+       "way": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300,
+        "description": "CV2: one of several ways of the same kind (id <kind>@<way>): the sign-in method (password, code, oauth, sso, otherwise the method), or the file of a write or checkout; only a flow on this way (its start or result at this place) explains it"
+       }
+      }
+     }
+    },
+    "tables": {
+     "type": "array",
+     "maxItems": 1000,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "table",
+       "evidence"
+      ],
+      "properties": {
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "evidence": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "used": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300,
+        "description": "EVX: a money table only: the first place where the code reads or writes it (path:line), found the same way validate refuses a not_applicable"
+       }
+      }
+     }
+    },
+    "excerpts": {
+     "type": "array",
+     "maxItems": 60,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "path",
+       "line",
+       "text"
+      ],
+      "properties": {
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "line": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "text": {
+        "type": "string",
+        "maxLength": 4000
+       }
+      }
+     }
+    },
+    "schedules": {
+     "type": "array",
+     "maxItems": 50,
+     "description": "CV2: planned work found without a package: pg_cron in SQL (cron.schedule), crons in vercel.json, cron services in render.yaml, the schedule of a GitHub Actions workflow; each is an open part until a jobs[] entry at its place describes it",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "source",
+       "name",
+       "every",
+       "evidence"
+      ],
+      "properties": {
+       "source": {
+        "enum": [
+         "pg_cron",
+         "vercel",
+         "render",
+         "github_actions"
+        ]
+       },
+       "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "every": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
        },
        "evidence": {
         "$ref": "#/$defs/evidence"

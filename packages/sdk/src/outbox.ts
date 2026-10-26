@@ -15,7 +15,10 @@
  * own database client.
  */
 export { supabaseDbUrl, LOCAL_DB_HOST } from './supabase-db.js';
+import { DEFAULT_HEARTBEAT_SECONDS } from './heartbeat.js';
+
 export const OUTBOX_JOB = 'everydeck_outbox_relay';
+const HEARTBEAT = 'everydeck.sdk.heartbeat';
 export const BATCH_SCHEMA_VERSION = '1.2-r0';
 type Runtime = 'deno' | 'node';
 const runtime: Runtime = (globalThis as { Deno?: unknown }).Deno ? 'deno' : 'node';
@@ -27,13 +30,13 @@ const REJECT = new Set([400, 409, 413, 422]);
 const AUTH = new Set([401, 403]);
 
 /** One row of everydeck_outbox.event (references only, no column values of the app) */
-export interface OutboxRow { id: number | string; event_id: string; name: string; occurred_at: string | Date; operation_id?: string | null; subject_ref?: string | null; account_ref?: string | null; object_type?: string | null; object_ref?: string | null; /** platform of the browser request (header x-everydeck-platform) */ platform?: string | null }
+export interface OutboxRow { id: number | string; event_id: string; name: string; occurred_at: string | Date; operation_id?: string | null; subject_ref?: string | null; account_ref?: string | null; object_type?: string | null; object_ref?: string | null; /** platform of the browser request (header x-everydeck-platform) */ platform?: string | null; /** result of a job beat written by everydeck_outbox.job_heartbeat (in_progress, ok, error) */ job_status?: string | null }
 const APP_PLATFORMS = new Set(['web', 'ios', 'android', 'desktop', 'extension']);
 type RequestPlatform = 'web' | 'ios' | 'android' | 'desktop' | 'extension';
 export interface OutboxEvent { event_id: string; kind: 'signal'; name: string; occurred_at: string; client: { platform: 'server'; runtime: Runtime; request_platform?: RequestPlatform }; operation_id?: string; subject_ref?: string; account_ref?: string; object_type?: string; object_ref?: string; fields?: Record<string, string | number> }
 /** Query on the caller's connection: result as a row array (postgres.js) or `{ rows }` (pg) */
 export type OutboxQuery = (text: string, params: unknown[]) => Promise<unknown>;
-export interface RelayOptions { query: OutboxQuery; endpoint: string; credential: string; releaseKey: string; manifestDigest: string; job?: string; intervalSeconds?: number; instanceId?: string; maxRows?: number; timeoutMs?: number; fetch?: typeof fetch; /** false = deliver only, no heartbeat (the short tick; the one-minute tick sends the heartbeat) */ heartbeat?: boolean }
+export interface RelayOptions { query: OutboxQuery; endpoint: string; credential: string; releaseKey: string; manifestDigest: string; job?: string; intervalSeconds?: number; instanceId?: string; maxRows?: number; timeoutMs?: number; fetch?: typeof fetch; /** false = deliver only, no heartbeat (the short tick; the five-minute tick sends the heartbeat) */ heartbeat?: boolean }
 export interface RelayResult { status: 'ok' | 'auth' | 'retry' | 'misconfigured'; sent: number; rejected: number; pending: number; heartbeat: boolean; error: string | null }
 
 const rowsOf = (r: unknown): Record<string, unknown>[] => (Array.isArray(r) ? r : ((r as { rows?: Record<string, unknown>[] } | null)?.rows ?? [])) as Record<string, unknown>[];
@@ -41,8 +44,16 @@ const uuid = (): string => globalThis.crypto.randomUUID();
 const iso = (v: string | Date): string => new Date(v).toISOString();
 const REFS = ['operation_id', 'subject_ref', 'account_ref', 'object_type', 'object_ref'] as const;
 
+const JOB_RUN = 'everydeck.job:';
+const JOB_STATUS = new Set(['in_progress', 'ok', 'error']);
+
 /** Outbox row → event of the everydeck batch contract (declared references only, no column values) */
 export function eventOf(row: OutboxRow): OutboxEvent {
+  // a beat of a schedule in plain SQL (everydeck_outbox.job_heartbeat): the job heartbeat of the SDK with its result
+  if (row.name === HEARTBEAT && row.job_status && JOB_STATUS.has(row.job_status) && row.operation_id?.startsWith(JOB_RUN)) {
+    const job = row.operation_id.slice(JOB_RUN.length);
+    return { event_id: String(row.event_id), kind: 'signal', name: HEARTBEAT, occurred_at: iso(row.occurred_at), operation_id: row.operation_id, fields: { job, status: row.job_status }, client: { ...RELAY_CLIENT } };
+  }
   const ev: OutboxEvent = { event_id: String(row.event_id), kind: 'signal', name: row.name, occurred_at: iso(row.occurred_at), client: { ...RELAY_CLIENT } };
   for (const k of REFS) { const v = row[k]; if (v !== null && v !== undefined && v !== '') ev[k] = String(v); }
   // the platform of the browser request as a detail of that request; the event stays a server event
@@ -52,12 +63,12 @@ export function eventOf(row: OutboxRow): OutboxEvent {
 
 /** Job heartbeat exactly as `@everydeck/sdk` sends it (`heartbeat(interval, { job })`) */
 export function heartbeatOf(job: string, intervalSeconds: number, instanceId: string): OutboxEvent {
-  return { event_id: uuid(), kind: 'signal', name: 'everydeck.sdk.heartbeat', occurred_at: new Date().toISOString(), operation_id: `everydeck.job:${job}`, fields: { instance_id: instanceId, interval_seconds: intervalSeconds, job }, client: { ...RELAY_CLIENT } };
+  return { event_id: uuid(), kind: 'signal', name: HEARTBEAT, occurred_at: new Date().toISOString(), operation_id: `everydeck.job:${job}`, fields: { instance_id: instanceId, interval_seconds: intervalSeconds, job }, client: { ...RELAY_CLIENT } };
 }
 
 export async function relayOnce(o: RelayOptions): Promise<RelayResult> {
   const out: RelayResult = { status: 'ok', sent: 0, rejected: 0, pending: 0, heartbeat: false, error: null };
-  const job = o.job ?? OUTBOX_JOB; const interval = o.intervalSeconds ?? 60; const instance = o.instanceId ?? 'everydeck-outbox-relay';
+  const job = o.job ?? OUTBOX_JOB; const interval = o.intervalSeconds ?? DEFAULT_HEARTBEAT_SECONDS; const instance = o.instanceId ?? 'everydeck-outbox-relay';
   if (!o.endpoint || !o.credential || !o.releaseKey || !o.manifestDigest) return { ...out, status: 'misconfigured', error: 'endpoint, key, release key and manifest digest are required' };
   const doFetch: typeof fetch = o.fetch ?? ((...a) => globalThis.fetch(...a));
   const endpoint = o.endpoint.replace(/\/$/, '');
@@ -82,7 +93,7 @@ export async function relayOnce(o: RelayOptions): Promise<RelayResult> {
   const maxRows = o.maxRows ?? 1000;
   let seen = 0;
   while (seen < maxRows) {
-    const rows = rowsOf(await o.query('SELECT id, event_id, name, occurred_at, operation_id, subject_ref, account_ref, object_type, object_ref, platform FROM everydeck_outbox.event WHERE rejected_at IS NULL ORDER BY id LIMIT $1', [BATCH_MAX])) as unknown as OutboxRow[];
+    const rows = rowsOf(await o.query("SELECT id, event_id, name, occurred_at, operation_id, subject_ref, account_ref, object_type, object_ref, platform, to_jsonb(e) ->> 'job_status' AS job_status FROM everydeck_outbox.event e WHERE rejected_at IS NULL ORDER BY id LIMIT $1", [BATCH_MAX])) as unknown as OutboxRow[];
     if (!rows.length) break;
     // as many rows as fit into a batch of <= 64 KiB
     const take: OutboxRow[] = []; let bytes = 200;
@@ -138,9 +149,9 @@ export function createRelayHandler(deps: RelayHandlerDeps): (req: Request) => Pr
     // written for @everydeck/sdk 0.4.1 and earlier sent it as Authorization (with the JWT check switched off) and keep working
     const given = req.headers.get('x-everydeck-invoke-token') ?? (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
     if (!sameToken(given, secrets['everydeck_outbox_invoke_token'])) return Response.json({ error: 'unauthorized' }, { status: 401 });
-    // the short tick (every 5 s, only while rows wait) sends {"heartbeat": false}; the one-minute tick sends the heartbeat
+    // the short tick (every 5 s, only while rows wait) sends {"heartbeat": false}; the five-minute tick sends the heartbeat
     let heartbeat = true;
-    try { const b = await req.json() as { heartbeat?: unknown } | null; if (b && b.heartbeat === false) heartbeat = false; } catch { /* empty body: one-minute tick */ }
+    try { const b = await req.json() as { heartbeat?: unknown } | null; if (b && b.heartbeat === false) heartbeat = false; } catch { /* empty body: five-minute tick */ }
     const result = await relayOnce({ query: deps.query, endpoint: deps.env('EVERYDECK_ENDPOINT') ?? '', credential: String(secrets['everydeck_ingest_key'] ?? ''), releaseKey: deps.env('EVERYDECK_RELEASE_KEY') ?? '', manifestDigest: deps.env('EVERYDECK_MANIFEST_DIGEST') ?? '', heartbeat, ...(deps.fetch ? { fetch: deps.fetch } : {}) });
     return Response.json(result, { status: result.status === 'ok' ? 200 : 503 });
   };

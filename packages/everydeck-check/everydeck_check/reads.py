@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from .detect import SKIP_DIRS
+from .detect import SCHEMA_FILE_MAX, SKIP_DIRS
 
 BACKEND_DIR = re.compile(r"(^|/)(backend|server|api|functions|supabase|migrations|scripts|prisma|db|database|test|tests|__tests__|e2e|cypress)(/|$)")
 TEST_FILE = re.compile(r"\.(test|spec|stories)\.[tj]sx?$|(^|/)(__tests__|e2e|cypress|tests?)/")
@@ -153,7 +153,7 @@ def path_strings(text: str) -> list[str]:
 def _files(repo: Path):
     for p in sorted(repo.rglob("*")):
         rel = p.relative_to(repo)
-        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in SOURCE_SUFFIXES or p.stat().st_size > 2_000_000: continue
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in SOURCE_SUFFIXES or p.stat().st_size > SCHEMA_FILE_MAX: continue
         try: yield rel.as_posix(), p.read_text(encoding="utf-8", errors="replace")
         except OSError: continue
 

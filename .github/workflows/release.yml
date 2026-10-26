@@ -1,66 +1,131 @@
-# Builds and publishes the four packages on a tag v*. Trusted Publishing (OIDC): no tokens in this repository.
-# npm: each package names this repository and this workflow file on npmjs.com (Settings → Trusted publisher); npm 11.5.1 or newer.
-# PyPI: each project names this repository, this workflow file and the environment "pypi" (Publishing → Trusted publisher).
+# Publishes one package when a GitHub release is published. Trusted Publishing (OIDC): no tokens in this repository.
+# The tag of the release names the package and its version:
+#   sdk-v<version>        @everydeck/sdk    (npm,  packages/sdk)
+#   check-v<version>      @everydeck/check  (npm,  packages/check)
+#   py-v<version>         everydeck         (PyPI, packages/sdk-python)
+#   py-check-v<version>   everydeck-check   (PyPI, packages/everydeck-check)
+# The version in the tag must be the version in the package, and it must not be published yet; otherwise the run stops before anything is built.
+# Before publishing: the public guard checks the package folder and the built files, and the package test installs and uses the built package.
+# "Run workflow" (manual, with a tag) does all of this as a trial and publishes nothing.
+# npm: each package names this repository and this workflow file on npmjs.com (Settings, Trusted publisher); npm 11.5.1 or newer.
+# PyPI: each project names this repository, this workflow file and the environment "pypi" (Publishing, Trusted publisher).
 name: release
 on:
-  push:
-    tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to try, for example sdk-v0.5.2 (a trial: nothing is published)'
+        required: true
 permissions:
   contents: read
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  TRIAL: ${{ github.event_name != 'release' }}
 jobs:
-  npm:
+  build:
+    name: check, build and test ${{ github.event.release.tag_name || inputs.tag }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    strategy:
-      matrix:
-        package: [sdk, check]
+    outputs:
+      package: ${{ steps.prepare.outputs.package }}
+      registry: ${{ steps.prepare.outputs.registry }}
+      name: ${{ steps.prepare.outputs.name }}
+      version: ${{ steps.prepare.outputs.version }}
+      npm_tag: ${{ steps.prepare.outputs.npm_tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-      - run: npm install -g npm@^11.5.1
-      - name: publish packages/${{ matrix.package }}
-        working-directory: packages/${{ matrix.package }}
+      - name: tag and version
+        id: prepare
+        run: node .github/release/prepare.mjs "$TAG"
+      - name: public guard, package folder
         run: |
-          name=$(node -p "require('./package.json').name"); version=$(node -p "require('./package.json').version")
-          if npm view "$name@$version" version > /dev/null 2>&1; then echo "$name@$version is already published"; exit 0; fi
+          npm install --no-save --no-package-lock --no-audit --no-fund --prefix .github/release typescript@5.9.3
+          node .github/release/guard.mjs "${{ steps.prepare.outputs.dir }}"
+      - name: build (npm)
+        if: steps.prepare.outputs.registry == 'npm'
+        working-directory: ${{ steps.prepare.outputs.dir }}
+        run: |
           npm install --no-audit --no-fund
-          npm publish --provenance --access public
-  pypi-build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        package: [sdk-python, everydeck-check]
-    steps:
-      - uses: actions/checkout@v4
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          npm pack --pack-destination "$GITHUB_WORKSPACE/dist"
       - uses: actions/setup-python@v5
+        if: steps.prepare.outputs.registry == 'pypi'
         with:
           python-version: '3.12'
-      - run: python -m pip install build
-      - run: python -m build --sdist --wheel --outdir dist packages/${{ matrix.package }}
+      - name: build (PyPI)
+        if: steps.prepare.outputs.registry == 'pypi'
+        run: |
+          python -m pip install --quiet build twine
+          python -m build --sdist --wheel --outdir dist "${{ steps.prepare.outputs.dir }}"
+          python -m twine check --strict dist/*
+      - name: public guard, built files
+        run: node .github/release/guard.mjs dist/*
+      - name: package test
+        run: node .github/release/smoke.mjs "${{ steps.prepare.outputs.package }}" dist
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.package }}
+          name: package
           path: dist/
-  pypi-publish:
-    needs: pypi-build
+          if-no-files-found: error
+  npm:
+    name: publish ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} to npm
+    needs: build
+    if: needs.build.outputs.registry == 'npm'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm install -g npm@^11.5.1
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: dist/
+      - name: publish (trial without publishing on "Run workflow")
+        env:
+          NPM_TAG: ${{ needs.build.outputs.npm_tag }}
+        run: |
+          # ./ in front: without it npm reads dist/<file>.tgz as a GitHub repository (user/repo)
+          set -- ./dist/*.tgz
+          if [ "$TRIAL" = "true" ]; then
+            npm publish "$1" --dry-run --access public --tag "$NPM_TAG"
+            echo "### Trial: ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} was not published" >> "$GITHUB_STEP_SUMMARY"
+          else
+            npm publish "$1" --provenance --access public --tag "$NPM_TAG"
+            echo "### Published ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} to npm" >> "$GITHUB_STEP_SUMMARY"
+          fi
+  pypi:
+    name: publish ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} to PyPI
+    needs: build
+    if: needs.build.outputs.registry == 'pypi'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
       id-token: write
-    strategy:
-      matrix:
-        package: [sdk-python, everydeck-check]
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist-${{ matrix.package }}
+          name: package
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: trial without publishing on "Run workflow"
+        if: env.TRIAL == 'true'
+        run: |
+          ls -l dist/
+          echo "### Trial: ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} was not published" >> "$GITHUB_STEP_SUMMARY"
+      - name: publish
+        if: env.TRIAL != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
-          skip-existing: true

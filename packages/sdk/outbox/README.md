@@ -21,9 +21,9 @@ Everything comes from the package `@everydeck/sdk` of the exact version you inst
 |---|---|
 | `node_modules/@everydeck/sdk/outbox/everydeck_outbox.sql` | Copy unchanged as a new migration (schema `everydeck_outbox`, table, trigger function). Plain PostgreSQL 13+. |
 | `node_modules/@everydeck/sdk/outbox/everydeck_outbox_triggers.example.sql` | The only part you write: one `CREATE TRIGGER … EXECUTE FUNCTION everydeck_outbox.capture(…)` per declared result. Save as its own migration. |
-| `node_modules/@everydeck/sdk/outbox/everydeck_outbox_schedule.supabase.sql` | Supabase: copy as a migration. pg_cron calls the Edge Function every minute (with the job heartbeat) and every 5 seconds while rows wait (without it), so a result reaches everydeck within seconds; URL, the app's public key and the token come from Vault. |
+| `node_modules/@everydeck/sdk/outbox/everydeck_outbox_schedule.supabase.sql` | Supabase: copy as a migration. pg_cron calls the Edge Function every 5 minutes (with the job heartbeat) and every 5 seconds while rows wait (without it), so a result reaches everydeck within seconds; URL, the app's public key and the token come from Vault. |
 | `supabase/functions/everydeck-outbox-relay/index.ts` | Supabase: four lines that import the relay from `npm:@everydeck/sdk@<version>/outbox` (below). |
-| `npx everydeck-outbox-relay` | Apps on plain PostgreSQL without pg_cron/Edge Functions: run as the app's own worker (needs `pg`); it delivers every 5 seconds and sends the heartbeat once a minute. |
+| `npx everydeck-outbox-relay` | Apps on plain PostgreSQL without pg_cron/Edge Functions: run as the app's own worker (needs `pg`); it delivers every 5 seconds and sends the heartbeat every 5 minutes (`EVERYDECK_OUTBOX_HEARTBEAT_SECONDS`, default 300). |
 
 The Supabase function:
 
@@ -42,7 +42,7 @@ Deno.serve(createRelayHandler({ query: (text: string, params: unknown[]) => sql.
    person column, account column, object type, object ref column (`''` = none). The run id must be the value the rest of the flow
    uses (browser `operationId`, other signals). Name it `everydeck_outbox_<table>_<event>`.
 2. **Manifest.** Declare each signal with `allowed_source: "server"` and `location { path: "<triggers migration>", symbol: "<trigger name>", commit }`.
-   Declare the relay as a job (1.9-r0): `{ "id": "everydeck_outbox_relay", "label": "everydeck outbox relay", "every": "1m", "component": "<database component>", "evidence": [{ "path": "<schedule migration or worker>", "commit": "…" }] }`.
+   Declare the relay as a job (1.9-r0): `{ "id": "everydeck_outbox_relay", "label": "everydeck outbox relay", "every": "5m", "component": "<database component>", "evidence": [{ "path": "<schedule migration or worker>", "commit": "…" }] }`.
    Declare a step the browser sees when the write fails (for example "Submit failed") as a `failure` step with `browser_error` naming the browser action.
 3. **Supabase.** Function env: `EVERYDECK_ENDPOINT`, `EVERYDECK_RELEASE_KEY`, `EVERYDECK_MANIFEST_DIGEST` (not secret). Deploy with
    `supabase functions deploy everydeck-outbox-relay` and leave its JWT check as it is (no `verify_jwt` setting): the schedule calls it with the
@@ -57,6 +57,23 @@ Deno.serve(createRelayHandler({ query: (text: string, params: unknown[]) => sql.
 5. **Verify locally (Step 4 of the guide, never against production):** a write from the browser produces exactly one row; a
    rolled-back write produces none; a run of the relay delivers it (the signal appears in everydeck) and deletes the row; the job
    heartbeat arrives; with the relay stopped for two periods everydeck opens a case "Job “everydeck outbox relay” has not reported".
+
+## Schedules in plain SQL (heartbeat with a result)
+
+A pg_cron job that runs only SQL has no code of the app that could send a heartbeat. The outbox sends it, like a result: run the job's command inside
+`everydeck_outbox.run_job`, which writes the beat with its result into `everydeck_outbox.event` in the same transaction; the relay delivers it as the job
+heartbeat (`everydeck.sdk.heartbeat` with `fields.job` and `fields.status`). No key in SQL.
+
+```sql
+SELECT cron.schedule('expire-holds', '*/15 * * * *', $$
+  SELECT everydeck_outbox.run_job('expire-holds', $job$ UPDATE public.hold SET released = true WHERE until < now() $job$)
+$$);
+```
+
+Success reports `ok`. A failed command rolls back its own writes and reports `error`; the schedule itself then ends without error and only the SQLSTATE
+goes to the log as a warning (no error text, which can carry values), because a failed schedule would roll back its beat too. A job of its own can call
+`everydeck_outbox.job_heartbeat('<job id>', 'ok' | 'error' | 'in_progress')` at its end instead. The job id is the id in `jobs[]` of the app map.
+Both functions are for the schedule's owner only (`REVOKE … FROM PUBLIC`); `run_job` runs with the owner's rights, never more.
 
 ## Rows that stay
 

@@ -14,8 +14,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { analyseReads } from './scaffold-reads.mjs';
-import { findIcon } from './scaffold-icon.mjs';
-import { detectPeople } from './rules/everydeck-rules.mjs';
+import { ICON_MAX_BYTES, findIcon, iconsTooLarge } from './scaffold-icon.mjs';
+import { candidateWays, detectPeople } from './rules/everydeck-rules.mjs';
 
 const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: scaffold.mjs <repo> [--db <url>] [--out file] [--merge file]'); process.exit(2); }
 const opt = (k) => (args.includes(k) ? args[args.indexOf(k) + 1] : null);
@@ -454,7 +454,8 @@ const AUTH_CALLS = [
 ];
 const byPlace = (a, b) => a.path.localeCompare(b.path) || a.line - b.line;
 const candidates = [];
-const addCand = (c) => { if (!candidates.some((x) => x.id === c.id)) candidates.push(c); };
+// Every place is kept; candidateWays (everydeck's rule, the same as everydeck-check) makes one candidate per way of a kind (<id>@<way>)
+const addCand = (c) => { if (!candidates.some((x) => x.id === c.id && x.evidence.path === c.evidence.path && x.evidence.line === c.evidence.line)) candidates.push(c); };
 const unreachableSet = new Set(reads.reach.unreachable.map((u) => u.path));
 const codeFiles = files.filter((p) => /\.(ts|tsx|js|jsx|mjs|cjs|py|vue|svelte)$/.test(p) && !/\.d\.ts$/.test(p) && !TEST_PATH.test(rel(p)) && !unreachableSet.has(rel(p))).sort();
 // ── Money and AI, facts with their places (no connection to any provider). The payment provider (its package or its address in the code) with the
@@ -479,11 +480,11 @@ const PAY = [
   { provider: 'razorpay', pkg: /^razorpay$/i, host: /api\.razorpay\.com/, calls: [['checkout', /\b(\w+\.orders?\.create)\s*\(/]] },
 ];
 const AI = [
-  { provider: 'anthropic', client: /\b((?:Async)?Anthropic(?:Bedrock|Vertex)?)\s*\(/, call: /\.(messages\.(?:create|stream))\s*\(/, needs: /anthropic/i },
+  { provider: 'anthropic', client: /\b((?:Async)?Anthropic(?:Bedrock|Vertex)?)\s*\(/, call: /\.((?:beta\.)?messages\.(?:create|parse|stream))\s*\(/, needs: /anthropic/i },
   { provider: 'google', client: /\b(GoogleGenerativeAI|GoogleGenAI|genai\.Client|genai\.GenerativeModel)\s*\(/, call: /\.(generateContent(?:Stream)?|models\.generate_content|generate_content)\s*\(/ },
   { provider: 'mistral', client: /\b(Mistral(?:Client)?)\s*\(/, call: /\.(chat\.complete(?:Async)?|chat\.stream)\s*\(/, needs: /mistral/i },
   { provider: 'groq', client: /\b((?:Async)?Groq)\s*\(/, call: null },
-  { provider: 'openai', client: /\b((?:Async)?(?:Azure)?OpenAI)\s*\(/, call: /\.(chat\.completions\.create|chat\.completions\.parse|responses\.create|completions\.create|embeddings\.create|images\.generate|audio\.transcriptions\.create)\s*\(/ },
+  { provider: 'openai', client: /\b((?:Async)?(?:Azure)?OpenAI)\s*\(/, call: /\.(chat\.completions\.create|chat\.completions\.parse|responses\.create|responses\.parse|completions\.create|embeddings\.create|images\.(?:generate|edit)|audio\.(?:transcriptions|translations|speech)\.create)\s*\(/ },
 ];
 const AI_SDK_CALL = /\b(generateText|streamText|generateObject|streamObject|embedMany)\s*\(/;
 const AI_HOSTS = [[/api\.openai\.com/, 'openai'], [/api\.anthropic\.com/, 'anthropic'], [/generativelanguage\.googleapis\.com/, 'google'], [/openrouter\.ai\/api/, 'openrouter'], [/api\.mistral\.ai/, 'mistral'], [/api\.groq\.com/, 'groq'], [/api\.together\.xyz/, 'together']];
@@ -538,7 +539,19 @@ for (const f of [...new Set([...payFiles, ...payRanges.keys()])].sort()) {
     for (const m of l.matchAll(/\.(?:table|from)\(\s*["'`]([A-Za-z_]\w*)["'`]|\b(?:from|into|update|join)\s+"?(?:public\.)?"?([A-Za-z_]\w*)/gi)) { const t = tableKey(m[1] ?? m[2]); if (t) addMoney(t, writtenIn.has(t) ? 'written_with_provider' : 'used_with_provider', { path: f, line: i + 1, symbol: m[1] ?? m[2] }); } });
 }
 const keyOf = (x) => `${x.provider}|${x.kind ?? ''}|${x.evidence?.path}:${x.evidence?.line}`;
-const money = payProviders.length || moneyTables.length || merge?.money ? { providers: [...payProviders, ...(merge?.money?.providers ?? []).filter((o) => !payProviders.some((p) => p.provider === o.provider))], tables: [...moneyTables, ...(merge?.money?.tables ?? []).filter((o) => !moneyTables.some((t) => t.table === o.table) && mergedTables.some((t) => t.name === o.table))].slice(0, 200) } : null;
+// What the agent wrote about a money table (what a row holds, roles, statuses, currency, unit, price list, reason) stays on the scaffold's entry; tables
+// the agent described without a provider (described_by_agent) stay as they are. A table with a foreign key to a money table refers to money (e.g. the
+// plans a host holds point to the price list); the agent describes what it holds.
+const agentMoney = new Map((merge?.money?.tables ?? []).filter((o) => mergedTables.some((t) => t.name === o.table)).map((o) => [o.table, o]));
+const withAgent = (t) => { const o = agentMoney.get(t.table); if (!o) return t; const { table: _t, because: _b, evidence: _e, columns: _c, ...facts } = o; return { ...t, ...facts }; };
+const moneyAll = [...moneyTables.map(withAgent), ...[...agentMoney.values()].filter((o) => !moneyTables.some((t) => t.table === o.table))];
+// Only a direct foreign key to a money table the agent described (holds: plans, purchases, requests, prices), never transitively and never through a price a
+// page only shows (shown_as_money without holds): the plans of a customer point to the price list, a chat about a priced item does not hold money.
+const described = new Set(moneyAll.filter((m) => m.holds).map((m) => m.table));
+for (const t of mergedTables) { if (moneyAll.some((x) => x.table === t.name)) continue;
+  const c = t.columns.find((x) => x.fk && described.has(x.fk.table) && x.fk.table !== t.name);
+  if (c) moneyAll.push({ table: t.name, because: 'refers_to_money', evidence: { path: t.defined.path, line: t.defined.line, symbol: c.name }, columns: [c.name] }); }
+const money = payProviders.length || moneyAll.length || merge?.money ? { providers: [...payProviders, ...(merge?.money?.providers ?? []).filter((o) => !payProviders.some((p) => p.provider === o.provider))], tables: moneyAll.slice(0, 200) } : null;
 // ── People: the same rule everydeck uses (detectPeople in the rules bundle). The table with one row per account (its key references auth.users; with
 //    several, the one with a name the app shows, then with a name column, then the most referenced), the name column the app shows, e-mail and phone
 //    (everydeck never reads them), memberships, and the login provider from the packages. What the agent described adds to it and never replaces it:
@@ -564,7 +577,7 @@ for (const td of [...trigDefs.values()].filter((t) => t.place).sort((a, b) => by
   if (td.when !== 'after' || /^everydeck/i.test(td.fn) || /^everydeck/i.test(td.name) || !mergedTables.some((t) => t.name === td.table) || (merge?.everydeck_tables ?? []).some((y) => y.table === td.table)) continue;
   addCand({ id: `trigger:${td.table}:${td.name}`, source: 'trigger', kind: td.event, table: td.table, evidence: { ...td.place, symbol: td.name } });
 }
-const flowCandidates = candidates.slice(0, 500).map((c) => { const old = (merge?.flow_candidates ?? []).find((x) => x.id === c.id); return old?.left_out ? { ...c, left_out: old.left_out } : c; });
+const flowCandidates = candidateWays(candidates).slice(0, 500).map((c) => { const old = (merge?.flow_candidates ?? []).find((x) => x.id === c.id); return old?.left_out ? { ...c, left_out: old.left_out } : c; });
 // ── Page descriptions (screens[].described) from facts: the file behind the route (or the route file of the framework) and its own imports, two levels
 //    deep, without modules more than three pages share; the tables they show and the flows of the app map that start there. The agent's description stays.
 const pageFileOf = new Map((reads.page_files ?? []).map((x) => [`${x.path}:${x.line}`, x.file]));
@@ -589,6 +602,7 @@ for (const [id, sv] of services) {
     if (w) c.external_id = { component: id, evidence: { path: w.path, line: w.line, symbol: c.name } }; } }
 // The icon the app itself ships (skeleton part, new on every run; the agent's descriptions under `app` stay)
 const icon = findIcon(repo, files);
+const iconSkipped = icon ? [] : iconsTooLarge(repo, files);
 const appOut = (() => { const { icon: _old, ...rest } = merge?.app ?? {}; const a = { ...rest, ...(icon ? { icon } : {}) }; return Object.keys(a).length ? a : null; })();
 const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git:${commit.slice(0, 12)}`, commit, ...(appOut ? { app: appOut } : {}),
   components: [...components.map((c) => ({ ...c, ...(merge?.components?.find((x) => x.package === c.package)?.call ? { call: merge.components.find((x) => x.package === c.package).call } : {}) })), ...(merge?.components ?? []).filter((x) => !components.some((c) => c.package === x.package))], platforms: merge?.platforms ?? platforms, screens: screens.map((x, i) => { const d = merge?.screens?.find((y) => y.pattern === x.pattern)?.described ?? describedOf(i); return d ? { ...x, described: d } : x; }), api_routes,   // a page's description (described) stays as long as the page exists
@@ -610,4 +624,4 @@ if (args.includes('--types')) {
 const outPath = opt('--out');
 // --out creates its folder (everydeck/ does not exist before the first run)
 if (outPath) { mkdirSync(dirname(outPath), { recursive: true }); writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n'); } else process.stdout.write(JSON.stringify(out, null, 1) + '\n');
-console.error(JSON.stringify({ out: outPath, tables: out.tables.length, columns: out.tables.reduce((n, t) => n + t.columns.length, 0), shown: out.tables.filter((t) => (t.shown ?? []).length || t.columns.some((c) => (c.shown ?? []).length)).length, not_shown: out.tables.reduce((n, t) => n + (t.not_shown ?? []).length, 0), components: out.components.length, api_routes: api_routes.length, screens: screens.length, platforms: out.platforms.length, routes_with_reads: reads.routes.filter((r) => r.reads.length).length, views: reads.views.length, sql_functions: reads.sql_functions.length, merged: !!merge }));
+console.error(JSON.stringify({ out: outPath, tables: out.tables.length, columns: out.tables.reduce((n, t) => n + t.columns.length, 0), shown: out.tables.filter((t) => (t.shown ?? []).length || t.columns.some((c) => (c.shown ?? []).length)).length, not_shown: out.tables.reduce((n, t) => n + (t.not_shown ?? []).length, 0), components: out.components.length, api_routes: api_routes.length, screens: screens.length, platforms: out.platforms.length, routes_with_reads: reads.routes.filter((r) => r.reads.length).length, views: reads.views.length, sql_functions: reads.sql_functions.length, merged: !!merge , ...(iconSkipped.length ? { icon_skipped: iconSkipped, icon_note: `the app's logo is larger than ${ICON_MAX_BYTES} bytes, so everydeck shows no logo; add a smaller copy (PNG or SVG) and run again` } : {}) }));

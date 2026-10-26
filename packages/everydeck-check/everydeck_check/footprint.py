@@ -1,5 +1,6 @@
 """The footprint of the setup in the app's repository: which files the change adds and changes against the commit before the setup, whether a lockfile
-was rewritten beyond the new packages, and what was left behind (browser automation folders, screenshots, scripts with a probe id). Facts from git only."""
+was rewritten beyond the new packages, what was left behind (browser automation folders, screenshots, scripts with a probe id), and every AI client of the
+app map that the setup did not wrap. Facts from git and the app map only."""
 from __future__ import annotations
 
 import json
@@ -74,6 +75,54 @@ def outside_writes(repo: Path, base: str, url: str) -> list[dict[str, str]]:
             for v, n in rows if v >= since and v not in files]
 
 
+# The wrapper around every AI client of the app map (ai_calls). OpenAI and providers reached through the OpenAI client: wrap_openai/wrapOpenAI in the
+# client's file; Anthropic: wrap_anthropic/wrapAnthropic; any other provider without a wrapper (Google, Mistral, AI SDK, HTTP): ai_call/aiCall where it is called.
+OPENAI_LIKE = {"openai", "openrouter", "groq", "together", "azure", "azure.ai.openai", "deepseek", "x_ai", "xai", "perplexity", "fireworks"}
+WRAP = {"openai": re.compile(r"\bwrap_?[oO]pen[aA][iI]\("), "anthropic": re.compile(r"\bwrap_?[aA]nthropic\(")}
+MEASURED = re.compile(r"\bai_?[cC]all\(")
+# The methods the wrappers measure (the same lists as METHODS in sdk-ts/src/ai.ts and _METHODS in sdk-python/everydeck/ai.py). A wrapped client is
+# no proof for a call of another method (e.g. Anthropic messages.stream): that call needs ai_call/aiCall where it is called, else it stays "not measured".
+WRAPPED = {
+    "openai": {"chat.completions.create", "chat.completions.parse", "beta.chat.completions.parse", "responses.create", "responses.parse", "embeddings.create",
+               "completions.create", "images.generate", "images.edit", "audio.transcriptions.create", "audio.translations.create", "audio.speech.create"},
+    "anthropic": {"messages.create", "messages.parse", "beta.messages.create", "beta.messages.parse"},
+}
+
+
+def _wrapped(family: str, symbol: str) -> bool:
+    """the found method is one the wrapper measures (a bare name like `create` counts when a measured method ends with it)"""
+    return any(m == symbol or m.endswith("." + symbol) for m in WRAPPED[family]) if symbol else True
+
+
+def ai_unwrapped(repo: Path, app_map: Path | None = None) -> list[dict[str, Any]]:
+    path = app_map or repo / "everydeck/app-map.json"
+    try: calls = json.loads(path.read_text(encoding="utf-8")).get("ai_calls") or []
+    except (OSError, ValueError): return []
+    out: list[dict[str, Any]] = []; seen: set[tuple[str, str]] = set()
+    for a in calls:
+        prov = str(a.get("provider", "")); ev = a.get("evidence") or {}; rel = str(ev.get("path", ""))
+        if not rel: continue
+        family = "openai" if prov in OPENAI_LIKE else "anthropic" if prov == "anthropic" else None
+        symbol = str(ev.get("symbol") or "")
+        # a call of a method the wrapper does not measure is checked like a call of a provider without a wrapper
+        unmeasured = family is not None and a.get("kind") == "call" and not _wrapped(family, symbol)
+        if family is None and a.get("kind") != "call": continue   # other providers: their call places carry ai_call
+        if family is not None and a.get("kind") != "client" and not unmeasured: continue
+        key = (rel, prov) if not unmeasured else (rel, f"{prov}:{symbol}")
+        if key in seen: continue
+        try: text = (repo / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError: continue
+        seen.add(key)
+        py = rel.endswith(".py")
+        if family and not unmeasured and WRAP[family].search(text): continue
+        if (family is None or unmeasured) and MEASURED.search(text): continue
+        fix = (f"everydeck.wrap_{family}(client)" if py else f"everydeck.wrap{'OpenAI' if family == 'openai' else 'Anthropic'}(client)") if family and not unmeasured else ("everydeck.ai_call(...)" if py else "everydeck.aiCall({...})")
+        fact = (f"the AI call {symbol} of {prov} here is not measured: the everydeck wrapper does not measure {symbol}" if unmeasured
+                else f"the AI {'client' if family else 'call'} of {prov} here is not measured")
+        out.append({"path": rel, "line": ev.get("line"), "provider": prov, "fact": fact, "fix": fix})
+    return out
+
+
 def footprint(repo: Path, base: str, fix_lock: bool = False, db: str | None = None) -> dict[str, Any]:
     status = [l.split("\t") for l in _git(repo, "diff", "--name-status", "-M", base).strip().split("\n") if l]
     untracked = [l for l in _git(repo, "ls-files", "--others", "--exclude-standard").strip().split("\n") if l]
@@ -97,5 +146,9 @@ def footprint(repo: Path, base: str, fix_lock: bool = False, db: str | None = No
         elif MEDIA.search(rel): left.append({"path": rel, "fact": "a screenshot, video or trace"})
         elif (repo / rel).is_file() and re.search(r"\.(m?[jt]sx?|py|sh)$", rel) and PROBE.search((repo / rel).read_text(encoding="utf-8", errors="replace")): left.append({"path": rel, "fact": "a script that uses the probe run, only for verifying the setup"})
     outside = outside_writes(repo, base, db) if db else None
-    return {"status": "ok" if not locks and not left and not outside else "refused", "base": base, "files_added": len(added), "files_changed": len(changed),
+    ai = ai_unwrapped(repo)
+    # the source map upload key: never under a public name, in built code, in a tracked file or in an env file git does not ignore
+    from .keys import key_findings
+    keys = key_findings(repo)
+    return {"status": "ok" if not locks and not left and not outside and not ai and not keys["errors"] else "refused", "ai_unwrapped": ai, "keys": keys, "base": base, "files_added": len(added), "files_changed": len(changed),
             "added": added[:200], "changed": changed[:200], "untracked": untracked[:200], "lockfiles": locks, "leftovers": left, **({"outside": outside} if outside is not None else {})}

@@ -103,3 +103,36 @@ EXCEPTION WHEN OTHERS THEN
   RETURN NULL;
 END $$;
 REVOKE ALL ON FUNCTION everydeck_outbox.capture() FROM PUBLIC;
+
+-- Heartbeat of a schedule in plain SQL (pg_cron): the job writes its beat into the outbox at the end, the relay brings it to everydeck like every
+-- result (no key in SQL). Like Sentry Crons with a result: in_progress, ok or error. The row is the SDK's job heartbeat
+-- (name everydeck.sdk.heartbeat, run everydeck.job:<job>); job ids as in jobs[] of the app map.
+ALTER TABLE everydeck_outbox.event ADD COLUMN IF NOT EXISTS job_status text CHECK (job_status IS NULL OR job_status IN ('in_progress', 'ok', 'error'));
+
+CREATE OR REPLACE FUNCTION everydeck_outbox.job_heartbeat(p_job text, p_status text DEFAULT 'ok') RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF p_job IS NULL OR p_job !~ '^[a-z][a-z0-9_.-]{0,63}$' THEN RAISE EXCEPTION 'everydeck_outbox.job_heartbeat: job id % is not an id of jobs[] (lowercase, a-z 0-9 _ . -)', p_job; END IF;
+  IF p_status IS NULL OR p_status NOT IN ('in_progress', 'ok', 'error') THEN RAISE EXCEPTION 'everydeck_outbox.job_heartbeat: status % is not in_progress, ok or error', p_status; END IF;
+  INSERT INTO everydeck_outbox.event (name, operation_id, job_status) VALUES ('everydeck.sdk.heartbeat', 'everydeck.job:' || p_job, p_status);
+END $$;
+REVOKE ALL ON FUNCTION everydeck_outbox.job_heartbeat(text, text) FROM PUBLIC;
+
+-- The whole command of a schedule as one job: cron.schedule('<job>', '<rhythm>', $$ SELECT everydeck_outbox.run_job('<job>', $job$ <the command> $job$) $$).
+-- Success: beat ok. Failure: the command's writes roll back, the beat says error, and the SQLSTATE goes to the log as a WARNING (no error text,
+-- which can carry column values) instead of failing the schedule, because a failed schedule would roll back its beat too. Runs with the rights of the schedule's owner
+-- (SECURITY INVOKER), never more.
+CREATE OR REPLACE FUNCTION everydeck_outbox.run_job(p_job text, p_command text) RETURNS void
+LANGUAGE plpgsql SECURITY INVOKER AS $$
+BEGIN
+  IF p_job IS NULL OR p_job !~ '^[a-z][a-z0-9_.-]{0,63}$' THEN RAISE EXCEPTION 'everydeck_outbox.run_job: job id % is not an id of jobs[] (lowercase, a-z 0-9 _ . -)', p_job; END IF;
+  BEGIN
+    EXECUTE p_command;
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM everydeck_outbox.job_heartbeat(p_job, 'error');
+    RAISE WARNING 'everydeck_outbox.run_job: job % failed (SQLSTATE %)', p_job, SQLSTATE;
+    RETURN;
+  END;
+  PERFORM everydeck_outbox.job_heartbeat(p_job, 'ok');
+END $$;
+REVOKE ALL ON FUNCTION everydeck_outbox.run_job(text, text) FROM PUBLIC;

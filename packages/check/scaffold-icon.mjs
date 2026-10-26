@@ -56,6 +56,12 @@ export function iconCandidates(repo, files) {
   return out.filter((c) => typeOf(c.file)).sort((a, b) => a.rank - b.rank || b.size - a.size);
 }
 
+/** Icons the app ships that are over the size limit (the agent is told instead of the logo silently missing) */
+export function iconsTooLarge(repo, files) {
+  const out = [];
+  for (const c of iconCandidates(repo, files)) { const n = readFileSync(c.file).length; if (n > ICON_MAX_BYTES) out.push({ file: relative(repo, c.file), bytes: n }); }
+  return out.slice(0, 5);
+}
 /** The best icon under the size limit, with its content, or null */
 export function findIcon(repo, files) {
   for (const c of iconCandidates(repo, files)) {

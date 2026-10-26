@@ -1,0 +1,572 @@
+{
+ "salt": "everydeck public guard v1",
+ "hashLength": 32,
+ "sequence": [
+  "umlaut",
+  "umlaut-escaped",
+  "dash",
+  "dash-escaped",
+  "german-word",
+  "internal-word",
+  "pilot-or-person",
+  "local-path",
+  "old-name",
+  "secret"
+ ],
+ "patterns": [
+  {
+   "id": "umlaut",
+   "source": "5bc3a4c3b6c3bcc384c396c39cc39f5d",
+   "flags": ""
+  },
+  {
+   "id": "umlaut-escaped",
+   "source": "5c5c283f3a7530307c7829283f3a65347c66367c66637c63347c64367c64637c646629",
+   "flags": "i"
+  },
+  {
+   "id": "dash",
+   "source": "5be28093e280945d",
+   "flags": ""
+  },
+  {
+   "id": "dash-escaped",
+   "source": "5c5c753230315b33345d",
+   "flags": "i"
+  },
+  {
+   "id": "local-path",
+   "source": "5c2f55736572735c2f7c5c2f686f6d655c2f5b612d7a5d7c5b412d5a5d3a5c5c55736572737c67302d7265706f737c283f3a3132375c2e305c2e305c2e317c6c6f63616c686f7374293a343837337c5c626578706572696d656e74735c2f7c5c62706c616e6e696e675c2f7c283f3c215b5c772f2e2d5d29646f63735c2f7c283f3c215b5c772f2e2d5d2967305c2f",
+   "flags": ""
+  },
+  {
+   "id": "old-name",
+   "source": "283f3c2165766572796465636b2d29626566756e647c65766572796465636b2d626566756e64283f215c2e6a736f6e29",
+   "flags": "i"
+  },
+  {
+   "id": "secret",
+   "source": "5c62736b2d5b412d5a612d7a302d395f2d5d7b32302c7d7c65794a5b412d5a612d7a302d395f2d5d7b31302c7d5c2e65794a5b412d5a612d7a302d395f2d5d7b31302c7d7c5c6273625f283f3a7365637265747c7075626c69736861626c65295f5b412d5a612d7a302d395f2d5d7b31302c7d7c5c6267685b706f7573725d5f5b412d5a612d7a302d395d7b33302c7d7c5c626e706d5f5b412d5a612d7a302d395d7b33302c7d7c5c62707970692d5b412d5a612d7a302d395f2d5d7b33302c7d7c5c62414b49415b302d39412d5a5d7b31367d7c2d2d2d2d2d424547494e205b412d5a205d2a50524956415445204b45592d2d2d2d2d7c5c62786f785b62617072735d2d5b412d5a612d7a302d392d5d7b31302c7d7c5c6272655f5b412d5a612d7a302d395f5d7b32342c7d",
+   "flags": ""
+  }
+ ],
+ "order": {
+  "id": "order-number",
+  "source": "5c62283f3a425c647b312c337d5b612d7a5d3f7c5b44474f45414e525053464c5d5c647b312c327d5b612d7a5d3f295c62",
+  "flags": ""
+ },
+ "allow": [
+  {
+   "id": "umlaut",
+   "line": {
+    "source": "616e7a61686c756e675c7cc3bc62657277656973756e675c7c766f726b61737365",
+    "flags": ""
+   }
+  },
+  {
+   "id": "dash",
+   "line": {
+    "source": "74686520656e74697265206c6966657370616e206f6620612070616765e28094696e636c7564696e672069662074686520757365722072657475726e7320746f207468652070616765206166746572",
+    "flags": ""
+   }
+  }
+ ],
+ "words": [
+  {
+   "id": "german-word",
+   "caseSensitive": true,
+   "parts": [
+    {
+     "atWordStart": true,
+     "pairs": [],
+     "terms": [
+      {
+       "hash": "01e650e77fcd84def1ae7d34cb7ca74b",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "01fe43044d84936d371035bea364dbf0",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "06c035c8f82a0759345a2060d8e3b8ed",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "07218a9e105de0f47a6b4108a0f3f4a4",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "09d1adf9919030ec9fc8fe97ad835281",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "0ab18712ee9c73cf9f6296d454871036",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "187da49a88191704f194c7437fd07e04",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "18f4de5a4fea9a3525e6253b15acdb66",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "1be6c0dbe17ab46cd8abaa2421e56aa9",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "1c0dd7b8397b379014724ddc6789473b",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "234b7de972d6f99cf5ad1dec870604c4",
+       "length": 6,
+       "wordEnd": true
+      },
+      {
+       "hash": "2d34d55478f11316162811694cb4ad4a",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "2e4692fca8bd9a0be425225506647dfb",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "36a39c100a0f81b785ca36cf5af85374",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "3f42ccc1a341652d77c7a4aa146c5382",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "471488e42d2eb03c78442b1c5defceb7",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "491965746db1b67a3c928a2a4d359c10",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "4b1737b88518a769e4d00cc058ae97d9",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "4b8e1c099ebc6ac4f23cc6efdc884493",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "50f346922a827b87ffdbaa91e01709fd",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "53d92af6a41cb6630b63da4c0010be56",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "59a8eb284e8bcdca503c7a526c6a2ff1",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "6555cbec085b10f0624c96d25951a6f8",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "6b0e4295a359b993eb80a4566079d00e",
+       "length": 6,
+       "wordEnd": true
+      },
+      {
+       "hash": "6ee8c6f1c40a4895d755697bd0d1c665",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "6fb0ef0ae2cab34a2a47fa26aff2f6eb",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "72fd8b9500e8d8d6a74995e164c8bafc",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "7777d8ce140f1da95daa24d9f9c5f3e0",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "784ccde609d335d24ffb226064bf06cc",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "79ece8fcd851e0263bb597a2d5521251",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "8a01ca3bcf59d758684b53ff32257158",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "94aa8cddb2b0968de57b7055d020ef88",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "963b24ae2e48be8c596f6eb57358acd7",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "9a2cf2d2b17f44b36f4f6195db63f2b2",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "9f0bb8f2f1283faae162b1cbc7543902",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "a09af144b211be642431f6cf94021502",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "a8804bd2510dc2393b9dcceaaa4a94b5",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "a9141618945f5ca5751ad8d3b3e5e444",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "a931e78d07173b11aec2de40756f14e9",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "aaa42c9acded4deca8759689d7bd006c",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "b1dc8b2be7fbf00ba809a4d8cd576233",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "b3e8cb3f97d5d7073ea5be1d3398f602",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "b8b731a96d04abe5c435b2a3dfefaf3f",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "c41012aa226fa157b21c15e2b4678686",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "c5c7bd33664eb370a2283ed19ae7edeb",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "cda9a9e23f2c3807e27e9fc22b686ef5",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "d1e1d7139b574f20c587476a203bf668",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "d462205c825e164a4a1d43c30cfb29ab",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "daf302ce72158a06d56bdc9664026535",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "db8cf64edc4d64ab01c04591206d175a",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "deefb43faade530e357281528c105de3",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "dfb6d93baef7bfe4e192c669ba4bc8c5",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "e31d9869c920c02f5a3d7bf0ea4ede36",
+       "length": 5,
+       "wordEnd": true
+      },
+      {
+       "hash": "e93648d7dbca045d3f3cd16200d94b26",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "ed4b375036451f3142844b81510338f7",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "eda34cc16ef14c484d3d9f59f77f503a",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "f639b94018e8552e8ac66ada641ff42c",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "f6a5ae0e7dafd822143fa2ae8a17c6f0",
+       "length": 4,
+       "wordEnd": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "internal-word",
+   "caseSensitive": true,
+   "parts": [
+    {
+     "atWordStart": true,
+     "pairs": [],
+     "terms": [
+      {
+       "hash": "40782cd96392288dc4531f1b03e7415b",
+       "length": 6,
+       "wordEnd": false,
+       "tail": "5c64"
+      },
+      {
+       "hash": "46465507e3ac9a6106e971a2c5080147",
+       "length": 6,
+       "wordEnd": false,
+       "tail": "5c64"
+      },
+      {
+       "hash": "60f0fd0c459aa02bec0473a7d314890d",
+       "length": 7,
+       "wordEnd": false
+      },
+      {
+       "hash": "67f1c4c48a68d9ba05ebe811f0118c1a",
+       "length": 12,
+       "wordEnd": false
+      },
+      {
+       "hash": "6b7451605a8fd136bc0608d4813092ac",
+       "length": 7,
+       "wordEnd": false
+      },
+      {
+       "hash": "9ca8b589a63cda07705b304fae17a90b",
+       "length": 5,
+       "wordEnd": false
+      },
+      {
+       "hash": "b1037132da39337a2fc41fecd1ee106e",
+       "length": 5,
+       "wordEnd": false,
+       "tail": "5c64"
+      },
+      {
+       "hash": "c2b61108ff26622858eb472b2f2e54f1",
+       "length": 12,
+       "wordEnd": false
+      },
+      {
+       "hash": "cdf11b0a2e6740069529677ec4d23a60",
+       "length": 5,
+       "wordEnd": false,
+       "tail": "5c64"
+      },
+      {
+       "hash": "d58af0147748d282cc72bf45c8d4e608",
+       "length": 7,
+       "wordEnd": false
+      },
+      {
+       "hash": "d5f49f3f9a4ba4a6e2100895254850f1",
+       "length": 8,
+       "wordEnd": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pilot-or-person",
+   "caseSensitive": false,
+   "parts": [
+    {
+     "atWordStart": true,
+     "pairs": [],
+     "terms": [
+      {
+       "hash": "5cf3bd60c330d6c20c0ec67be4dd8c98",
+       "length": 3,
+       "wordEnd": true
+      },
+      {
+       "hash": "654ee85aa3c77b56c5f9a07340aed445",
+       "length": 4,
+       "wordEnd": true
+      },
+      {
+       "hash": "6a8466c8b1ddc515318e2070a7c7e0a2",
+       "length": 4,
+       "wordEnd": false
+      },
+      {
+       "hash": "8f8df019655add42665c339815f01d39",
+       "length": 5,
+       "wordEnd": false,
+       "tail": "5b612d7a5d5c64"
+      }
+     ]
+    },
+    {
+     "atWordStart": false,
+     "pairs": [
+      "1ed3a406eaeca9eb8fce72c7338dbb82",
+      "24e0a9da13e04bcb0bf47a6946f65607",
+      "25a158ad6343c1d4389e3897474f44ac",
+      "2d91a905ed8a5c4b997b023f5a2c580d",
+      "363b17a3f56f040d16dd850d84fbea50",
+      "4345f7b3af4958eff739b475ecc87836",
+      "84c47e07ff8f050353def9b6a80abe78",
+      "97bd3152b258f6b4a7741378f04969ef",
+      "afe6229bae58856cda1cd55f45e18a7a",
+      "b6d400ba52375ce3fc8aab9ce736282d",
+      "b7d2b1dfabe84b7b41d9417eaa89b66b",
+      "cb10aded394a8437dd59e30715e8c462",
+      "f3a3e4f6d70c772ab2a1cfc1ca80a7b9"
+     ],
+     "terms": [
+      {
+       "hash": "19c8cb11200a4e9104a8a07fa78abcc4",
+       "length": 8,
+       "wordEnd": false
+      },
+      {
+       "hash": "46a8adc4ab9fe436169c4e5ae0a68a82",
+       "length": 5,
+       "wordEnd": false
+      },
+      {
+       "hash": "54ba0d15d719cb12c8aaf124e1ec19a6",
+       "length": 15,
+       "wordEnd": false
+      },
+      {
+       "hash": "56ba9c1710a9633d19c3a3126cc5c24f",
+       "length": 9,
+       "wordEnd": false
+      },
+      {
+       "hash": "650b2c8d81338889a19b751642b0886a",
+       "length": 6,
+       "wordEnd": false
+      },
+      {
+       "hash": "87e9d5e67d2e9d2ceb1187744c0acc93",
+       "length": 8,
+       "wordEnd": false
+      },
+      {
+       "hash": "90ca3f033e9e2962be64662c2f1ab496",
+       "length": 15,
+       "wordEnd": false
+      },
+      {
+       "hash": "94baff16f21194bf2c9ee4668fb08259",
+       "length": 8,
+       "wordEnd": false
+      },
+      {
+       "hash": "9664a72f56574950c2ef9d1df0293d48",
+       "length": 9,
+       "wordEnd": false
+      },
+      {
+       "hash": "99e30a2c6a008e40693f516b2ad6a4b2",
+       "length": 5,
+       "wordEnd": false
+      },
+      {
+       "hash": "c064b6275701d7d93d6d5ceaed351e57",
+       "length": 4,
+       "wordEnd": false
+      },
+      {
+       "hash": "c5976c21127c741b83a8f643943a9ef9",
+       "length": 8,
+       "wordEnd": false
+      },
+      {
+       "hash": "e6e5320035e1a8ed42bad6437776e51a",
+       "length": 7,
+       "wordEnd": false
+      },
+      {
+       "hash": "f112af96e377b0d306cf3f4a0cde8fea",
+       "length": 7,
+       "wordEnd": false
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

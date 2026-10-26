@@ -108,8 +108,26 @@ def cmd_validate(a: argparse.Namespace) -> int:
     if is_app_map(raw):
         repo = getattr(a, "repo", None)
         db = getattr(a, "db", None) or os.environ.get("EVERYDECK_SCHEMA_DB_URL")
+        # the inventory (what everydeck-check finds itself) goes into the app map; everydeck compares it with the description
+        inventory = None
+        if repo:
+            from .inventory import build_inventory
+            inv = build_inventory(Path(repo).resolve(), raw)
+            inventory = "unchanged" if raw.get("inventory") == inv else "written"
+            if inventory == "written":
+                raw["inventory"] = inv
+                # an old file name (everydeck-befund.json) is read, but written is only the new one
+                Path(APP_MAP if a.file_note else a.manifest).write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         errs = validate_app_map(raw, Path(repo).resolve() if repo else None, db)
+        from .rules import app_map_open
+        parts = app_map_open(raw) if not errs else {"setup": None, "open": [], "still_open": 0}
+        nxt = (f"{len(parts['open'])} open parts nobody answered yet: connect each (flow, channel, money entry) or record its outcome in outcomes[] (covered_by a flow that does exactly this, not_applicable with the place that shows it); deferred and unsupported stay open and the owner sees them"
+               if parts["open"] else None)
+        # a refusal says what comes next too, so the agent does not end its turn with a question to the owner
+        if errs: nxt = ("Fix each error in everydeck/app-map.json (and the code it names) yourself with your file tools: every error names the place and what to change. "
+                        "Then run validate again until it exits 0. Nothing here is the owner's decision: do not ask the owner and do not end your turn.")
         print(json.dumps({"status": "ok" if not errs else "invalid", "form": "app_map", "file": a.manifest, **({"note": a.file_note} if a.file_note else {}), "checked_against_repo": bool(repo), "checked_against_database": bool(db), "errors": errs,
+                          **({"inventory": inventory} if inventory else {"inventory": "not scanned: run with --repo ."}), **({"setup": parts["setup"]} if parts.get("setup") else {}), "open": parts["open"], **({"next": nxt} if nxt else {}),
                           "counts": {"tables": len(raw.get("tables", [])), "functions": len(raw.get("functions", [])), "flows": len(raw.get("flows", [])), "present": sum(1 for c in raw.get("checklist", []) if c.get("present"))}}, indent=1))
         return 0 if not errs else 2
     m, lc, form = _load_manifest(a.manifest)
@@ -266,6 +284,22 @@ def cmd_footprint(a: argparse.Namespace) -> int:
     return 0 if out["status"] == "ok" else 2
 
 
+def cmd_keys(a: argparse.Namespace) -> int:
+    """The source map upload key: never under a public name, never in built code, never in a tracked file or an env file git does not ignore."""
+    from .keys import key_findings
+    out = key_findings(Path(a.repo), a.build)
+    print(json.dumps(out, indent=1))
+    return 0 if out["status"] == "ok" else 2
+
+
+def cmd_restart_stack(a: argparse.Namespace) -> int:
+    """The local Supabase stack of this repository restarted with the installed CLI, with a time limit; never npx, never a process by name."""
+    from .stack import restart_stack
+    out = restart_stack(Path(a.repo).resolve(), a.timeout)
+    print(json.dumps(out, indent=1))
+    return 0 if out["status"] == "ok" else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="everydeck-check")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -277,12 +311,17 @@ def main(argv: list[str] | None = None) -> int:
     pub = sub.add_parser("publish"); pub.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list; use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: an app map goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of an app map against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
     fp = sub.add_parser("footprint", help="what the setup added and changed in the repository against --base (the commit before the setup); refuses a rewritten lockfile and leftovers")
     fp.add_argument("--base", required=True); fp.add_argument("--repo", default="."); fp.add_argument("--fix-lock", action="store_true", help="restore package-lock.json from --base and add only the new packages"); fp.add_argument("--db", default=None, help="local database URL: also report migrations the database applied during the setup that are not in this repository (written outside it)"); fp.set_defaults(fn=cmd_footprint)
+    ks = sub.add_parser("keys", help="the source map upload key (EVERYDECK_SOURCEMAPS_KEY): refused under a public name, in built code, in a tracked file or in an env file git does not ignore")
+    ks.add_argument("--repo", default="."); ks.add_argument("--build", action="append", default=[], help="another output folder of the build (relative to --repo)"); ks.set_defaults(fn=cmd_keys)
+    from .stack import STACK_RESTART_TIMEOUT
+    rs = sub.add_parser("restart-stack", help="restart the local Supabase stack of this repository (supabase stop, supabase start) with the installed CLI and a time limit")
+    rs.add_argument("--repo", default="."); rs.add_argument("--timeout", type=int, default=STACK_RESTART_TIMEOUT, help=f"seconds per command (default {STACK_RESTART_TIMEOUT})"); rs.set_defaults(fn=cmd_restart_stack)
     ch = sub.add_parser("change", help="check everydeck-change.json against manifest, repo and HEAD; optionally publish it")
     ch.add_argument("change"); ch.add_argument("--manifest", required=True); ch.add_argument("--repo", default="."); ch.add_argument("--sha", default=None)
     ch.add_argument("--url"); ch.add_argument("--project"); ch.add_argument("--token"); ch.set_defaults(fn=cmd_change)
     a = p.parse_args(argv)
     a.file_note = None
-    if a.cmd not in ("change", "footprint"):
+    if a.cmd not in ("change", "footprint", "keys", "restart-stack"):
         for attr in ("manifest", "app_map"):
             if hasattr(a, attr):
                 path, a.file_note = map_path(getattr(a, attr)); setattr(a, attr, path)

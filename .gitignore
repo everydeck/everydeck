@@ -4,3 +4,4 @@ build/
 *.egg-info/
 __pycache__/
 *.tgz
+.github/release/node_modules/

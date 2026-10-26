@@ -35,10 +35,11 @@ import json
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .read_bridge import PAGE_MAX, ReadBridge, _uniq, psycopg_match, psycopg_one, psycopg_rights, psycopg_rows
+from .read_bridge import PAGE_MAX, ReadBridge, _uniq, psycopg_count, psycopg_match, psycopg_one, psycopg_rights, psycopg_rows
 from .verify import MemorySeen
 
 SCOPE_SIGNATURE_PREFIX = "EVERYDECK-SCOPE-V1\n"
@@ -107,6 +108,9 @@ class PsycopgReadOnly:
     def match(self, *a: Any) -> list[dict[str, Any]]:
         return self.read_only(lambda c: psycopg_match(c)(*a))
 
+    def count(self, *a: Any) -> int:
+        return self.read_only(lambda c: psycopg_count(c)(*a))
+
     def rights(self, scope: Mapping[str, Any]) -> dict[str, Any]:
         def check(c: Any) -> dict[str, Any]:
             base = psycopg_rights(c, scope)()
@@ -170,6 +174,10 @@ class SupabaseReadOnly:
             q = q.order(c)
         return list(q.limit(max(1, min(PAGE_MAX + 1, int(limit)))).execute().data or [])
 
+    def count(self, table: str, keys: Sequence[str]) -> int:
+        # PostgREST counts exactly (Prefer: count=exact) without returning rows
+        return int(self._table(table).select(keys[0], count="exact", head=True).execute().count or 0)
+
     def rights(self, scope: Mapping[str, Any]) -> dict[str, Any]:
         # The role cannot be checked by SQL through PostgREST; the path is fixed: only GET (select), run read-only by PostgREST.
         return {"role": "supabase api (postgrest)", "select_only": False, "read_only_transaction": True, "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")}
@@ -224,7 +232,7 @@ class EverydeckReadBridge:
             if p.get("version") != "1" or not isinstance(p.get("scope"), dict) or p["scope"].get("version") != "1":
                 return "read scope version not supported"
             scope = p["scope"]; db = self.db
-            bridge = ReadBridge(scope, self.keys[0], db.rows, app=self.app, page_limit=200, rights=lambda: db.rights(scope), one=db.one, match=db.match,
+            bridge = ReadBridge(scope, self.keys[0], db.rows, app=self.app, page_limit=200, rights=lambda: db.rights(scope), one=db.one, match=db.match, count=getattr(db, "count", None),
                                 signatures="required", keys=self.keys, seen=self.seen)
             self._cached = (time.monotonic(), p, bridge)
             return p, bridge
@@ -243,37 +251,87 @@ class EverydeckReadBridge:
         return out[1].handle(method, path, query, authorization, headers=headers, body=body, url=url)
 
 
+def _default_http(method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float) -> tuple[int, str]:
+    req = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 (everydeck address from the app's environment)
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+
+
+def pull_once(bridge: "EverydeckReadBridge", wait: int = 25, http: Callable[..., tuple[int, str]] | None = None) -> str:
+    """Pull (outbound only, like a GitHub self-hosted runner): fetch the next request from everydeck with a long poll (GET /v1/read-bridge/next), answer it
+    with this bridge and send the answer back (POST /v1/read-bridge/reply/<id>). Returns answered, idle (nothing within `wait` seconds), refused (key not
+    valid or not set up yet) or unreachable. everydeck needs no address and no key of the app."""
+    call = http or _default_http
+    if not bridge.endpoint or not bridge.keys:
+        return "refused"
+    auth = {"authorization": f"Bearer {bridge.keys[0]}", "accept": "application/json"}
+    try:
+        status, text = call("GET", f"{bridge.endpoint}/v1/read-bridge/next?wait={max(0, min(25, int(wait)))}", auth, None, wait + 10)
+    except Exception:
+        return "unreachable"
+    if status == 204:
+        return "idle"
+    if status in (401, 403, 409):
+        return "refused"
+    if status != 200:
+        return "unreachable"
+    job = json.loads(text)
+    path = str(job.get("path", ""))
+    parts = urllib.parse.urlsplit(path)
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    body = job.get("body")
+    code, out = bridge.handle(str(job.get("method", "GET")), parts.path, query, None, headers=dict(job.get("headers") or {}),
+                              body=body.encode() if isinstance(body, str) else None, url=path)
+    try:
+        call("POST", f"{bridge.endpoint}/v1/read-bridge/reply/{urllib.parse.quote(str(job.get('id', '')))}", {**auth, "content-type": "application/json"},
+             json.dumps({"status": code, "body": json.dumps(out)}).encode(), 30)
+    except Exception:
+        return "unreachable"
+    return "answered"
+
+
+def start_read_bridge(db: Any, *, http: Callable[..., tuple[int, str]] | None = None, **options: Any) -> threading.Event:
+    """Starts everydeck's read bridge in a background thread of this process: it fetches its requests from everydeck and answers them (pull_once), for as long
+    as the process runs. EVERYDECK_URL and EVERYDECK_READ_BRIDGE_TOKEN come from the environment and are read again when they change. Returns an Event; set()
+    stops it. Not set up yet or everydeck away: it waits (30 s, or 2 s when everydeck is unreachable, with jitter) and asks again."""
+    import os
+    import random
+
+    stop = threading.Event()
+
+    def loop() -> None:
+        bridge: EverydeckReadBridge | None = None
+        while not stop.is_set():
+            key = os.environ.get("EVERYDECK_READ_BRIDGE_TOKEN"); url = os.environ.get("EVERYDECK_URL")
+            if bridge is None or (key and key not in bridge.keys) or bridge.endpoint != (url or "").rstrip("/"):
+                bridge = EverydeckReadBridge(url, key, db, **options)
+            out = pull_once(bridge, 25, http)
+            if out == "refused":
+                stop.wait(30 + random.random() * 5)
+            elif out == "unreachable":
+                stop.wait(2 + random.random() * 3)
+
+    threading.Thread(target=loop, name="everydeck-read-bridge", daemon=True).start()
+    return stop
+
+
 READ_ROUTE = "/everydeck/read/{rest:path}"
 
 
-def mount_read_bridge(app: Any, db: Any, **options: Any) -> None:
-    """Mounts everydeck's read bridge on a FastAPI or Starlette app at /everydeck/read/{rest:path}, outside the API schema.
-
-    `db` is the connection the app already has: SupabaseReadOnly(<the app's Supabase client>) or PsycopgReadOnly(<database URL>). The route only
-    answers calls signed by everydeck, reads only the approved columns and never writes (see EverydeckReadBridge). EVERYDECK_URL and
-    EVERYDECK_READ_BRIDGE_TOKEN come from the environment when the first call arrives; `options` go to EverydeckReadBridge."""
-    import os
-
-    from starlette.concurrency import run_in_threadpool
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse
-
-    holder: list[EverydeckReadBridge] = []
-    lock = threading.Lock()
-
-    def bridge() -> EverydeckReadBridge:
-        with lock:
-            key = os.environ.get("EVERYDECK_READ_BRIDGE_TOKEN")
-            if not holder or (key and key not in holder[0].keys):
-                holder[:] = [EverydeckReadBridge(os.environ.get("EVERYDECK_URL"), key, db, **options)]
-            return holder[0]
-
-    async def everydeck_read(request: Request) -> JSONResponse:
-        b = bridge()
-        status, body = await run_in_threadpool(b.handle, request.method, request.url.path, dict(request.query_params),
-                                               request.headers.get("authorization"), request.headers, await request.body(), str(request.url))
-        return JSONResponse(body, status_code=status)
-
-    # a plain Starlette route (FastAPI takes it as well): the handler gets the request itself, FastAPI resolves no parameters for it
-    from starlette.routing import Route
-    app.router.routes.append(Route(READ_ROUTE, everydeck_read, methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False))
+def mount_read_bridge(app: Any, db: Any, **options: Any) -> threading.Event:
+    """Starts everydeck's read bridge for a FastAPI or Starlette app (or any other app object): it fetches its requests from everydeck and answers them,
+    outbound only; there is no route on the app and everydeck needs no address. `db` is the connection the app already has: SupabaseReadOnly(<the app's
+    Supabase client>) or PsycopgReadOnly(<database URL>). It only answers requests signed by everydeck, reads only the approved columns and never writes
+    (see EverydeckReadBridge). Started once per app object; `options` go to start_read_bridge and EverydeckReadBridge."""
+    running = getattr(app, "_everydeck_read_bridge", None)
+    if isinstance(running, threading.Event):
+        return running
+    stop = start_read_bridge(db, **options)
+    try:
+        setattr(app, "_everydeck_read_bridge", stop)
+    except Exception:
+        pass
+    return stop

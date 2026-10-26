@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import atexit
 import gzip
+import hashlib
 import json
+import math
 import logging
 import os
 import random
@@ -48,15 +50,36 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-__all__ = ["Everydeck", "AfterCommit", "SCHEMA_VERSION", "BATCH_MAX", "error_class_of", "scrub_text", "answer_of", "server_config_from_supabase"]
+__all__ = ["Everydeck", "AfterCommit", "SCHEMA_VERSION", "BATCH_MAX", "DEFAULT_HEARTBEAT_INTERVAL", "error_class_of", "scrub_text", "scrub_clip", "clip_for_scrub", "SCRUB_INPUT_MAX", "answer_of", "server_config_from_supabase", "PAYMENT_EVENTS", "looks_like_card", "AI_EVENT"]
 
-SCHEMA_VERSION = "1.3-r0"
+SCHEMA_VERSION = "1.5-r0"
 # origin of every event: a server key always reports the platform `server`
 CLIENT = {"platform": "server", "runtime": "python"}
 BATCH_MAX = 50
+# Heartbeat interval when the app names none: every 300 s (5 minutes), as in @everydeck/sdk (DEFAULT_HEARTBEAT_SECONDS). everydeck reports
+# an instance or a job as silent after two missed intervals and judges each by the interval its heartbeat reports (`interval_seconds`).
+DEFAULT_HEARTBEAT_INTERVAL = 300
 BATCH_MAX_BYTES = 64 * 1024
 EVENT_MAX_BYTES = 8 * 1024
 _REJECT = {400, 401, 403, 409, 413, 422}
+# payment events (server only): the five moments of a payment, named after the Segment e-commerce spec and Stripe (same as the TS SDK)
+from .ai import AI_EVENT  # noqa: E402  (AI calls, server only: the wrapper lives in its own module, everydeck/ai.py)
+PAYMENT_EVENTS = {"checkout_started": "everydeck.checkout.started", "order_completed": "everydeck.order.completed", "payment_failed": "everydeck.payment.failed",
+                  "order_refunded": "everydeck.order.refunded", "checkout_abandoned": "everydeck.checkout.abandoned"}
+_PAYMENT_SHORT = {"checkout_started": "started", "order_completed": "paid", "payment_failed": "failed", "order_refunded": "refunded", "checkout_abandoned": "abandoned"}
+_PAYMENT_ID_MAX = 100
+
+# the length of a business key in an event (event batch schema); a longer key of an order and a refund or attempt becomes a hash of both ids
+_KEY_MAX = 128
+
+
+def payment_key(short: str, pid: str, sub: str | None = None) -> str:
+    """The business key of a payment event: one per event of an order, with the refund or attempt id; too long, a hash of both ids (as in the TS SDK)."""
+    if not sub: return f"everydeck.pay:{short}:{pid}"
+    key = f"everydeck.pay:{short}:{pid}:{sub}"
+    return key if len(key) <= _KEY_MAX else f"everydeck.pay:{short}:h:{hashlib.sha256(f'{pid}\n{sub}'.encode()).hexdigest()}"
+
+
 _AUTH = {401, 403}
 Outcome = Literal["accepted", "retry", "rejected"]
 _log = logging.getLogger("everydeck")
@@ -159,6 +182,7 @@ class Everydeck:
         probe_id: str | None = None,
         compress: bool = True,
         source_context: bool = True,
+        config_source: "tuple[float, Callable[[], dict[str, Any] | None]] | None" = None,
     ) -> None:
         self.endpoint = (endpoint or "").rstrip("/")
         self.credential = credential or ""
@@ -182,9 +206,13 @@ class Everydeck:
         self._source_cache: dict[str, list[str] | None] = {}
         self._warn_cb = on_warning or (lambda m: _log.warning(m))
         self.enabled = enabled
+        # switched off only because endpoint, key or digest were missing (not by enabled=False): reconfigure() switches it on
+        self._missing_config = False
+        self._install_signal_handlers = install_signal_handlers
         # if address or key is missing (e.g. after an update with new variable names), the SDK turns itself off, loudly, never silently
         if self.enabled and (not self.endpoint or not self.credential or not self.manifest_digest):
             self.enabled = False
+            self._missing_config = True
             missing = "no endpoint" if not self.endpoint else "no key" if not self.credential else "no manifest digest"
             self._warn_cb(f"everydeck: disabled: {missing}; nothing is sent to everydeck until the app passes endpoint, key and manifest digest")
         self.heartbeat_interval = heartbeat_interval
@@ -196,6 +224,8 @@ class Everydeck:
         self._stop = threading.Event()
         self._inflight = False
         self._unreported_loss = 0
+        # events over EVENT_MAX_BYTES, reported as their own gap (cause sdk_limit, limit sdk_event_bytes), not as a full buffer
+        self._oversize_loss = 0
         self._paused_until = 0.0
         self._consecutive_failures = 0
         self._spool_q: deque[dict[str, Any]] = deque()          # pending writes (bounded)
@@ -214,8 +244,25 @@ class Everydeck:
             "replayed_from_spool": 0, "spool_disabled": False, "heartbeats": 0,
             "batches_compressed": 0, "bytes_raw": 0, "bytes_sent": 0, "retry_after_waits": 0,
         }
-        if not enabled:
+        # settings read again while the process runs (every `seconds`, like PostHog polls its flags); stops with close()
+        self._config_stop = threading.Event()
+        if config_source is not None and config_source[0] > 0:
+            every, load = config_source
+
+            def refresh() -> None:
+                while not self._config_stop.wait(every):
+                    try:
+                        v = load()
+                        if v:
+                            self.reconfigure(**v)
+                    except Exception:  # the source warns itself; the last values stay
+                        pass
+            threading.Thread(target=refresh, name="everydeck-config", daemon=True).start()
+        if not self.enabled:
             return
+        self._start()
+
+    def _start(self) -> None:
         self._t = threading.Thread(target=self._run, name="everydeck-sender", daemon=True)
         if self.spool_path:
             self._spool_replay()
@@ -223,7 +270,7 @@ class Everydeck:
             self._st.start()
         self._t.start()
         atexit.register(self.close)
-        if install_signal_handlers and threading.current_thread() is threading.main_thread():
+        if self._install_signal_handlers and threading.current_thread() is threading.main_thread():
             for sig in (_signal.SIGTERM, _signal.SIGINT):
                 prev = _signal.getsignal(sig)
 
@@ -245,9 +292,84 @@ class Everydeck:
                           **_opt(attempt_id=attempt_id, subject_ref=subject_ref, account_ref=account_ref, fields=fields,
                                  request_id=request_id, business_key=business_key, object_type=object_type, object_ref=object_ref)})
 
-    def heartbeat(self, interval_seconds: float, *, job: str | None = None) -> str | None:
+    def payment(self, event: str, *, order_id: str | None = None, checkout_id: str | None = None, refund_id: str | None = None, attempt_id: str | None = None,
+                total: float | int | None = None, currency: str | None = None, product: str | None = None, quantity: int | None = None, reason: str | None = None,
+                provider: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, object_type: str | None = None, object_ref: str | None = None) -> str | None:
+        """Payments (server only), set where the app itself talks to its payment provider: the checkout it opens and the webhook it receives. Names follow
+        the Segment e-commerce spec (Checkout Started, Order Completed, Order Refunded) and Stripe (payment failed, checkout expired). Only the amount
+        (`total`, in the main unit of the currency, e.g. 49.00), the currency (ISO 4217), the product, the quantity, the provider's ids and a short failure
+        reason travel; the person and the object go in subject_ref, account_ref, object_type, object_ref. Never card data: an event with a value that looks
+        like a card number is not sent. `order_id` (or `checkout_id` for a checkout) is required: everydeck counts the same id once per event.
+        Several refunds of one order and several failed attempts: `refund_id` (the provider's id of this refund, Stripe `re_…`) and `attempt_id` (of this
+        failed attempt, Stripe `ch_…`) make each count once; without them everydeck keeps one refund and one failure per order, as before. `provider` (as in
+        money.providers of the app map: stripe, paddle …) tells everydeck which provider the payment came from."""
+        import re as _re
+        name = PAYMENT_EVENTS.get(event); pid = order_id or checkout_id
+        if not name:
+            _log.warning("everydeck: payment event rejected: %r", event); return None
+        if not pid or len(pid) > _PAYMENT_ID_MAX:
+            _log.warning("everydeck: payment %s needs order_id or checkout_id (at most %d characters)", event, _PAYMENT_ID_MAX); return None
+        # the id of this one refund or failed attempt; only on its own event
+        sub_key = "refund_id" if event == "order_refunded" else "attempt_id" if event == "payment_failed" else None
+        for k, v in (("refund_id", refund_id), ("attempt_id", attempt_id)):
+            if v is not None and k != sub_key:
+                _log.warning("everydeck: payment %s: %s belongs to %s (left out)", event, k, "order_refunded" if k == "refund_id" else "payment_failed")
+        sub = refund_id if sub_key == "refund_id" else attempt_id if sub_key == "attempt_id" else None
+        if sub is not None and (not isinstance(sub, str) or not sub or len(sub) > _PAYMENT_ID_MAX):
+            _log.warning("everydeck: payment %s: %s must be at most %d characters", event, sub_key, _PAYMENT_ID_MAX); return None
+        if any(isinstance(v, str) and looks_like_card(v) for v in (order_id, checkout_id, sub, product, reason, currency, subject_ref, account_ref, object_ref)):
+            _log.warning("everydeck: payment %s not sent: a value looks like a card number", event); return None
+        ok_total = total if isinstance(total, (int, float)) and not isinstance(total, bool) and math.isfinite(total) and total >= 0 else None
+        ok_qty = quantity if isinstance(quantity, int) and not isinstance(quantity, bool) and 1 <= quantity <= 100_000 else None
+        ok_cur = currency.strip().upper() if isinstance(currency, str) and _re.fullmatch(r"[A-Za-z]{3}", currency.strip()) else None
+        if total is not None and ok_total is None:
+            _log.warning("everydeck: payment %s: total must be a number of at least 0 (left out)", event)
+        if currency is not None and ok_cur is None:
+            _log.warning("everydeck: payment %s: currency must be an ISO 4217 code such as USD (left out)", event)
+        ok_prov = provider if isinstance(provider, str) and _re.fullmatch(r"[a-z][a-z0-9_-]{0,39}", provider) else None
+        if provider is not None and ok_prov is None:
+            _log.warning("everydeck: payment %s: provider must be the name in money.providers of the app map, such as stripe (left out)", event)
+        if not subject_ref and not account_ref:  # nobody is signed in during a webhook: without a person and an organization the payment counts for nobody
+            _log.warning("everydeck: payment %s without subject_ref or account_ref: everydeck counts it for nobody, so no customer shows what they pay. "
+                         "In a webhook take them from what the app stored for this payment (the client_reference_id or metadata it set at checkout, "
+                         "or its row for the provider's customer or subscription)", event)
+        fields = {k: v for k, v in {"order_id": order_id, "checkout_id": checkout_id, "refund_id": sub if sub_key == "refund_id" else None,
+                                    "attempt_id": sub if sub_key == "attempt_id" else None, "total": ok_total, "currency": ok_cur,
+                                    "product": scrub_clip(product, 120) if product else None, "quantity": ok_qty,
+                                    "reason": scrub_clip(reason, 60) if reason else None, "provider": ok_prov}.items() if v is not None and v != ""}
+        return self._enq({"kind": "signal", "name": name, "operation_id": f"everydeck.sdk:payment:{pid}", "business_key": payment_key(_PAYMENT_SHORT[event], pid, sub),
+                          **_opt(subject_ref=subject_ref, account_ref=account_ref, object_type=object_type, object_ref=object_ref), "fields": fields})
+
+    # ── AI calls (server only), implemented in everydeck/ai.py ──
+    def wrap_openai(self, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None) -> Any:
+        """The same OpenAI client (also AsyncOpenAI), measured: one event per call with model, tokens, duration, flow, person and organization; never
+        the prompt, the answer or the key. See everydeck/ai.py."""
+        from .ai import wrap
+        return wrap(self, "openai", client, flow=flow, subject_ref=subject_ref, account_ref=account_ref)
+
+    def wrap_anthropic(self, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None) -> Any:
+        """The same Anthropic client (also AsyncAnthropic), measured like wrap_openai. See everydeck/ai.py."""
+        from .ai import wrap
+        return wrap(self, "anthropic", client, flow=flow, subject_ref=subject_ref, account_ref=account_ref)
+
+    def ai_context(self, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None) -> Any:
+        """`with everydeck.ai_context(flow="cv_analysis", account_ref=org_id):` makes all AI calls inside one run. See everydeck/ai.py."""
+        from .ai import ai_context
+        return ai_context(flow=flow, subject_ref=subject_ref, account_ref=account_ref, run_id=run_id)
+
+    def ai_call(self, *, provider: str, request_model: str, operation: str = "chat", response_model: str | None = None, input_tokens: int | None = None,
+                output_tokens: int | None = None, cache_read_tokens: int | None = None, cache_write_tokens: int | None = None, duration_seconds: float | None = None,
+                error_type: str | None = None, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None) -> None:
+        """An AI call the app measured itself (an AI API it calls over HTTP without a client). See everydeck/ai.py."""
+        from .ai import ai_call
+        ai_call(self, provider=provider, request_model=request_model, operation=operation, response_model=response_model, input_tokens=input_tokens, output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens, duration_seconds=duration_seconds, error_type=error_type, flow=flow,
+                subject_ref=subject_ref, account_ref=account_ref, run_id=run_id)
+
+    def heartbeat(self, interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL, *, job: str | None = None) -> str | None:
         """Heartbeat on demand. With `job` (1.9-r0, `jobs[].id` in the manifest): this job has run; send it at the end of every successful run;
-        everydeck reports a job that stays silent for two intervals. Without `job`: this process instance is running (like `heartbeat_interval`)."""
+        everydeck reports a job that stays silent for two intervals. Without `job`: this process instance is running (like `heartbeat_interval`).
+        Without a number: every DEFAULT_HEARTBEAT_INTERVAL (300 s, 5 minutes)."""
         import re as _re
         if job is not None and not _re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", job):
             _log.warning("everydeck: heartbeat job id rejected: %r", job)
@@ -261,7 +383,7 @@ class Everydeck:
               attempt_id: str | None = None, subject_ref: str | None = None, account_ref: str | None = None,
               fields: dict[str, Any] | None = None, http: dict[str, Any] | None = None, request_id: str | None = None,
               frames: list[dict[str, Any]] | None = None, exc: BaseException | None = None, object_type: str | None = None,
-              object_ref: str | None = None, response: dict[str, Any] | None = None) -> str | None:
+              object_ref: str | None = None, response: dict[str, Any] | None = None, session_id: str | None = None) -> str | None:
         """With `exc` (the caught exception) the SDK builds the stack frames itself: innermost first, at most 20,
         file as the last two path parts as in the browser SDK; `frames` passes them ready-made ({function, file?, line?})."""
         err: dict[str, Any] = {"class": error_class}
@@ -274,7 +396,7 @@ class Everydeck:
             if isinstance(code, str) and _ANSWER_CODE.match(code):
                 ans["code"] = code
             if isinstance(msg, str) and msg.strip():
-                ans["message"] = scrub_text(msg)[:300]
+                ans["message"] = scrub_clip(msg, 300)
             if ans:
                 err["response"] = ans
         fr = frames if frames is not None else (_frames_of(exc) if exc is not None else None)
@@ -288,7 +410,8 @@ class Everydeck:
                 err["context_status"] = "frames_without_source"
         ev: dict[str, Any] = {"kind": "error", "name": name, "error": err,
                               **_opt(operation_id=operation_id, attempt_id=attempt_id, subject_ref=subject_ref,
-                                     account_ref=account_ref, fields=fields, request_id=request_id, object_type=object_type, object_ref=object_ref)}
+                                     account_ref=account_ref, fields=fields, request_id=request_id, object_type=object_type, object_ref=object_ref,
+                                     session_id=session_id)}
         if http:
             ev["http"] = http
         return self._enq(ev)
@@ -316,7 +439,7 @@ class Everydeck:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             with self._lock:
-                empty = not self._q and not self._inflight and not self._unreported_loss
+                empty = not self._q and not self._inflight and not self._unreported_loss and not self._oversize_loss
             if empty:
                 return True
             if deadline is not None and time.monotonic() >= deadline:
@@ -325,7 +448,28 @@ class Everydeck:
             self._wake.set()
             time.sleep(0.02)
 
+    def reconfigure(self, endpoint: str | None = None, server_key: str | None = None, manifest_digest: str | None = None) -> None:
+        """New settings while running: batches built from now on carry them. Empty values keep the current ones. A client that was off
+        only for missing settings switches itself on once all three are there; a new key ends a pause after 401/403."""
+        if self._stop.is_set() or self._config_stop.is_set():
+            return
+        if server_key and server_key != self.credential:
+            self.credential = server_key
+            self._paused_until = 0.0
+        if endpoint:
+            self.endpoint = endpoint.rstrip("/")
+        if manifest_digest:
+            self.manifest_digest = manifest_digest
+        with self._lock:
+            start = self._missing_config and bool(self.endpoint and self.credential and self.manifest_digest)
+            if start:
+                self._missing_config = False
+                self.enabled = True
+        if start:
+            self._start()
+
     def close(self, timeout: float | None = None) -> bool:
+        self._config_stop.set()
         if not self.enabled or self._stop.is_set():
             return True
         budget = self.shutdown_budget if timeout is None else timeout
@@ -349,7 +493,7 @@ class Everydeck:
             if len(_dumps(ev)) > EVENT_MAX_BYTES:
                 with self._lock:
                     self.stats["dropped_oversize"] += 1
-                    self._unreported_loss += 1
+                    self._oversize_loss += 1
                 return None
             spool = bool(self.spool_path) and not self._spool_disabled
             spool_dropped = 0
@@ -415,6 +559,11 @@ class Everydeck:
         if loss:
             items.append({"event_id": str(uuid.uuid4()), "occurred_at": _now(), "kind": "gap", "name": "everydeck.sdk.loss",
                           "gap": {"cause": "buffer_overflow", "dropped": loss}})
+        big = self._oversize_loss
+        self._oversize_loss = 0
+        if big:
+            items.append({"event_id": str(uuid.uuid4()), "occurred_at": _now(), "kind": "gap", "name": "everydeck.sdk.loss",
+                          "gap": {"cause": "sdk_limit", "limit": "sdk_event_bytes", "dropped": big}})
         while self._q and len(items) < BATCH_MAX:
             n = len(_dumps(self._q[0])) + 1
             if size + n > BATCH_MAX_BYTES - 512 and items:
@@ -469,7 +618,10 @@ class Everydeck:
     def _requeue(self, items: list[dict[str, Any]]) -> None:
         for it in reversed(items):
             if it.get("kind") == "gap" and it["name"] == "everydeck.sdk.loss":
-                self._unreported_loss += int(it["gap"].get("dropped", 0))
+                if it["gap"].get("limit") == "sdk_event_bytes":
+                    self._oversize_loss += int(it["gap"].get("dropped", 0))
+                else:
+                    self._unreported_loss += int(it["gap"].get("dropped", 0))
                 continue
             if len(self._q) >= self.max_buffer:
                 self.stats["dropped_overflow"] += 1
@@ -480,7 +632,7 @@ class Everydeck:
     def _send_pending(self) -> None:
         while not self._stop.is_set() or self._q:
             with self._lock:
-                if not self._q and not self._unreported_loss:
+                if not self._q and not self._unreported_loss and not self._oversize_loss:
                     return
                 items = self._take_batch()
                 self._inflight = True
@@ -539,7 +691,8 @@ class Everydeck:
         """Exactly one delivery attempt. The sender controls retries (backoff up to max_send_backoff)."""
         body = _dumps({"schema_version": SCHEMA_VERSION, "batch_id": str(uuid.uuid4()), "release_key": self.release_key,
                        "manifest_digest": self.manifest_digest, **({"probe_id": self.probe_id} if self.probe_id else {}), "events": items}).encode()
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self.credential}
+        # the sending time (like Sentry's sent_at) lets everydeck correct a clock that is off by an hour or more; a header, so the body stays the same
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self.credential, "X-Everydeck-Sent-At": _now()}
         self.stats["bytes_raw"] += len(body)
         if self.compress:
             body = gzip.compress(body, compresslevel=6, mtime=0)
@@ -723,11 +876,13 @@ class Everydeck:
             pass
 
     @classmethod
-    def from_supabase(cls, client: Any, *, release_key: str = "auto", on_warning: Callable[[str], None] | None = None, **kwargs: Any) -> "Everydeck":
+    def from_supabase(cls, client: Any, *, release_key: str = "auto", on_warning: Callable[[str], None] | None = None, refresh_seconds: float = 300, **kwargs: Any) -> "Everydeck":
         """A client for a server of its own next to a hosted Supabase project: endpoint, server key and manifest digest come from
         public.everydeck_server_config() through the Supabase client the server already has (service key), unless all three
         environment variables are set. Release key "auto" (the commit the host sets, e.g. RENDER_GIT_COMMIT). If the call fails, the
         client is switched off with a warning that names the function and never a value; the app works unchanged.
+        While the process runs the settings are read again every `refresh_seconds` (default 300, 0 = only at start): a new approval (manifest
+        digest) or a new server key reaches the server without a restart; a failed read keeps the last settings. Environment variables are fixed.
         """
         warn = on_warning or (lambda m: _log.warning(m))
         try:
@@ -735,8 +890,22 @@ class Everydeck:
         except Exception as e:
             warn(f"everydeck: disabled: could not read public.everydeck_server_config() ({type(e).__name__}); nothing is sent to everydeck")
             cfg = {"endpoint": "", "server_key": "", "manifest_digest": ""}
+        from_env = all(os.environ.get(v) for _, v in _CONFIG_ENV)
+        failed = [False]
+
+        def load() -> dict[str, Any] | None:
+            try:
+                c = server_config_from_supabase(client)
+                failed[0] = False
+                return c
+            except Exception as e:
+                if not failed[0]:
+                    warn(f"everydeck: could not read public.everydeck_server_config() again ({type(e).__name__}); the last settings stay in use")
+                failed[0] = True
+                return None
+        source = (float(refresh_seconds), load) if refresh_seconds and refresh_seconds > 0 and not from_env else None
         return cls(cfg.get("endpoint") or "", cfg.get("server_key") or "", release_key=release_key,
-                   manifest_digest=cfg.get("manifest_digest") or "", on_warning=warn, **kwargs)
+                   manifest_digest=cfg.get("manifest_digest") or "", on_warning=warn, config_source=source, **kwargs)
 
 
 _CONFIG_ENV = (("endpoint", "EVERYDECK_ENDPOINT"), ("server_key", "EVERYDECK_SERVER_KEY"), ("manifest_digest", "EVERYDECK_MANIFEST_DIGEST"))
@@ -846,27 +1015,95 @@ def _frames_of(exc: BaseException) -> list[dict[str, Any]]:
 CONTEXT_FRAMES = 5
 CONTEXT_LINES = 5
 CONTEXT_LINE_MAX = 200
+# Every pattern runs in linear time: where a pattern fails at the start of a run, it fails at every later place of that run too, and the
+# alternative `skip` passes the run in one step; a `skip` match stays as it is.
 _SECRET_PATTERNS = [
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|(?P<skip>-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*)"),
     re.compile(r"\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bevd_[a-z]{3}_[0-9a-f]{40}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b|(?P<skip>(?:(?!\beyJ)[\s\S])+|eyJ[A-Za-z0-9_-]*)"),
 ]
 _SECRET_ASSIGN = re.compile(r"""((?:password|passwd|secret|token|api[_-]?key|service[_-]?role[_-]?key)\s*[:=]\s*["']?)(?!\[redacted\])[^\s"']{6,}""", re.I)
 _BEARER = re.compile(r"\bbearer\s+(?!\[redacted\])[A-Za-z0-9._~+/=-]+", re.I)
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|(?P<skip>(?:[A-Za-z0-9._%+-]+(?![A-Za-z0-9._%+@-])|[^A-Za-z0-9._%+-])+|[A-Za-z0-9._%+-]+@?)")
+# Longest text the SDK scrubs: a longer message is cut first, so an app with a huge error message never stalls (8 192 characters like Sentry Relay's
+# limit for an exception's value). Same rule as @everydeck/sdk (TS) and everydeck.
+SCRUB_INPUT_MAX = 8192
+_TOKEN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.+/=%@:~-")
+_PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_PEM_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+
+
+def _replace(rx: "re.Pattern[str]", text: str, by: Callable[["re.Match[str]"], str]) -> str:
+    """Like rx.sub(by, text), but matches of the group `skip` stay as they are"""
+    out: list[str] = []
+    last = 0
+    for m in rx.finditer(text):
+        if "skip" in rx.groupindex and m.group("skip") is not None:
+            continue
+        out.append(text[last:m.start()])
+        out.append(by(m))
+        last = m.end()
+    if not out:
+        return text
+    out.append(text[last:])
+    return "".join(out)
+
+
+def clip_for_scrub(text: str, max_len: int) -> tuple[str, bool]:
+    """Text cut to max_len before scrubbing: a stretch cut at the limit falls away (half a key), a private key without its end becomes [redacted];
+    cut text ends with "…" """
+    if len(text) <= max_len:
+        return text, False
+    end = max(0, max_len - 1)
+    if text[end] in _TOKEN_CHARS:
+        while end > 0 and text[end - 1] in _TOKEN_CHARS:
+            end -= 1
+    t = text[:end]
+    begin = -1
+    after = 0
+    for m in _PEM_BEGIN.finditer(t):
+        begin, after = m.start(), m.end()
+    if begin >= 0 and not _PEM_END.search(t, after):
+        t = t[:begin] + "[redacted]"
+    return t + "\u2026", True
+
+
+def scrub_clip(text: str, max_len: int) -> str:
+    """Scrubbed text of at most max_len characters; at most SCRUB_INPUT_MAX characters are scrubbed"""
+    return scrub_text(clip_for_scrub(str(text), max(max_len, SCRUB_INPUT_MAX))[0])[:max_len]
+
+
+def looks_like_card(v: str) -> bool:
+    """13 to 19 digits (also with spaces or dashes) with a valid Luhn checksum look like a card number (same rule as the TS SDK and everydeck)."""
+    import re as _re
+    for m in _re.finditer(r"(?:\d[ -]?){12,18}\d", v):
+        d = _re.sub(r"[ -]", "", m.group(0))
+        if not 13 <= len(d) <= 19:
+            continue
+        total = 0
+        for i, ch in enumerate(reversed(d)):
+            x = int(ch)
+            if i % 2:
+                x *= 2
+                if x > 9:
+                    x -= 9
+            total += x
+        if total % 10 == 0:
+            return True
+    return False
 
 
 def scrub_text(text: str) -> str:
     """Remove secrets, bearer tokens and e-mail addresses (error message or code line)"""
     out = _BEARER.sub("Bearer [redacted]", str(text))
     for rx in _SECRET_PATTERNS:
-        out = rx.sub("[redacted]", out)
+        out = _replace(rx, out, lambda m: "[redacted]")
     out = _SECRET_ASSIGN.sub(lambda m: f"{m.group(1)}[redacted]", out)
-    return _EMAIL.sub("[email]", out)
+    return _replace(_EMAIL, out, lambda m: "[email]")
 
 
 def _context_of(lines: list[str], line: int) -> dict[str, Any] | None:

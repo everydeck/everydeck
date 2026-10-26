@@ -23,6 +23,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+# limits of the scan (everydeck lists them with the other limits): what the scan does not read; the inventory names skipped files, never "not there"
+CODE_FILE_MAX = 400_000      # code hints: larger source files are skipped
+SCHEMA_FILE_MAX = 2_000_000  # schema detection: larger files are skipped
+PACKAGE_DEPTH = 3            # package.json, requirements, pubspec: folders deeper than this are not read
 SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", ".next", ".expo", "coverage", "__pycache__", ".venv", "venv", "Pods", ".everydeck", "everydeck"}
 
 # dependency → block (npm). Prefix match with "*".
@@ -61,6 +65,21 @@ CODE: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"""stripe\.Webhook\.construct_event|stripe\.webhooks\.constructEvent|/webhooks?/stripe|/stripe/webhooks?|stripe-signature"""), "payments", "stripe webhook"),
 ]
 CODE_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".dart", ".vue", ".svelte"}
+# packages imported by URL or with a runtime prefix (Deno, Supabase Edge Functions): npm:x, jsr:x, https://esm.sh/x, skypack, esm.run, jsdelivr, unpkg.
+# An Edge Function that imports its mail provider as https://esm.sh/resend@4.0.0 has no package.json that names it.
+URL_IMPORT = re.compile(r"""['"](?:npm:|jsr:|https?://(?:esm\.sh|cdn\.skypack\.dev|esm\.run|cdn\.jsdelivr\.net/npm|unpkg\.com)/)(@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+)""")
+# a provider called over HTTP without its package (for example push sent with fetch to fcm.googleapis.com): host → block, provider
+HOSTS: list[tuple[str, str, str]] = [
+    ("api.resend.com", "email", "resend"), ("api.sendgrid.com", "email", "sendgrid"), ("api.postmarkapp.com", "email", "postmark"), ("api.mailgun.net", "email", "mailgun"), ("api.brevo.com", "email", "brevo"), ("api.mailjet.com", "email", "mailjet"),
+    ("fcm.googleapis.com", "push", "fcm"), ("onesignal.com/api", "push", "onesignal"), ("exp.host/--/api/v2/push", "push", "expo push"),
+    ("api.stripe.com", "payments", "stripe"), ("api.paddle.com", "payments", "paddle"), ("api.lemonsqueezy.com", "payments", "lemonsqueezy"), ("api.midtrans.com", "payments", "midtrans"), ("api.xendit.co", "payments", "xendit"),
+    ("api.openai.com", "ai", "openai"), ("api.anthropic.com", "ai", "anthropic"), ("generativelanguage.googleapis.com", "ai", "google ai"),
+]
+
+
+def url_imports(text: str) -> list[str]:
+    """Package names a file imports by URL or with npm:/jsr: (version and subpath dropped)."""
+    return list(dict.fromkeys(m.group(1).split("@")[0] if not m.group(1).startswith("@") else m.group(1) for m in URL_IMPORT.finditer(text)))
 # schema: word in the table/collection name (split at _ and CamelCase, singular and plural) → block
 SCHEMA_WORDS: dict[str, str] = {
     "message": "chats", "messages": "chats", "chat": "chats", "chats": "chats", "conversation": "chats", "conversations": "chats",
@@ -101,7 +120,7 @@ def _match(name: str, table: dict[str, str]) -> str | None:
     return None
 
 
-def _walk(repo: Path, names: set[str], max_depth: int = 3):
+def _walk(repo: Path, names: set[str], max_depth: int = PACKAGE_DEPTH):
     for p in repo.rglob("*"):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or len(rel.parts) > max_depth or not p.is_file():
@@ -147,7 +166,7 @@ def detect_schema(repo: Path) -> list[tuple[str, str]]:
 
     for p in sorted(repo.rglob("*")):
         rel = p.relative_to(repo)
-        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.stat().st_size > 2_000_000:
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.stat().st_size > SCHEMA_FILE_MAX:
             continue
         suf = p.suffix
         if suf not in {".sql", ".prisma", ".rules", ".py", ".ts", ".tsx", ".js", ".mjs", ".cjs"}:
@@ -200,7 +219,7 @@ def detect_blocks(repo: Path) -> list[Detected]:
         for name, b in PUB.items():
             if re.search(r"(?m)^\s{2}" + re.escape(name) + r"\s*:", text):
                 add(b, f"{name} in {rel}")
-    for p, rel in _walk(repo, {"Podfile", "build.gradle", "build.gradle.kts", "Podfile.lock"}, max_depth=4):
+    for p, rel in _walk(repo, {"Podfile", "build.gradle", "build.gradle.kts", "Podfile.lock"}, max_depth=PACKAGE_DEPTH + 1):
         text = p.read_text(encoding="utf-8", errors="replace")
         for token, b in NATIVE:
             if token in text:
@@ -221,7 +240,7 @@ def detect_blocks(repo: Path) -> list[Detected]:
     # code hints: only unambiguous imports/calls, limited to source code
     for p in repo.rglob("*"):
         rel = p.relative_to(repo)
-        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in CODE_EXT or p.stat().st_size > 400_000:
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in CODE_EXT or p.stat().st_size > CODE_FILE_MAX:
             continue
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -230,6 +249,11 @@ def detect_blocks(repo: Path) -> list[Detected]:
         for rx, b, label in CODE:
             if b not in found and rx.search(text):
                 add(b, f"{label} in {rel}")
+        for name in url_imports(text):
+            b = _match(name, NPM)
+            if b: add(b, f"{name} (imported by URL) in {rel}")
+        for host, b, label in HOSTS:
+            if b not in found and host in text: add(b, f"{label} ({host}) in {rel}")
     # schema: tables and collections; chats and moderation rarely live in a library
     for b, where in detect_schema(repo):
         add(b, where)

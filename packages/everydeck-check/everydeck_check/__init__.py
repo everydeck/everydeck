@@ -358,6 +358,9 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
                     errs.append(f"object {o['type']}: field {f['name']} has duplicate reason values")
             if any(g not in ("duplicate", "fraud", "other") for g in (f.get("signals") or {}).values()) and not at_least("1.9-r0"):
                 errs.append(f"object {o['type']}: field {f['name']} signal groups beyond duplicate/fraud/other require schema_version 1.9-r0")
+    for s in m.get("signals", []):   # ES1: the browser key may send this signal (the result of a flow in browser code)
+        if s.get("allowed_source") == "browser" and not at_least("1.12-r0"):
+            errs.append(f"signal {s['name']}: allowed_source browser requires schema_version 1.12-r0")
     browser_errors: set[str] = set()
     for c in m.get("capabilities", []):
         if "expected_duration" in c:
@@ -671,11 +674,14 @@ def _relay_in_repo(repo: Path) -> bool:
 
 
 def check_jobs(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
-    """Every place of a job must contain a heartbeat call with exactly this job id (all languages, text check)."""
+    """Every place of a job must contain a heartbeat call with exactly this job id (all languages, text check). A schedule in SQL beats through the
+    outbox (everydeck_outbox.run_job('<id>', …) or everydeck_outbox.job_heartbeat('<id>')), a run outside the app with a check-in step that calls
+    …/v1/jobs/<id>/check-in."""
     import re as _re
     for j in manifest.get("jobs", []) or []:
         jid = j.get("id", "")
-        call = _re.compile(r"heartbeat\w*\s*\([^)]*?[\"'`]" + _re.escape(jid) + r"[\"'`]", _re.S)
+        call = _re.compile(r"(?:heartbeat\w*|run_job)\s*\([^)]*?[\"'`]" + _re.escape(jid) + r"[\"'`]", _re.S)
+        checkin = _re.compile(r"/v1/jobs/" + _re.escape(jid) + r"/check-in(?![\w-])")
         for ev in j.get("evidence", []) or []:
             f = repo / ev["path"]
             if not f.exists():
@@ -689,7 +695,7 @@ def check_jobs(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
             relay = _relay_in_text(f, text) and (jid == "everydeck_outbox_relay" or _re.search(r"job\s*:\s*[\"'`]" + _re.escape(jid) + r"[\"'`]", text))
             # The place of the relay job is often the schedule (pg_cron → Edge Function); the beat is then in the app's relay
             if not relay and jid == "everydeck_outbox_relay": relay = _relay_in_repo(repo)
-            if not call.search(text) and not relay:
+            if not call.search(text) and not relay and not checkin.search(text):
                 rep.findings.append(Finding("job_not_in_heartbeat", f"job:{jid}", ev["path"]))
 
 

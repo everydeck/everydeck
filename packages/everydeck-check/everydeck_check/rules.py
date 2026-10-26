@@ -27,6 +27,15 @@ def run_rule(rule: str, payload: dict[str, Any], timeout: float = 120) -> dict[s
     return json.loads(p.stdout)
 
 
+def app_map_open(doc: dict[str, Any]) -> dict[str, Any]:
+    """What everydeck returns to the agent on submission: one sentence, the open parts nobody answered yet, how many stay open."""
+    try:
+        r = run_rule("app_map", {"input": doc})
+    except RulesUnavailable as e:
+        return {"setup": None, "open": [], "still_open": 0, "error": str(e)}
+    return {"setup": r.get("setup"), "open": r.get("open", []), "still_open": r.get("still_open", 0)}
+
+
 def app_map_rule_errors(doc: dict[str, Any]) -> list[str]:
     """The check everydeck runs when an app map is submitted: shape, references, result signal, derivation, derived manifest."""
     try:

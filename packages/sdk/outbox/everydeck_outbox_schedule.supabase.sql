@@ -1,10 +1,11 @@
--- everydeck outbox: schedule on Supabase. pg_cron calls the Edge Function `everydeck-outbox-relay` through pg_net: every minute with the job heartbeat,
+-- everydeck outbox: schedule on Supabase. pg_cron calls the Edge Function `everydeck-outbox-relay` through pg_net: every 5 minutes with the job heartbeat,
 -- and every 5 seconds only while rows wait, without a heartbeat (a result reaches everydeck within seconds; an idle app costs no extra calls).
 -- Copy as a migration after everydeck_outbox.sql. Supabase only (needs the pg_cron and pg_net extensions).
 --
 -- The function keeps Supabase's JWT check (no verify_jwt setting). The call carries the app's public key as `apikey`, the way Supabase schedules
 -- Edge Functions; a legacy anon key is a JWT and also goes as `Authorization: Bearer`. The function's own check is the invoke token from Vault,
--- sent in the header `x-everydeck-invoke-token`.
+-- sent in the header `x-everydeck-invoke-token`. Where everydeck deploys the function itself (a hosted project the owner connected), it runs without
+-- the JWT check and needs no public key: then there is no `everydeck_outbox_gateway_key` and the call goes without `apikey`.
 --
 -- No key, token or URL is written here. They come from Supabase Vault and are created by the owner, in the SQL editor of the
 -- project, never in a migration, never in the repository:
@@ -12,14 +13,15 @@
 --   select vault.create_secret('<the app's public key: the publishable or anon key its browser uses>', 'everydeck_outbox_gateway_key');
 --   select vault.create_secret('<random token, at least 32 characters>', 'everydeck_outbox_invoke_token');
 --   select vault.create_secret('<everydeck server key of this environment>', 'everydeck_ingest_key');
--- Without the URL or the public key the scheduled call does nothing and the job heartbeat stays away; everydeck reports
+-- Without the URL the scheduled call does nothing and the job heartbeat stays away; everydeck reports
 -- "job has not reported" after two periods, so a missing secret is visible, not silent.
 
 -- Only adds: cron.schedule with the name of an existing job replaces that job (pg_cron 1.3+), so applying this again needs no unschedule.
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 
-SELECT cron.schedule('everydeck-outbox-relay', '* * * * *', $cron$
+-- the heartbeat schedule: every 5 minutes (everydeck Free: heartbeat every 300 s), delivers what waits and sends the job heartbeat.
+SELECT cron.schedule('everydeck-outbox-relay', '*/5 * * * *', $cron$
   SELECT net.http_post(
     url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_relay_url'),
     headers := jsonb_strip_nulls(jsonb_build_object(
@@ -29,8 +31,7 @@ SELECT cron.schedule('everydeck-outbox-relay', '* * * * *', $cron$
       'x-everydeck-invoke-token', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_invoke_token'))),
     body := '{}'::jsonb,
     timeout_milliseconds := 25000)
-  WHERE EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_relay_url')
-    AND EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_gateway_key');
+  WHERE EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_relay_url');
 $cron$);
 
 -- the short schedule: every 5 seconds, only while rows wait (one cheap query, no call otherwise), without the job heartbeat.
@@ -45,6 +46,5 @@ SELECT cron.schedule('everydeck-outbox-relay-fast', '5 seconds', $cron$
     body := '{"heartbeat": false}'::jsonb,
     timeout_milliseconds := 25000)
   WHERE EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_relay_url')
-    AND EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name = 'everydeck_outbox_gateway_key')
     AND EXISTS (SELECT 1 FROM everydeck_outbox.event WHERE rejected_at IS NULL);
 $cron$);

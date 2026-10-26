@@ -11,36 +11,75 @@
  * - No background thread: sending is triggered by a timer while events are pending. In short-lived runtimes (Edge Function)
  *   the caller awaits `flush()` before responding; without that wait the runtime can cut sending off unnoticed; use the durable outbox separately. The SDK knows no everydeck database and makes no engine judgements.
  */
-export const SCHEMA_VERSION = '1.4-r0';
+import { DEFAULT_HEARTBEAT_SECONDS } from './heartbeat.js';
+
+export const SCHEMA_VERSION = '1.6-r0';
 export const BATCH_MAX = 50;
+/** 1.6-r0: a debug id (lower-case UUID), as everydeck-agent sourcemaps inject and the Vite plugin write it */
+export const DEBUG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const BATCH_MAX_BYTES = 64 * 1024;
 export const EVENT_MAX_BYTES = 8 * 1024;
 const REJECT = new Set([400, 401, 403, 409, 413, 422]);
 const AUTH = new Set([401, 403]);
 
 export type LoginMethod = 'password' | 'sso' | 'magic_link';
-export interface HttpContext { method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'; route: string; status?: number; durationMs: number; /** 1.4-r0: request to a host other than the page */ crossOrigin?: boolean }
-export interface Frame { function: string; file?: string; line?: number; /** 1.3-r0: in the app's code */ in_app?: boolean; /** 1.3-r0: code lines around the line */ context?: FrameContext }
+export interface HttpContext { method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'; route: string; status?: number; durationMs: number; /** 1.4-r0: request to a host other than the page */ crossOrigin?: boolean; /** 1.5-r0: that host (domain and port, never a path) */ host?: string; /** 1.5-r0: the route is the route pattern of the server framework, not an address */ pattern?: boolean }
+export interface Frame { function: string; file?: string; line?: number; /** 1.6-r0: column (browser frames whose file has a debug id) */ column?: number; /** 1.6-r0: debug id of the built file, key of its source map at everydeck */ debug_id?: string; /** 1.3-r0: in the app's code */ in_app?: boolean; /** 1.3-r0: code lines around the line */ context?: FrameContext }
 export interface FrameContext { first_line: number; pre: string[]; line: string; post: string[] }
 export type ContextStatus = 'sent' | 'partial' | 'disabled' | 'unreadable' | 'library_only' | 'frames_without_source' | 'browser_no_source_maps' | 'bundled_runtime';
 
 // ── Code lines from the SDK (like Sentry). The same scrubbing as error messages in everydeck (scrubText; a test checks they are equal) ──
+// Every pattern runs in linear time: where a pattern fails at the start of a run, it fails at every later place of that run too, and the
+// alternative `skip` passes the run in one step; a `skip` match stays as it is.
 const SECRET_PATTERNS: RegExp[] = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|(?<skip>-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*)/g,
   /\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b/g,
   /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
   /\bevd_[a-z]{3}_[0-9a-f]{40}\b/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b|(?<skip>(?:(?!\beyJ)[\s\S])+|eyJ[A-Za-z0-9_-]*)/g,
   /((?:password|passwd|secret|token|api[_-]?key|service[_-]?role[_-]?key)\s*[:=]\s*["']?)(?!\[redacted\])[^\s"']{6,}/gi,
 ];
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|(?<skip>(?:[A-Za-z0-9._%+-]+(?![A-Za-z0-9._%+@-])|[^A-Za-z0-9._%+-])+|[A-Za-z0-9._%+-]+@?)/g;
+/** Like `text.replace(re, by)`, but matches of the group `skip` stay as they are */
+function replaceMatches(text: string, re: RegExp, by: (match: string, keep?: string) => string): string {
+  re.lastIndex = 0; let out = ''; let last = 0; let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0] === '') { re.lastIndex++; continue; }
+    if (m.groups?.['skip'] !== undefined) continue;
+    out += text.slice(last, m.index) + by(m[0], m[1]); last = m.index + m[0].length;
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
+/** Replaces e-mail addresses with `[email]` (linear time) */
+export const replaceEmails = (text: string): string => replaceMatches(text, EMAIL, () => '[email]');
 /** Removes secrets, Bearer tokens and e-mail addresses (error message or code line) */
 export function scrubText(text: string): string {
   let out = String(text).replace(/\bbearer\s+(?!\[redacted\])[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]');
-  for (const re of SECRET_PATTERNS) out = out.replace(re, (m: string, keep?: string) => (typeof keep === 'string' && m.startsWith(keep) ? `${keep}[redacted]` : '[redacted]'));
-  return out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]');
+  for (const re of SECRET_PATTERNS) out = replaceMatches(out, re, (m, keep) => (keep !== undefined && m.startsWith(keep) ? `${keep}[redacted]` : '[redacted]'));
+  return replaceEmails(out);
 }
+/**
+ * Longest text the SDK scrubs: a longer message is cut first, so an app with a huge error message never stalls in the SDK. 8 192 characters
+ * like Sentry Relay's limit for an exception's value. Same rule as everydeck's clipForScrub (a test checks they are equal).
+ */
+export const SCRUB_INPUT_MAX = 8192;
+const TOKEN_CHAR = /[A-Za-z0-9_.+/=%@:~-]/;
+const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/g; const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/;
+/** Text cut to `max` before scrubbing: a stretch cut at the limit falls away (half a key), a private key without its end becomes [redacted]; cut text ends with „…“ */
+export function clipForScrub(text: string, max: number): { text: string; truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false };
+  let end = Math.max(0, max - 1);
+  if (TOKEN_CHAR.test(text[end]!)) while (end > 0 && TOKEN_CHAR.test(text[end - 1]!)) end--;
+  let t = text.slice(0, end);
+  let begin = -1; let after = 0; PEM_BEGIN.lastIndex = 0;
+  for (let m = PEM_BEGIN.exec(t); m; m = PEM_BEGIN.exec(t)) { begin = m.index; after = m.index + m[0].length; }
+  if (begin >= 0 && !PEM_END.test(t.slice(after))) t = `${t.slice(0, begin)}[redacted]`;
+  return { text: `${t}…`, truncated: true };
+}
+/** Scrubbed text of at most `max` characters; at most SCRUB_INPUT_MAX characters are scrubbed */
+export const scrubClip = (text: string, max: number): string => scrubText(clipForScrub(String(text), Math.max(max, SCRUB_INPUT_MAX)).text).slice(0, max);
 export const CONTEXT_FRAMES = 5; export const CONTEXT_LINES = 5; export const CONTEXT_LINE_MAX = 200;
 /** Library, runtime or standard library: not the app's code */
 /** Supabase Edge Functions run as a compiled bundle under this path; the source files are not readable at runtime (checked) */
@@ -107,8 +146,17 @@ export interface EverydeckOptions {
   sourceContext?: boolean;
   /** reads a file of the running app (Node: node:fs, Deno: Deno.readTextFile); null = not readable. Read when sending, never during the call */
   readSource?: (path: string) => Promise<string | null>;
+  /**
+   * Settings that can change while the process runs (a new approval in everydeck, a new server key): read again every `everyMs`, like PostHog polls its
+   * flag definitions. `load` returns the current values, or null when they could not be read (the client keeps its last values). Stops with close().
+   */
+  configSource?: { everyMs: number; load: () => Promise<ConfigValues | null> };
 }
+/** endpoint, key and manifest digest as a config source returns them (null: not set) */
+export interface ConfigValues { endpoint: string | null; credential: string | null; manifestDigest: string | null }
 export interface EverydeckStats { enqueued: number; accepted: number; retries: number; dropped_overflow: number; dropped_rejected: number; dropped_oversize: number; batches_accepted: number; batches_retried: number; batches_rejected: number; send_errors: number; unreported_loss: number; last_error: string | null; /** compression */ batches_compressed: number; bytes_raw: number; bytes_sent: number; retry_after_waits: number }
+/** Limits of the SDK at which it drops events; reported to everydeck as a gap `everydeck.sdk.loss` (cause `sdk_limit`, with the limit), so the owner sees them under Plan and limits and gets an e-mail */
+export type SdkLimit = 'sdk_event_bytes' | 'sdk_pending_web' | 'sdk_console_errors' | 'sdk_unknown_pages' | 'sdk_vitals_navigations' | 'sdk_vitals_events' | 'sdk_payment_id' | 'sdk_hang_reports';
 interface Event { event_id: string; kind: 'signal' | 'error' | 'breadcrumb' | 'log' | 'gap'; name: string; occurred_at: string; [k: string]: unknown }
 interface Batch { schema_version: string; batch_id: string; release_key: string; manifest_digest: string; probe_id?: string; events: Event[] }
 
@@ -137,7 +185,7 @@ export function answerOf(body: string, contentType: string | null | undefined): 
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : typeof v === 'number' && Number.isFinite(v) ? String(v) : undefined);
   const code = [str(o['code']), str(o['error_code']), nested ? str(nested['code']) : undefined].find((c) => c !== undefined && ANSWER_CODE.test(c));
   const message = str(o['message']) ?? str(o['msg']) ?? (nested ? str(nested['message']) : undefined) ?? str(o['detail']) ?? str(o['title']) ?? (typeof o['error'] === 'string' ? str(o['error']) : undefined);
-  const a = compact({ code, message: message ? clip(scrubText(message), 300) : undefined }) as ErrorAnswer;
+  const a = compact({ code, message: message ? scrubClip(message, 300) : undefined }) as ErrorAnswer;
   return a.code || a.message ? a : undefined;
 }
 const uuid = () => (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
@@ -147,6 +195,8 @@ export function fullJitterMs(failures: number, capMs: number, random: () => numb
   const ceiling = Math.min(capMs, 500 * 2 ** Math.max(0, Math.min(6, failures)));
   return Math.floor(random() * ceiling);
 }
+/** Q2: wait after a 429 without a readable Retry-After (Sentry's default) */
+export const DEFAULT_RETRY_AFTER_MS = 60_000;
 /** `Retry-After` as seconds or HTTP date → milliseconds, capped at one hour; null when missing or unreadable. */
 export function parseRetryAfter(value: string | null | undefined, nowMs: number = Date.now()): number | null {
   if (!value) return null;
@@ -181,7 +231,7 @@ function refs(r: Refs | undefined): Record<string, unknown> {
 }
 export function httpField(h: HttpContext | undefined): Record<string, unknown> | undefined {
   if (!h) return undefined;
-  return compact({ method: h.method, route: clip(h.route, 240), status: h.status, duration_ms: Math.max(0, Math.min(86_400_000, Math.round(h.durationMs))), cross_origin: h.crossOrigin === true ? true : undefined });
+  return compact({ method: h.method, route: clip(h.route, 240), status: h.status, duration_ms: Math.max(0, Math.min(86_400_000, Math.round(h.durationMs))), cross_origin: h.crossOrigin === true ? true : undefined, host: h.host && /^[a-z0-9.-]+(?::[0-9]{1,5})?$/.test(h.host) ? h.host.slice(0, 260) : undefined, pattern: h.pattern === true ? true : undefined });
 }
 
 export class EverydeckClient {
@@ -194,8 +244,13 @@ export class EverydeckClient {
   private request: Promise<'accepted' | 'retry' | 'rejected' | 'paused' | 'idle'> | null = null;
   private readonly onSendResult: EverydeckOptions['onSendResult'];
   private pausedUntil = 0;
+  /** Q2: until when everydeck asked to wait (Retry-After of a 429 or 503) */
+  private refusedUntil = 0;
   private failures = 0;
   private closed = false;
+  /** switched off only because endpoint, key or digest were missing (not by `enabled: false`): reconfigure() switches it on */
+  private missingConfig = false;
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
   /** setup check run id */
   readonly probeId: string | undefined;
   /** origin of the events */
@@ -209,7 +264,13 @@ export class EverydeckClient {
     this.opts = { endpoint: (o.endpoint ?? '').replace(/\/$/, ''), credential: o.credential ?? '', releaseKey: o.releaseKey, manifestDigest: o.manifestDigest ?? '', enabled: o.enabled ?? true, maxBuffer: o.maxBuffer ?? 500, flushIntervalMs: o.flushIntervalMs ?? 1000, httpTimeoutMs: o.httpTimeoutMs ?? 2000, maxBackoffMs: o.maxBackoffMs ?? 30_000, authPauseMs: o.authPauseMs ?? 30_000, keepalive: o.keepalive ?? false, compress: o.compress ?? true, usageConsent: o.usageConsent ?? 'anonymous',
       fetch: o.fetch ?? ((...a: Parameters<typeof fetch>) => globalThis.fetch(...a)), onWarning: (m) => { try { if (o.onWarning) o.onWarning(m); else console.warn(`[everydeck] ${m}`); } catch { /* diagnostics never break delivery */ } }, instanceId: o.instanceId ?? `js-${uuid().slice(0, 8)}` };
     // if the address or key is missing (e.g. after an update with new variable names), the SDK turns itself off, but loudly, never silently
-    if (this.opts.enabled && (!this.opts.endpoint || !this.opts.credential || !this.opts.manifestDigest)) { this.opts.enabled = false; this.opts.onWarning(`disabled: ${!this.opts.endpoint ? 'no endpoint' : !this.opts.credential ? 'no key' : 'no manifest digest'}; nothing is sent to everydeck until the app passes endpoint, key and manifest digest`); }
+    if (this.opts.enabled && (!this.opts.endpoint || !this.opts.credential || !this.opts.manifestDigest)) { this.opts.enabled = false; this.missingConfig = true; this.opts.onWarning(`disabled: ${!this.opts.endpoint ? 'no endpoint' : !this.opts.credential ? 'no key' : 'no manifest digest'}; nothing is sent to everydeck until the app passes endpoint, key and manifest digest`); }
+    // settings read again while the process runs; the timer never keeps the process alive
+    if (o.configSource && o.configSource.everyMs > 0) {
+      const src = o.configSource;
+      this.refreshTimer = setInterval(() => { void src.load().then((v) => { if (v) this.reconfigure(v); }, () => { /* the source warns itself; the last values stay */ }); }, src.everyMs);
+      (this.refreshTimer as unknown as { unref?: () => void }).unref?.();
+    }
     // without a browser the sender is a server (Node or Deno); the browser SDK sets the detected app platform
     const g = globalThis as { document?: unknown; Deno?: unknown };
     this.client = cleanClient(o.client ?? (g.document ? undefined : { platform: 'server', runtime: g.Deno ? 'deno' : 'node' }));
@@ -247,7 +308,21 @@ export class EverydeckClient {
     }
   }
 
-  /** Business signal (server key only; the server rejects browser keys with 403). */
+  /**
+   * New settings while running: batches built from now on carry them; a batch already in flight keeps its own. Empty values keep the current
+   * ones. A client that was off only for missing settings switches itself on once all three are there; a new key ends a pause after 401/403.
+   */
+  reconfigure(v: ConfigValues): void {
+    if (this.closed) return;
+    const endpoint = v.endpoint ? v.endpoint.replace(/\/$/, '') : this.opts.endpoint;
+    const credential = v.credential || this.opts.credential;
+    const manifestDigest = v.manifestDigest || this.opts.manifestDigest;
+    if (credential !== this.opts.credential) this.pausedUntil = 0;
+    this.opts.endpoint = endpoint; this.opts.credential = credential; this.opts.manifestDigest = manifestDigest;
+    if (this.missingConfig && endpoint && credential && manifestDigest) { this.missingConfig = false; this.opts.enabled = true; }
+  }
+
+  /** Business signal. From a browser key only the signals the app map marks `source: "browser"`; everydeck refuses any other from the browser with 403. */
   signal(name: string, operationId: string, r: Omit<Refs, 'operationId'> = {}): void { this.enqueue({ event_id: uuid(), kind: 'signal', name, occurred_at: now(), ...refs({ ...r, operationId }) }); }
   /**
    * Error. With `exc` (the caught exception) the SDK builds the frames itself and, when sending, adds the code lines for up to 5 frames in the app's code
@@ -256,17 +331,22 @@ export class EverydeckClient {
   error(name: string, errorClass: string, o: Refs & { message?: string; http?: HttpContext; frames?: Frame[]; exc?: unknown; contextStatus?: ContextStatus; response?: ErrorAnswer } = {}): void {
     const { message, http, frames: given, exc, contextStatus, response, ...r } = o;
     const parsed = given ? undefined : exc !== undefined ? serverFramesOf(exc) : undefined;
-    const frames = (given ?? parsed)?.slice(0, 20).map((f) => compact({ function: clip(f.function || 'anonymous', 128), file: f.file ? clip(f.file, 240) : undefined, line: f.line && f.line >= 1 ? Math.round(f.line) : undefined, in_app: typeof f.in_app === 'boolean' ? f.in_app : undefined, _abs: (f as { _abs?: string })._abs }));
+    const frames = (given ?? parsed)?.slice(0, 20).map((f) => compact({ function: clip(f.function || 'anonymous', 128), file: f.file ? clip(f.file, 240) : undefined, line: f.line && f.line >= 1 ? Math.round(f.line) : undefined, column: f.column && f.column >= 1 ? Math.round(f.column) : undefined, debug_id: f.debug_id && DEBUG_ID.test(f.debug_id) ? f.debug_id : undefined, in_app: typeof f.in_app === 'boolean' ? f.in_app : undefined, _abs: (f as { _abs?: string })._abs }));
     const status: ContextStatus | undefined = !frames?.length ? undefined : contextStatus ?? (!this.sourceContext ? 'disabled' : given ? 'frames_without_source' : undefined);
     // facts from the response (code only in the allowed pattern, message scrubbed), otherwise left out
-    const answer = response ? compact({ code: response.code && ANSWER_CODE.test(response.code) ? response.code : undefined, message: response.message ? clip(scrubText(response.message), 300) : undefined }) : {};
+    const answer = response ? compact({ code: response.code && ANSWER_CODE.test(response.code) ? response.code : undefined, message: response.message ? scrubClip(response.message, 300) : undefined }) : {};
     const err = compact({ class: NAME.test(errorClass) ? errorClass : 'error', message: message ? clip(message, 1024) : undefined, frames, context_status: status, response: Object.keys(answer).length ? answer : undefined });
     if (status) for (const f of frames ?? []) delete (f as { _abs?: string })._abs;
     this.enqueue({ event_id: uuid(), kind: 'error', name, occurred_at: now(), error: err, ...compact({ http: httpField(http) }), ...refs(r) });
   }
   log(templateId: string, name: string, r: Refs = {}): void { this.enqueue({ event_id: uuid(), kind: 'log', name, occurred_at: now(), template_id: templateId, ...refs(r) }); }
   /** Browser step (a claim): needs a session; never form values, tokens or texts in `fields`. */
-  breadcrumb(name: string, sessionId: string, o: Omit<Refs, 'sessionId'> & { http?: HttpContext } = {}): void { const { http, ...r } = o; this.enqueue({ event_id: uuid(), kind: 'breadcrumb', name, occurred_at: now(), session_id: sessionId, ...compact({ http: httpField(http) }), ...refs(r) }); }
+  breadcrumb(name: string, sessionId: string, o: Omit<Refs, 'sessionId'> & { http?: HttpContext; /** HG1: where a hung request started (class `request_hung`), browser frames without code lines */ at?: { class: string; frames: Frame[] } } = {}): void {
+    const { http, at, ...r } = o;
+    const frames = at?.frames.slice(0, 20).map((f) => compact({ function: clip(f.function || 'anonymous', 128), file: f.file ? clip(f.file, 240) : undefined, line: f.line && f.line >= 1 ? Math.round(f.line) : undefined, column: f.column && f.column >= 1 ? Math.round(f.column) : undefined, debug_id: f.debug_id && DEBUG_ID.test(f.debug_id) ? f.debug_id : undefined }));
+    const error = at ? compact({ class: NAME.test(at.class) ? at.class : 'error', frames: frames?.length ? frames : undefined, context_status: frames?.length ? 'browser_no_source_maps' as ContextStatus : undefined }) : undefined;
+    this.enqueue({ event_id: uuid(), kind: 'breadcrumb', name, occurred_at: now(), session_id: sessionId, ...compact({ http: httpField(http), error }), ...refs(r) });
+  }
   /** Identity source (only meaningful on the server; only fields from `people.fields` of the approved manifest are stored). */
   identify(subjectRef: string, o: { accountRef?: string; displayName?: string; email?: string; loginMethod?: LoginMethod; providerUserId?: string; orgName?: string; phone?: string; whatsapp?: string } = {}): void {
     const fields = compact({ display_name: o.displayName, email: o.email, login_method: o.loginMethod, provider_user_id: o.providerUserId, org_name: o.orgName, phone: o.phone, whatsapp: o.whatsapp }) as Record<string, string>;
@@ -299,21 +379,53 @@ export class EverydeckClient {
   /**
    * Heartbeat. Without `job`: this process instance is running (instanceId). With `job` (1.9-r0, `jobs[].id` in the manifest): this job has run;
    * send it at the end of every successful run; everydeck reports a job that stays silent for two intervals. Job heartbeats do not count as an instance.
+   * Without a number: every DEFAULT_HEARTBEAT_SECONDS (300 s, 5 minutes).
    */
-  heartbeat(intervalSeconds: number, opts: { job?: string } = {}): void {
+  heartbeat(intervalSeconds: number = DEFAULT_HEARTBEAT_SECONDS, opts: { job?: string } = {}): void {
     if (opts.job !== undefined && !/^[a-z][a-z0-9_.-]{0,63}$/.test(opts.job)) { this.opts.onWarning(`heartbeat job id rejected: ${opts.job}`); return; }
     this.enqueue({ event_id: uuid(), kind: 'signal', name: 'everydeck.sdk.heartbeat', occurred_at: now(), operation_id: opts.job ? `everydeck.job:${opts.job}` : `everydeck.sdk:${this.opts.instanceId}`, fields: { instance_id: this.opts.instanceId, interval_seconds: intervalSeconds, ...(opts.job ? { job: opts.job } : {}) } });
   }
 
   /** Events not yet accepted (for saving when a mobile app is closed) */
-  exportPending(max = 300): Record<string, unknown>[] { return [...(this.inflight?.events ?? []), ...this.q].slice(0, max).map((e) => ({ ...e })); }
+  exportPending(max = 300): Record<string, unknown>[] {
+    this.queueLimitLoss();
+    const all = [...(this.inflight?.events ?? []), ...this.q];
+    if (all.length <= max) return all.map((e) => ({ ...e }));
+    // what does not fit is lost when the page closes: it arrives as a gap with the next visit instead of silently. The gap takes the id of the first
+    // event it stands for: if the page lives on and sends that event after all, everydeck drops the gap as a duplicate
+    const kept = all.slice(0, Math.max(0, max - 1)).map((e) => ({ ...e }));
+    return [...kept, {event_id: all[kept.length]!.event_id, kind: 'gap', name: 'everydeck.sdk.loss', occurred_at: now(), gap: {cause: 'sdk_limit', limit: 'sdk_pending_web', dropped: all.length - kept.length}}];
+  }
   /** Re-enqueues saved events (with their original time and id; everydeck deduplicates by event_id) */
   importPending(events: unknown): number {
     if (!Array.isArray(events)) return 0; let n = 0;
     for (const e of events.slice(0, this.opts.maxBuffer)) if (e && typeof e === 'object' && typeof (e as Event).event_id === 'string' && typeof (e as Event).name === 'string') { this.enqueue(e as Event); n++; }
     return n;
   }
-  get pending(): number { return this.q.length + (this.inflight?.events.length ?? 0) + (this.stats.unreported_loss ? 1 : 0); }
+  /** Q2: end of the wait everydeck asked for (Retry-After of a 429 or 503) while it lasts, otherwise 0; the browser SDK keeps refused events in the page's storage until then */
+  get refusedUntilMs(): number { return this.refusedUntil > Date.now() ? this.refusedUntil : 0; }
+  /** Q2: a wait carried over from an earlier visit of the page (at most one hour, like Retry-After): nothing is sent before it ends */
+  waitUntil(t: number): void {
+    if (!Number.isFinite(t) || t <= Date.now()) return;
+    const until = Math.min(t, Date.now() + 3_600_000);
+    this.pausedUntil = Math.max(this.pausedUntil, until); this.refusedUntil = Math.max(this.refusedUntil, until);
+  }
+  get pending(): number { return this.q.length + (this.inflight?.events.length ?? 0) + (this.stats.unreported_loss ? 1 : 0) + this.limitLoss.size; }
+  /** Events dropped at a limit of the SDK (counted; sent as one gap per limit with the next batch) */
+  private readonly limitLoss = new Map<SdkLimit, number>();
+  /** counted losses become gap events in the queue (with their own id, so a copy saved for the next visit is not counted twice) */
+  private queueLimitLoss(): void {
+    for (const [limit, dropped] of this.limitLoss) {
+      if (this.q.length >= this.opts.maxBuffer) break;
+      this.q.push({event_id: uuid(), kind: 'gap', name: 'everydeck.sdk.loss', occurred_at: now(), gap: {cause: 'sdk_limit', limit, dropped}});
+      this.limitLoss.delete(limit);
+    }
+  }
+  noteLoss(limit: SdkLimit, n = 1): void {
+    if (!this.opts.enabled || this.closed || !(n > 0)) return;
+    this.limitLoss.set(limit, (this.limitLoss.get(limit) ?? 0) + n);
+    this.schedule(this.opts.flushIntervalMs);
+  }
 
   private enqueue(ev: Event): void {
     if (!this.opts.enabled || this.closed) return;
@@ -321,7 +433,7 @@ export class EverydeckClient {
       if (!UUID_RE.test(ev.event_id) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(ev.occurred_at) || !Number.isFinite(Date.parse(ev.occurred_at))) { this.stats.dropped_oversize++; return; }
       if (!NAME.test(ev.name)) { this.stats.dropped_oversize++; this.opts.onWarning(`event name rejected: ${ev.name}`); return; }
       if (this.client && !ev['client']) ev['client'] = this.client;
-      if (size(ev) > EVENT_MAX_BYTES) { this.stats.dropped_oversize++; this.opts.onWarning(`event too large: ${ev.name}`); return; }
+      if (size(ev) > EVENT_MAX_BYTES) { this.stats.dropped_oversize++; this.noteLoss('sdk_event_bytes'); this.opts.onWarning(`event too large: ${ev.name}`); return; }
       if (this.q.length >= this.opts.maxBuffer) { this.stats.dropped_overflow++; this.stats.unreported_loss++; return; }
       this.q.push(ev); this.stats.enqueued++;
       this.schedule(this.opts.flushIntervalMs);
@@ -339,6 +451,12 @@ export class EverydeckClient {
       this.q.push({event_id: uuid(), kind: 'gap', name: 'everydeck.sdk.loss', occurred_at: now(), gap: {cause: 'buffer_overflow', dropped: this.stats.unreported_loss}});
       this.stats.unreported_loss = 0;
     }
+    this.queueLimitLoss();
+    this.inflight = this.takeBatch();
+    return this.inflight;
+  }
+  /** The next batch from the queue (never the one in flight) */
+  private takeBatch(): Batch | null {
     if (!this.q.length) return null;
     const batch: Batch = {schema_version: SCHEMA_VERSION, batch_id: uuid(), release_key: this.opts.releaseKey, manifest_digest: this.opts.manifestDigest, ...(this.probeId ? { probe_id: this.probeId } : {}), events: []};
     while (this.q.length && batch.events.length < BATCH_MAX) {
@@ -349,8 +467,7 @@ export class EverydeckClient {
       }
       batch.events.push(this.q.shift()!);
     }
-    this.inflight = batch.events.length ? batch : null;
-    return this.inflight;
+    return batch.events.length ? batch : null;
   }
   /** One send; result: accepted | retry | rejected | paused | idle. */
   private sendOnce(keepalive = false, deadline = Infinity): Promise<'accepted' | 'retry' | 'rejected' | 'paused' | 'idle'> {
@@ -359,9 +476,10 @@ export class EverydeckClient {
     this.request = request;
     return request;
   }
-  private async transmit(keepalive: boolean, deadline: number): Promise<'accepted' | 'retry' | 'rejected' | 'paused' | 'idle'> {
-    if (Date.now() < this.pausedUntil) return 'paused';
-    const batch = this.nextBatch();
+  /** `extra`: a batch of its own next to the one in flight (leaving the page, flushKeepalive); its events go back to the queue when it must be retried */
+  private async transmit(keepalive: boolean, deadline: number, extra?: Batch): Promise<'accepted' | 'retry' | 'rejected' | 'paused' | 'idle'> {
+    if (Date.now() < this.pausedUntil) { if (extra) this.q.unshift(...extra.events); return 'paused'; }
+    const batch = extra ?? this.nextBatch();
     if (!batch) return 'idle';
     try { await this.withSourceContext(batch.events); } catch { /* code lines are never a reason not to send */ for (const ev of batch.events) { const e = ev['error'] as { frames?: { _abs?: string }[] } | undefined; for (const f of e?.frames ?? []) delete f._abs; } }
     const ctl = new AbortController();
@@ -374,24 +492,28 @@ export class EverydeckClient {
       const gz = this.opts.compress ? await gzipText(text) : null;
       this.stats.bytes_raw += utf8Length(text); this.stats.bytes_sent += gz ? gz.byteLength : utf8Length(text);
       if (gz) this.stats.batches_compressed++;
-      const res = await this.opts.fetch(`${this.opts.endpoint}/v1/events`, { method: 'POST', headers: { authorization: `Bearer ${this.opts.credential}`, 'content-type': 'application/json', ...(gz ? { 'content-encoding': 'gzip' } : {}) }, body: (gz ?? text) as NonNullable<NonNullable<Parameters<typeof fetch>[1]>['body']>, signal: ctl.signal, ...(keepalive ? { keepalive: true } : {}) });
+      // x-everydeck-sent-at: the sending time (like Sentry's sent_at) lets everydeck correct a clock that is off by an hour or more; a header, so a retry keeps the same body
+      const res = await this.opts.fetch(`${this.opts.endpoint}/v1/events`, { method: 'POST', headers: { authorization: `Bearer ${this.opts.credential}`, 'content-type': 'application/json', 'x-everydeck-sent-at': now(), ...(gz ? { 'content-encoding': 'gzip' } : {}) }, body: (gz ?? text) as NonNullable<NonNullable<Parameters<typeof fetch>[1]>['body']>, signal: ctl.signal, ...(keepalive ? { keepalive: true } : {}) });
       status = res.status;
       if (status === 429 || status === 503) retryAfterMs = parseRetryAfter(res.headers.get('retry-after'));
+      // Q2: a 429 whose Retry-After the page cannot read (an older everydeck without the CORS release) waits 60 s, like Sentry's default
+      if (status === 429 && retryAfterMs === null) retryAfterMs = DEFAULT_RETRY_AFTER_MS;
       try { await res.arrayBuffer(); } catch { /* body does not matter */ }
     } catch (e) {
       this.stats.last_error = (e as Error).name === 'AbortError' ? 'timeout' : `network: ${(e as Error).message}`;
     } finally { clearTimeout(t); }
-    if (status === 202) { this.stats.accepted += batch.events.length; this.stats.batches_accepted++; this.inflight = null; this.failures = 0; return 'accepted'; }
+    if (status === 202) { this.stats.accepted += batch.events.length; this.stats.batches_accepted++; if (!extra) this.inflight = null; this.failures = 0; return 'accepted'; }
     if (status !== null && REJECT.has(status)) {
-      this.stats.dropped_rejected += batch.events.length; this.stats.batches_rejected++; this.inflight = null; this.stats.last_error = `rejected ${status}`;
+      this.stats.dropped_rejected += batch.events.length; this.stats.batches_rejected++; if (!extra) this.inflight = null; this.stats.last_error = `rejected ${status}`;
       this.opts.onWarning(`batch rejected by everydeck (${status}); ${batch.events.length} events dropped`);
       if (AUTH.has(status)) this.pausedUntil = Date.now() + this.opts.authPauseMs;
       return 'rejected';
     }
+    if (extra) this.q.unshift(...batch.events);
     this.stats.retries++; this.stats.batches_retried++; this.failures++;
     if (status !== null) this.stats.last_error = `retry after ${status}`;
     // Retry-After from everydeck (429 budget/quota, 503 protection) is honored: no attempt until then, not even from flush()
-    if (retryAfterMs !== null) { this.pausedUntil = Math.max(this.pausedUntil, Date.now() + retryAfterMs); this.stats.retry_after_waits++; }
+    if (retryAfterMs !== null) { this.pausedUntil = Math.max(this.pausedUntil, Date.now() + retryAfterMs); this.refusedUntil = Math.max(this.refusedUntil, Date.now() + retryAfterMs); this.stats.retry_after_waits++; }
     return 'retry';
   }
   private async pump(): Promise<void> {
@@ -422,9 +544,18 @@ export class EverydeckClient {
     }
     return this.pending === 0 && rejected === this.stats.dropped_rejected + this.stats.dropped_oversize;
   }
-  /** Browser: last attempt when leaving the page (keepalive, no waiting). */
-  flushKeepalive(): void { if (this.pending > 0) void this.sendOnce(true); }
-  async close(timeoutMs = 3000): Promise<boolean> { const ok = await this.flush(timeoutMs); this.closed = true; if (this.timer) { clearTimeout(this.timer); this.timer = null; } return ok; }
+  /**
+   * Browser: last attempt when leaving the page (keepalive, no waiting). While a send is still running (pagehide sent, then visibilitychange brings
+   * the last load times of the page, C10), what was queued since goes out in a keepalive request of its own right away: the page may be gone before
+   * the running send ends.
+   */
+  flushKeepalive(): void {
+    if (this.pending <= 0) return;
+    if (!this.request) { void this.sendOnce(true); return; }
+    const extra = this.takeBatch(); if (!extra) return;
+    void this.transmit(true, Infinity, extra).then((r) => { if (this.onSendResult && r !== 'idle') { try { this.onSendResult(r, this.q.length + (this.inflight?.events.length ?? 0)); } catch { /* never disturb delivery */ } } });
+  }
+  async close(timeoutMs = 3000): Promise<boolean> { if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; } const ok = await this.flush(timeoutMs); this.closed = true; if (this.timer) { clearTimeout(this.timer); this.timer = null; } return ok; }
 }
 
 export function createEverydeck(o: EverydeckOptions): EverydeckClient { return new EverydeckClient(o); }

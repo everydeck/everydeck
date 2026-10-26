@@ -12,12 +12,14 @@
  *    (HMAC-SHA256 over "EVERYDECK-SCOPE-V1\n" + payload); without a valid signature the route reads nothing (503). It keeps it for at most `scopeTtlSeconds`.
  *  - Every query runs in its own read-only transaction on the app's connection (postgres.js: sql.begin('read only'), pg Pool: BEGIN READ ONLY):
  *    the database itself rejects every write inside it (SQLSTATE 25006). Only tables and columns from the signed scope are read.
+ *  - A `date` leaves as its calendar day at midnight UTC in every time zone of the app server (pg: per query, never a global parser; postgres.js reads it so itself).
  *  - It reports its rights as checked: the connection's role, whether it is a superuser, whether it bypasses the app's row security (rolbypassrls), whether the
  *    transaction really is read-only (current_setting('transaction_read_only')) and on which tables the role itself could write.
+ *  - It counts the rows of each table of the scope on request (GET /everydeck/read/counts, count(*) in a read-only transaction) for everydeck's data loss watch.
  *  - Calls from everydeck are signed (verify.ts); it rejects unsigned calls and write verbs.
  * Runs in Node >= 22, Deno (Supabase Edge Functions) and any fetch runtime: Web Crypto only, no `node:` module.
  */
-import { createReadBridge, pgMatch, pgOne, pgRights, pgRows, type QueryClient, type ReadBridgeRequest, type ReadBridgeResponse, type ReadRights, type ReadScope } from './read-bridge.js';
+import { createReadBridge, pgCount, pgMatch, pgOne, pgRights, pgRows, readQuery, type QueryClient, type ReadBridgeRequest, type ReadBridgeResponse, type ReadRights, type ReadScope } from './read-bridge.js';
 import { memorySeen, type VerifyOptions } from './verify.js';
 export { supabaseDbUrl, LOCAL_DB_HOST } from './supabase-db.js';
 
@@ -47,7 +49,7 @@ export function readOnlyDb(db: AppDb): ReadOnlyDb {
     const pool = db as PgPoolLike;
     return { readOnly: async <T>(fn: (q: QueryClient) => Promise<T>) => {
       const c = await pool.connect(); let failed: unknown = null;
-      try { await c.query('BEGIN READ ONLY'); const out = await fn({ query: (text, values) => c.query(text, values ?? []) }); await c.query('COMMIT'); return out; }
+      try { await c.query('BEGIN READ ONLY'); const out = await fn({ query: (text, values) => readQuery(c, text, values ?? []) }); await c.query('COMMIT'); return out; }
       catch (e) { failed = e; try { await c.query('ROLLBACK'); } catch { /* connection broken: the pool discards it */ } throw e; }
       finally { c.release(failed instanceof Error && !(failed as { code?: string }).code ? failed : undefined); } } };
   }
@@ -119,7 +121,7 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
     if (payload.version !== '1' || !payload.scope || payload.scope.version !== '1') return { error: 'read scope version not supported' };
     const db = ro; const scope = payload.scope;
     const bridge = createReadBridge({ scope, token: keys[0]!, keys, seen, signatures: 'required', app: o.app ?? 'everydeck read bridge (@everydeck/sdk)', pageLimit: 200,
-      rows: (q) => db.readOnly((c) => pgRows(c)(q)), one: (q) => db.readOnly((c) => pgOne(c)(q)), match: (q) => db.readOnly((c) => pgMatch(c)(q)), rights: rightsOf(scope) });
+      rows: (q) => db.readOnly((c) => pgRows(c)(q)), one: (q) => db.readOnly((c) => pgOne(c)(q)), match: (q) => db.readOnly((c) => pgMatch(c)(q)), count: (q) => db.readOnly((c) => pgCount(c)(q)), rights: rightsOf(scope) });
     cached = { at: Date.now(), payload, bridge };
     return cached;
   }
@@ -146,7 +148,52 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
     const r = await handle({ method, path, query: Object.fromEntries(url.searchParams), authorization: Array.isArray(req.headers['authorization']) ? req.headers['authorization'][0] : req.headers['authorization'], headers: req.headers, url: url.pathname + url.search, body });
     const out = JSON.stringify(r.body); res.writeHead(r.status, { 'content-type': 'application/json', 'content-length': String(enc.encode(out).length) }); res.end(out);
   };
-  return { handle, fetch: fetchHandler, node, scope: async () => { const l = await load(); return 'error' in l ? null : l.payload; } };
+  /**
+   * Pull (outbound only, like a GitHub self-hosted runner): fetch the next request from everydeck with a long poll (GET /v1/read-bridge/next), answer it
+   * with this bridge and send the answer back (POST /v1/read-bridge/reply/:id). everydeck needs no address and no key of the app. One call returns after
+   * one request or after `waitSeconds` without one; `pull` keeps doing this until `budgetMs` has passed or `signal` aborts.
+   */
+  const f = () => o.fetch ?? fetch;
+  async function pullOnce(waitSeconds = 25, signal?: AbortSignal): Promise<'answered' | 'idle' | 'refused' | 'unreachable'> {
+    if (!endpoint || !keys.length) return 'refused';
+    let res: Response;
+    try { res = await f()(`${endpoint}/v1/read-bridge/next?wait=${Math.max(0, Math.min(25, waitSeconds))}`, { headers: { authorization: `Bearer ${keys[0]}`, accept: 'application/json' }, ...(signal ? { signal } : {}) }); }
+    catch { return 'unreachable'; }
+    if (res.status === 204) { await res.body?.cancel(); return 'idle'; }
+    if (res.status === 401 || res.status === 403 || res.status === 409) { await res.body?.cancel(); return 'refused'; }
+    if (res.status !== 200) { await res.body?.cancel(); return 'unreachable'; }
+    const job = await res.json() as { id: string; method: string; path: string; headers?: Record<string, string>; body?: string };
+    const u = new URL(job.path, 'http://bridge');
+    const r = await handle({ method: job.method, path: u.pathname, query: Object.fromEntries(u.searchParams), headers: new Headers(job.headers ?? {}), url: job.path, body: job.body ? enc.encode(job.body) : null });
+    try { const a = await f()(`${endpoint}/v1/read-bridge/reply/${encodeURIComponent(job.id)}`, { method: 'POST', headers: { authorization: `Bearer ${keys[0]}`, 'content-type': 'application/json' }, body: JSON.stringify({ status: r.status, body: JSON.stringify(r.body) }) }); await a.body?.cancel(); }
+    catch { return 'unreachable'; }
+    return 'answered';
+  }
+  async function pull(opts: { budgetMs?: number; signal?: AbortSignal } = {}): Promise<void> {
+    const end = Date.now() + (opts.budgetMs ?? Infinity);
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    while (!opts.signal?.aborted) {
+      const left = end - Date.now();
+      if (left < 2_000) return;
+      const out = await pullOnce(Math.min(25, Math.floor((left - 1_000) / 1000)), opts.signal);
+      // not set up yet or everydeck away: wait, with jitter (like Buildkite's agents), and ask again
+      if (out === 'refused') await sleep(Math.min(left, 30_000 + Math.random() * 5_000));
+      else if (out === 'unreachable') await sleep(Math.min(left, 2_000 + Math.random() * 3_000));
+    }
+  }
+  /** a server of its own (Node): pull for as long as the process runs; returns stop() */
+  const startPull = (): (() => void) => { const ac = new AbortController(); void pull({ signal: ac.signal }); return () => ac.abort(); };
+  /**
+   * Supabase Edge Function: the schedule calls it every minute; it answers at once and pulls in the background (EdgeRuntime.waitUntil) for `budgetMs`
+   * (default 125 s, under the 150 s wall clock of Supabase's free plan), so two calls overlap and one is always connected.
+   */
+  const pullHandler = (opts: { budgetMs?: number } = {}) => (_req: Request): Response => {
+    const work = pull({ budgetMs: opts.budgetMs ?? 125_000 });
+    const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+    if (rt?.waitUntil) rt.waitUntil(work); else void work;
+    return new Response(JSON.stringify({ pulling: true }), { status: 202, headers: { 'content-type': 'application/json' } });
+  };
+  return { handle, fetch: fetchHandler, node, pullOnce, pull, startPull, pullHandler, scope: async () => { const l = await load(); return 'error' in l ? null : l.payload; } };
 }
 export { signEverydeckRequest } from './verify.js';
 export { signEverydeckGrant, GRANT_SIGNATURE_PREFIX, type ReadGrant } from './read-bridge.js';

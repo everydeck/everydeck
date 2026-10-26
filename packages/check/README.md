@@ -22,6 +22,27 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.7
+
+- The bundled rules no longer accept `unsupported` for a schedule everydeck-check finds (pg_cron in SQL, a GitHub Actions workflow, vercel.json, render.yaml): each of them can send a heartbeat (through the outbox, or with a check-in step at the end of the run), so the part stays open with the way to do it.
+
+### 0.3.6
+
+- The bundled rules no longer ask for a flow or left_out on smaller writes (update, delete, upsert, triggers) and know `outcomes[].also`.
+
+### 0.3.5
+
+- One candidate per way of a kind: several places of the same kind (sign-in with a password and with Google, a browser write of the same table from two files) each become a candidate `<id>@<way>` in `flow_candidates[]`, with the same rule as everydeck-check (`candidateWays` in the bundled rules). Only a flow on that way, `covered_by` with exactly that id or `not_applicable` closes it.
+- `ai_calls` lists every call the SDK wrappers measure, also `images.edit`, `audio.translations.create`, `audio.speech.create`, `responses.parse` and Anthropic `messages.parse`.
+
+### 0.3.4
+
+- The bundled rules know `outcomes[]` and `inventory` of the app map (EV1: a part everydeck found is connected or stays open).
+
+### 0.3.3
+
+- Money without a payment provider: a table with a foreign key to a money table is written as `refers_to_money`; what the agent wrote about a money table (`holds`, `roles`, `statuses`, `currency`, `minor_unit`, `price`, `reason`) stays when the scaffold runs again with `--merge`, also on a table the scaffold finds itself.
+
 ### 0.3.2
 
 - People come from the schema, not from what was written by hand: the table with one row per account (its key references `auth.users`; with several, the one whose name the app shows) is proposed as `identity`, with the name column the app shows, e-mail and phone (never read by everydeck) and memberships that carry a role. A table or `null` given in an existing app map no longer overrules the schema unless it is at least as well supported (a name the app shows).

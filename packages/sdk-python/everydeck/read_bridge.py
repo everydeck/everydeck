@@ -32,15 +32,22 @@ VALUE_MAX = 256
 Rows = Callable[..., Iterable[Mapping[str, Any]]]
 
 
+def _day(v: Any) -> str:
+    """A calendar day (`date`) as midnight UTC of that day, the form everydeck accepts for a date field (like read-bridge.ts), in every time zone"""
+    return f"{v.isoformat()}T00:00:00Z" if isinstance(v, _dt.date) and not isinstance(v, _dt.datetime) else str(v)
+
+
 def _text(v: Any) -> str:
     if isinstance(v, _dt.datetime):
         return (v if v.tzinfo else v.replace(tzinfo=_dt.timezone.utc)).isoformat().replace("+00:00", "Z")
-    if isinstance(v, (_dt.date, _dt.time)):
+    if isinstance(v, _dt.date):
+        return _day(v)
+    if isinstance(v, _dt.time):
         return v.isoformat()
     if isinstance(v, str):
         return v
     if isinstance(v, (dict, list)):
-        return json.dumps(v, separators=(",", ":"), default=str)
+        return json.dumps(v, separators=(",", ":"), default=_day)
     return str(v)
 
 
@@ -130,9 +137,12 @@ class ReadBridge:
                  one: Callable[[str, Sequence[str], Sequence[str], Sequence[str]], Mapping[str, Any] | None] | None = None,
                  deleted: Callable[[str, Sequence[str], str, int], Sequence[Mapping[str, Any]]] | None = None,
                  signatures: str = "required", keys: Sequence[str] | None = None, seen: Callable[[str, float], bool] | None = None,
-                 match: Callable[..., Iterable[Mapping[str, Any]]] | None = None) -> None:
+                 match: Callable[..., Iterable[Mapping[str, Any]]] | None = None,
+                 count: Callable[[str, Sequence[str]], int] | None = None) -> None:
         # match(table, columns, where_column, values, order, after, limit) → rows of one conversation (psycopg_match); without match no conversations
         self.match = match
+        # count(table, keys) → number of rows of the table (psycopg_count), GET /everydeck/read/counts; without count no counts (everydeck waits for a full read)
+        self.count = count
         # one(table, columns, keys, ref) → one row; deleted(table, keys, since, limit) → [{ref, deleted_at}] (deletions the app knows about)
         self.one = one; self.deleted = deleted
         # everydeck signs every call: "required" (default) rejects unsigned calls, "optional" accepts the Bearer without a signature (everydeck instances that do not sign yet), "off" checks only the Bearer;
@@ -162,8 +172,9 @@ class ReadBridge:
 
     def capabilities(self) -> dict[str, Any]:
         # per object type whether changed_since works (change column in the scope), and whether fetching one object works
-        objects = [{"type": o["type"], "fields": [f["name"] for f in o["fields"]], **({"statuses": list(o["statuses"])} if o.get("statuses") else {}), "changed_since": bool(o.get("changed"))} for o in self.scope.get("objects", [])]
-        objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False} for r in self.scope.get("relations", [])]
+        counted = {"count": True} if self.count is not None else {}
+        objects = [{"type": o["type"], "fields": [f["name"] for f in o["fields"]], **({"statuses": list(o["statuses"])} if o.get("statuses") else {}), "changed_since": bool(o.get("changed")), **counted} for o in self.scope.get("objects", [])]
+        objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False, **counted} for r in self.scope.get("relations", [])]
         people = self.scope.get("people")
         convs = self.scope.get("conversations") or []
         return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys())}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), **({"messages_grant": True} if self.match is not None else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
@@ -200,6 +211,10 @@ class ReadBridge:
         if path == "/everydeck/read/capabilities":
             return 200, self.capabilities()
         as_of = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        if path == "/everydeck/read/counts":   # per type of the scope the number of rows of its table, counted now
+            if self.count is None:
+                return 404, {"error": "this bridge does not count"}
+            return 200, {"as_of": as_of, "counts": {typ: max(0, int(self.count(x["table"], x["keys"]) or 0)) for typ, x in self.types.items()}}
         if path == "/everydeck/read/people":
             p = self.scope.get("people")
             if not p:
@@ -349,6 +364,17 @@ def psycopg_rows(conn: Any, schema: str | None = None) -> Rows:
         names = [d[0] for d in cur.description]
         return [dict(zip(names, row)) for row in cur.fetchall()]
     return rows
+
+
+def psycopg_count(conn: Any, schema: str | None = None) -> Callable[[str, Sequence[str]], int]:
+    """`count` for psycopg: count(*) of the table (or the reader role's view)."""
+    def count(table: str, keys: Sequence[str]) -> int:
+        src = f"{_ident(schema)}.{_ident(read_view_name(table))}" if schema else _ident(table)
+        cur = conn.cursor()
+        cur.execute(f"SELECT count(*) AS n FROM {src}")
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    return count
 
 
 def psycopg_one(conn: Any, schema: str | None = None) -> Callable[[str, Sequence[str], Sequence[str], Sequence[str]], Mapping[str, Any] | None]:

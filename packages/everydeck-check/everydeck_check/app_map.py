@@ -18,7 +18,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 
-from .detect import DRIZZLE_TABLE, FIRESTORE_CALL, FIRESTORE_RULE, NPM, PRISMA_MODEL, PY, SKIP_DIRS, SQLALCHEMY_TABLE, SQL_CREATE, SQL_DROP, SQL_RENAME, _supabase_tables
+from .detect import SCHEMA_FILE_MAX, url_imports, DRIZZLE_TABLE, FIRESTORE_CALL, FIRESTORE_RULE, NPM, PRISMA_MODEL, PY, SKIP_DIRS, SQLALCHEMY_TABLE, SQL_CREATE, SQL_DROP, SQL_RENAME, _supabase_tables
 from .reads import frontend_mentions
 
 BLOCKS = ["login", "people_roles", "organizations", "content_status", "moderation", "chats", "uploads", "search", "payments", "email", "push", "ai", "jobs", "imports", "bookings", "settings", "platforms"]
@@ -27,6 +27,12 @@ ROUTE_JS = re.compile(r"""\b(?:app|router|server|fastify|api)\.(get|post|put|pat
 ROUTE_PY = re.compile(r"""@(?:app|router|api|[a-z_]+_router)\.(get|post|put|patch|delete)\(\s*['"](/[^'"\s]*)['"]""")
 PROVIDER_NAMES = {k.rstrip("*") for k in list(NPM) + list(PY) if not k.startswith("@") or k.endswith("*")}
 ALEMBIC_OP = re.compile(r"""\bop\.(create_table|drop_table)\(\s*['"]([A-Za-z_]\w*)['"]|\bop\.(execute)\(\s*(?:f?r?(?:\"\"\"|'''|"|'))\s*drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?""", re.I)
+
+
+# everydeck's own schemas (outbox, read bridge, app bridge): their tables count by themselves, as the guide says
+EVERYDECK_SCHEMAS = {"everydeck", "everydeck_outbox", "everydeck_bridge", "everydeck_read"}
+SQL_CREATE_IN_SCHEMA = re.compile(r"""create\s+table\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z_][\w]*)"?\.\s*"?[A-Za-z_][\w]*"?""", re.I)
+EVERYDECK_TABLES_NOTE = "tables in everydeck's schemas (everydeck_outbox, everydeck_bridge, everydeck_read) count by themselves: leave them out of everydeck_tables; any other table your installation adds stays in tables[] too"
 
 
 def _schema() -> dict[str, Any]:
@@ -48,6 +54,21 @@ def schema_errors(b: dict[str, Any]) -> list[str]:
         else:
             out.append(f"{where}: {err.message[:200]}")
     return out[:30]
+
+
+# the result signal can be written before any key exists; an agent that thought otherwise asked the owner where it goes
+RESULT_SIGNAL_NOW = ("Write it now, before any key exists: the SDK you add in this step switches itself off without endpoint, key and manifest digest until the step keys. "
+                     "In the app's code, right after a flow's result is stored (for example the flow with purpose sign_in), call everydeck.signal with the signal's name, then add the signal "
+                     "with step result and that place to the flow; a result the browser writes straight into the database gets its signal from the outbox. "
+                     "Choose the place yourself from the app map; do not ask the owner.")
+
+
+def _provider_hint(b: dict[str, Any], provider: str) -> str:
+    """identity.provider (supabase_auth) is no component id; its component is the one at the same place (the package of @supabase/supabase-js)."""
+    idn = b.get("identity") or {}
+    comp = next((c for c in b.get("components", []) if idn.get("provider") == provider and c.get("evidence") == idn.get("evidence")), None)
+    if comp: return f"; {provider} names the login in identity, not a component: use its component {comp['id']}"
+    return f"; use the id of a component ({', '.join(c['id'] for c in b.get('components', [])[:8])})"
 
 
 def reference_errors(b: dict[str, Any]) -> list[str]:
@@ -102,7 +123,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         if fids.count(f["id"]) > 1: errs.append(f"{at}: duplicate flow")
         w = f["result"].get("write")
         if w and w["table"] not in tables: errs.append(f"{at}: result.write table {w['table']} is not in the app map")
-        if f["result"].get("provider") and f["result"]["provider"] not in comps: errs.append(f"{at}: result.provider {f['result']['provider']} is not in components")
+        if f["result"].get("provider") and f["result"]["provider"] not in comps: errs.append(f"{at}: result.provider {f['result']['provider']} is not in components{_provider_hint(b, f['result']['provider'])}")
         ends = {f"end:{e['id']}" for e in f.get("ends", []) or []}
         for s in f.get("signals", []) or []:
             if s["step"].startswith("end:") and s["step"] not in ends: errs.append(f"{at}: signal step {s['step']} names no end")
@@ -110,6 +131,19 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
     for i, m in enumerate(money.get("tables", []) or []):
         if m["table"] not in tables: errs.append(f"money.tables[{i}] {m['table']}: table {m['table']} is not in the app map")
         for c in m.get("columns", []) or []: col(m["table"], c, f"money.tables[{i}] {m['table']}")
+        # money without a provider: what the agent describes about a money table names columns of that table (and of the price list); a table without a provider needs the reason
+        at = f"money.tables[{i}] {m['table']}"
+        if m.get("because") == "described_by_agent" and not (m.get("reason") or "").strip(): errs.append(f"{at}: described_by_agent needs a reason (what in the code shows that the table holds money)")
+        if any(m.get(k) for k in ("roles", "statuses", "price", "currency", "minor_unit")) and not m.get("holds"): errs.append(f"{at}: roles, statuses, currency and price need holds (plans, purchases, requests or prices)")
+        for role, c in (m.get("roles") or {}).items(): col(m["table"], c, f"{at}.roles.{role}")
+        for j, st in enumerate(m.get("statuses") or []):
+            if st.get("column"): col(m["table"], st["column"], f"{at}.statuses[{j}]")
+        pr = m.get("price")
+        if pr:
+            if pr["table"] not in tables: errs.append(f"{at}.price: price list {pr['table']} is not in the app map")
+            else:
+                for c in [pr["key"], *[v for v in pr["amounts"].values() if v], *([pr["currency"]] if pr.get("currency") else [])]: col(pr["table"], c, f"{at}.price")
+            if not (m.get("roles") or {}).get("product"): errs.append(f"{at}.price: needs roles.product (the column that names the row of the price list)")
     for i, pv in enumerate(money.get("providers", []) or []):
         if pv.get("component") and pv["component"] not in comps: errs.append(f"money.providers[{i}] {pv['provider']}: component {pv['component']} is not in components")
     cids = [c["id"] for c in b.get("flow_candidates", []) or []]
@@ -154,7 +188,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         if blk not in seen: errs.append(f"checklist: block {blk} is missing; answer every block with present true (evidence) or false")
     # everydeck_tables: tables the everydeck installation created; each must be in the app map
     for i, y in enumerate(b.get("everydeck_tables") or []):
-        if y["table"] not in {t["name"] for t in b.get("tables", [])}: errs.append(f"everydeck_tables[{i}] {y['table']}: table {y['table']} is not in the app map")
+        if y["table"] not in {t["name"] for t in b.get("tables", [])}: errs.append(f"everydeck_tables[{i}] {y['table']}: table {y['table']} is not in the app map; {EVERYDECK_TABLES_NOTE}")
     # a described screen names only tables and flows of the app map (mirror of the reference check in the contracts)
     for i, sc in enumerate(b.get("screens") or []):
         d = sc.get("described")
@@ -173,7 +207,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         if w.get("part_of") and w["part_of"] not in tables: errs.append(f"{at}: part_of {w['part_of']} is not in the app map")
         if w.get("part_of") == w["table"]: errs.append(f"{at}: part_of names the table itself")
     if not any((s.get("step") == "result") for f in b.get("flows", []) for s in (f.get("signals") or [])):
-        errs.append("flows: at least one flow needs a result signal (the code that reports the result to everydeck, with evidence)")
+        errs.append("flows: at least one flow needs a result signal (the code that reports the result to everydeck, with evidence). " + RESULT_SIGNAL_NOW)
     return errs
 
 
@@ -326,6 +360,42 @@ def _is_backend(rel: str) -> bool:
     return bool(_BD.search(rel)) and not rel.endswith((".html", ".tsx", ".jsx", ".vue", ".svelte"))
 
 
+SERVER_DIRECTIVE = re.compile(r"""^\s*['"]use server['"]|\bimport\s+['"]server-only['"]""", re.M)
+CLIENT_DIRECTIVE = re.compile(r"""^\s*['"]use client['"]""", re.M)
+
+
+def _next_app(repo: Path, path: str) -> bool:
+    """The nearest package.json above the file names Next.js: there server code lives next to browser code, and only 'use client' files run in the browser."""
+    d = (repo / path).parent
+    while True:
+        pj = d / "package.json"
+        if pj.is_file():
+            try: pkg = json.loads(pj.read_text(encoding="utf-8"))
+            except ValueError: return False
+            return "next" in {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        if d == repo or repo not in d.parents: return False
+        d = d.parent
+
+
+def _signal_source_errors(repo: Path, s: dict[str, Any], at: str) -> list[str]:
+    """ES1: who sends a signal must match where the code sends it. A signal in browser code (the rule of the frontend reads; in a Next.js app only
+    'use client' files and pages/ outside pages/api; 'use server' and server-only never) needs `source: "browser"`: the browser SDK sends it with the public browser key, and everydeck
+    takes a signal from that key only with this mark (as the browser's claim). `source: "browser"` in server code (a backend folder or Python) is wrong:
+    the server SDK sends it."""
+    from .reads import is_frontend_source
+    path = s["evidence"]["path"]; p = repo / path
+    if not p.is_file(): return []
+    text = p.read_text(encoding="utf-8", errors="replace")
+    next_browser = lambda: bool(CLIENT_DIRECTIVE.search(text)) or (bool(re.search(r"(^|/)pages/", path)) and is_frontend_source(path, text))   # App Router: 'use client'; Pages Router: pages/ (not pages/api)
+    browser = not SERVER_DIRECTIVE.search(text) and (next_browser() if _next_app(repo, path) else is_frontend_source(path, text))
+    if browser and s.get("source") != "browser":
+        return [f'{at}: {path} is browser code: add "source": "browser" to this signal and send it with the browser SDK inside the action of the flow, '
+                f'everydeck.signal("{s["name"]}", ctx.operationId); without the mark everydeck refuses it from the browser key (403) and the flow never counts a result']
+    if not browser and s.get("source") == "browser" and (_is_backend(path) or path.endswith(".py")):
+        return [f'{at}: "source": "browser" but {path} is server code; leave source out and send the signal with the server SDK after the commit']
+    return []
+
+
 def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
     errs: list[str] = []; files = _Files(repo)
     for i, c in enumerate(b.get("components", []) or []):
@@ -345,10 +415,18 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
     for i, pv in enumerate(money.get("providers", []) or []):
         _check_evidence(files, pv["evidence"], f"money.providers[{i}] {pv['provider']}", sym(pv["evidence"]), errs)
         for j, c in enumerate(pv.get("calls", []) or []): _check_evidence(files, c["evidence"], f"money.providers[{i}] {pv['provider']}.calls[{j}]", sym(c["evidence"]), errs)
-    for i, m in enumerate(money.get("tables", []) or []): _check_evidence(files, m["evidence"], f"money.tables[{i}] {m['table']}", sym(m["evidence"]), errs)
+    for i, m in enumerate(money.get("tables", []) or []):
+        at = f"money.tables[{i}] {m['table']}"
+        _check_evidence(files, m["evidence"], at, sym(m["evidence"]), errs)
+        for k in ("currency", "minor_unit", "price"):
+            if m.get(k): _check_evidence(files, m[k]["evidence"], f"{at}.{k}", sym(m[k]["evidence"]), errs)
+        for j, st in enumerate(m.get("statuses") or []): _check_evidence(files, st["evidence"], f"{at}.statuses[{j}]", sym(st["evidence"]), errs)
     for i, a in enumerate(b.get("ai_calls", []) or []):
         _check_evidence(files, a["evidence"], f"ai_calls[{i}] {a['provider']}", sym(a["evidence"]), errs)
         if a.get("model"): _check_evidence(files, a["model"]["evidence"], f"ai_calls[{i}] {a['provider']}.model", [a["model"]["value"]], errs)
+    # a counter-evidence is a place like every other: file, line and the named symbol are there
+    for i, o in enumerate(b.get("outcomes", []) or []):
+        if o.get("not_applicable"): _check_evidence(files, o["not_applicable"]["evidence"], f"outcomes[{i}] {o['id']}.not_applicable", sym(o["not_applicable"]["evidence"]), errs)
     for i, c in enumerate(b.get("flow_candidates", []) or []):
         _check_evidence(files, c["evidence"], f"flow_candidates[{i}] {c['id']}", [c["evidence"]["symbol"]] if c["evidence"].get("symbol") else [], errs)
         if c.get("handler"): _check_evidence(files, c["handler"], f"flow_candidates[{i}] {c['id']}.handler", [], errs)
@@ -424,7 +502,9 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         _check_evidence(files, f["result"]["evidence"], at + ".result", [], errs)
         if f.get("failure"): _check_evidence(files, f["failure"], at + ".failure", [], errs)
         for j, e in enumerate(f.get("ends", []) or []): _check_evidence(files, e["evidence"], f"{at}.ends[{j}]", [], errs)
-        for j, s in enumerate(f.get("signals", []) or []): _check_evidence(files, s["evidence"], f"{at}.signals[{j}] {s['name']}", [s["name"]], errs)
+        for j, s in enumerate(f.get("signals", []) or []):
+            _check_evidence(files, s["evidence"], f"{at}.signals[{j}] {s['name']}", [s["name"]], errs)
+            errs += _signal_source_errors(repo, s, f"{at}.signals[{j}] {s['name']}")
     for k in ("email", "push"):
         ch = (b.get("channels") or {}).get(k)
         if ch:
@@ -447,7 +527,7 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
 def _files_of(repo: Path, suffixes: set[str]):
     for p in sorted(repo.rglob("*")):
         rel = p.relative_to(repo)
-        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in suffixes or p.stat().st_size > 2_000_000:
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in suffixes or p.stat().st_size > SCHEMA_FILE_MAX:
             continue
         try:
             yield rel, p.read_text(encoding="utf-8", errors="replace")
@@ -470,7 +550,10 @@ def detect_tables(repo: Path) -> dict[str, str]:
             if name not in found: found[name] = f"{kind} {name} in {rel}"
         suf = rel.suffix
         if suf == ".sql":   # final state of the schema: migrations in file order, DROP TABLE removes
-            for n in SQL_CREATE.findall(text): add(n, "table")
+            for m in SQL_CREATE.finditer(text):
+                sm = SQL_CREATE_IN_SCHEMA.match(text, m.start())
+                if sm and sm.group(1).lower() in EVERYDECK_SCHEMAS: continue   # the outbox copied from the SDK (everydeck_outbox.event, .capture_error)
+                add(m.group(1), "table")
             for n in SQL_DROP.findall(text): found.pop(n, None)
             for old, new in SQL_RENAME.findall(text):   # renamed: the new name is in this file
                 if found.pop(old, None) is not None: add(new, "table")
@@ -533,6 +616,10 @@ def detect_providers(repo: Path) -> dict[str, str]:
             for m in re.finditer(r"""^\s*"?([A-Za-z0-9_.-]+)"?\s*[>=<~!\[]""", text, re.M):
                 name = m.group(1).lower()
                 if name in PY: found.setdefault(name, f"{name} in {rel}")
+    # imported by URL or with npm:/jsr: (Deno, Supabase Edge Functions); no package.json names them
+    for rel, text in _files_of(repo, {".ts", ".tsx", ".js", ".mjs"}):
+        for dep in url_imports(text):
+            if _known_npm(dep): found.setdefault(dep, f"{dep} (imported by URL) in {rel}")
     return found
 
 
@@ -641,32 +728,34 @@ def detect_frontend_reads(repo: Path, tables: set[str]) -> dict[str, str]:
     return out
 
 
+# the group names the method (the same as the scaffold): it tells the ways of one kind apart (candidate_ways)
 AUTH_CALLS = [
-    ("sign_up", "signs people up", re.compile(r"""\.auth\.signUp\s*\(|\bcreateUserWithEmailAndPassword\s*\(|\buseSignUp\s*\(|<SignUp\b|\.auth\.sign_up\s*\(""")),
-    ("sign_in", "signs people in", re.compile(r"""\.auth\.(?:signIn(?:WithPassword|WithOtp|WithOAuth|WithIdToken|WithSSO)?|verifyOtp)\s*\(|\bsignInWith(?:EmailAndPassword|Popup|Redirect|EmailLink|PhoneNumber|Credential)\s*\(|\buseSignIn\s*\(|<SignIn\b|\.auth\.(?:sign_in_with_(?:password|otp|oauth|id_token)|verify_otp)\s*\(|\bsignIn\s*\(\s*['"]""")),
-    ("password_reset", "resets a password", re.compile(r"""\.auth\.resetPasswordForEmail\s*\(|\bsendPasswordResetEmail\s*\(|\.auth\.reset_password_(?:email|for_email)\s*\(""")),
+    ("sign_up", "signs people up", re.compile(r"""\.auth\.(signUp)\s*\(|\b(createUserWithEmailAndPassword)\s*\(|\b(useSignUp)\s*\(|<(SignUp)\b|\.auth\.(sign_up)\s*\(""")),
+    ("sign_in", "signs people in", re.compile(r"""\.auth\.(signIn(?:WithPassword|WithOtp|WithOAuth|WithIdToken|WithSSO)?|verifyOtp)\s*\(|\b(signInWith(?:EmailAndPassword|Popup|Redirect|EmailLink|PhoneNumber|Credential))\s*\(|\b(useSignIn)\s*\(|<(SignIn)\b|\.auth\.(sign_in_with_(?:password|otp|oauth|id_token)|verify_otp)\s*\(|\b(signIn)\s*\(\s*['"]""")),
+    ("password_reset", "resets a password", re.compile(r"""\.auth\.(resetPasswordForEmail)\s*\(|\b(sendPasswordResetEmail)\s*\(|\.auth\.(reset_password_(?:email|for_email))\s*\(""")),
 ]
 FRONTEND_WRITE = re.compile(r"""\.from\(\s*['"`]([A-Za-z_]\w*)['"`]\s*(?:as\s+\w+\s*)?\)""")
 
 
-def flow_candidate_errors(b: dict[str, Any], repo: Path) -> list[str]:
-    """The independent cross-check of the flow candidates: every write of the frontend to a table (Supabase .from('x').insert/update/upsert/delete)
-    and every place the code signs people up or in or resets a password is a candidate of the app map (described or left out with its reason)
-    or a flow describes it. What the candidates themselves need (a flow or left_out) checks everydeck's bundled rule."""
-    errs: list[str] = []
-    tables = {t["name"].lower(): t["name"] for t in b.get("tables", [])}
-    cands = {c["id"] for c in b.get("flow_candidates", []) or []}
-    flows = b.get("flows", []) or []
-    near = lambda ev, path, line: ev["path"] == path and abs(int(ev["line"]) - line) <= LINE_SLACK
-    def described(table: str | None, kind: str | None, path: str, line: int, purpose: str | None = None) -> bool:
-        if purpose: return any(f.get("purpose") == purpose for f in flows)   # a sign-up/sign-in/reset place counts only as a flow with that purpose
-        for f in flows:
-            w = f["result"].get("write")
-            if table and w and w["table"] == table and (kind in (w["kind"], "upsert") or w["kind"] == "upsert"): return True
-            if near(f["start"], path, line) or near(f["result"]["evidence"], path, line): return True
-        return False
+def candidate_ways(places: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """every place found → one candidate per way, with everydeck's rule (candidateWays, the same as the scaffold): one way of a kind keeps its id and
+    first place, several ways (two sign-in methods, two files that update one table) become <id>@<way> each. Without node: the first place per id."""
+    from . import rules
+    try:
+        return list(rules.run_rule("ways", {"places": places})["candidates"])
+    except (rules.RulesUnavailable, KeyError, ValueError, OSError):
+        first: dict[str, dict[str, Any]] = {}
+        for c in places: first.setdefault(c["id"], c)
+        return list(first.values())
+
+
+def scan_candidates(repo: Path, tables: set[str]) -> list[dict[str, Any]]:
+    """Every place the frontend writes a table (Supabase .from('x').insert/update/upsert/delete, only files an entry of the app reaches) and every place the
+    code signs people up or in or resets a password; one entry per place (id like the scaffold: browser_write:<kind>:<table>, auth:<kind>; the sign-in
+    method as the symbol). candidate_ways makes one candidate per way of them."""
+    by_lower = {t.lower(): t for t in tables}
     reach = app_reach(repo); reachable = set(reach.get("reachable", [])) if not reach.get("errors") else None
-    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
     for rel, text in _files_of(repo, {".tsx", ".jsx", ".vue", ".svelte", ".ts", ".js", ".mjs", ".py"}):
         r = rel.as_posix()
         if re.search(r"(^|/)(tests?|__tests__|e2e|cypress)/|\.(test|spec|d)\.[tj]sx?$|(^|/)test_[^/]*\.py$", r): continue
@@ -674,29 +763,59 @@ def flow_candidate_errors(b: dict[str, Any], repo: Path) -> list[str]:
         line_of = lambda pos: text.count("\n", 0, pos) + 1
         if _is_frontend(rel):
             for m in FRONTEND_WRITE.finditer(text):
-                t = tables.get(m.group(1).lower()); w = WRITE_CHAIN.search(text[m.end():m.end() + 400].split(";")[0])
+                t = by_lower.get(m.group(1).lower()); w = WRITE_CHAIN.search(text[m.end():m.end() + 400].split(";")[0])
                 if not t or not w: continue
-                kind = w.group(1); cid = f"browser_write:{kind}:{t}"; ln = line_of(m.start())
-                if cid in cands or cid in seen or described(t, kind, r, ln): continue
-                seen.add(cid); errs.append(f"flow_candidates: the frontend writes {t} ({kind}) at {r}:{ln} but the app map lists no candidate {cid} and no flow describes it; rerun the scaffold with --merge")
+                out.append({"id": f"browser_write:{w.group(1)}:{t}", "source": "browser_write", "kind": w.group(1), "table": t, "evidence": {"path": r, "line": line_of(m.start())}})
         for i, line in enumerate(text.split("\n")):
             if re.match(r"^\s*(//|#|\*)", line): continue
-            for kind, verb, re_ in AUTH_CALLS:
-                cid = f"auth:{kind}"
-                if re_.search(line) and cid not in cands and cid not in seen and not described(None, None, r, i + 1, kind):
-                    seen.add(cid); errs.append(f"flow_candidates: the code {verb} at {r}:{i + 1} but the app map lists no candidate {cid} and no flow with purpose {kind}; rerun the scaffold with --merge")
+            for kind, _verb, re_ in AUTH_CALLS:
+                if (m := re_.search(line)): out.append({"id": f"auth:{kind}", "source": "auth", "kind": kind, "evidence": {"path": r, "line": i + 1, "symbol": next(g for g in m.groups() if g)}})
+    return out
+
+
+AUTH_VERB = {kind: verb for kind, verb, _ in AUTH_CALLS}
+
+
+def flow_candidate_errors(b: dict[str, Any], repo: Path) -> list[str]:
+    """The independent cross-check of the flow candidates: every write of the frontend to a table (Supabase .from('x').insert/update/upsert/delete)
+    and every place the code signs people up or in or resets a password is a candidate of the app map (described or left out with its reason)
+    or a flow describes it. What the candidates themselves need (a flow or left_out) checks everydeck's bundled rule."""
+    errs: list[str] = []
+    cands = {c["id"] for c in b.get("flow_candidates", []) or []}
+    flows = b.get("flows", []) or []
+    near = lambda ev, path, line: ev["path"] == path and abs(int(ev["line"]) - line) <= LINE_SLACK
+    def described(table: str | None, kind: str | None, path: str, line: int, purpose: str | None = None, way: str | None = None) -> bool:
+        # one of several ways of a kind is described only by a flow on that way (at its place, or in its file)
+        on_way = lambda f: not way or near(f["start"], path, line) or near(f["result"]["evidence"], path, line) or path in (f["start"]["path"], f["result"]["evidence"]["path"])
+        if purpose: return any(f.get("purpose") == purpose and on_way(f) for f in flows)   # a sign-up/sign-in/reset place counts only as a flow with that purpose
+        for f in flows:
+            w = f["result"].get("write")
+            if table and w and w["table"] == table and (kind in (w["kind"], "upsert") or w["kind"] == "upsert") and on_way(f): return True
+            if near(f["start"], path, line) or near(f["result"]["evidence"], path, line): return True
+        return False
+    seen: set[str] = set()
+    for c in candidate_ways(scan_candidates(repo, {t["name"] for t in b.get("tables", [])})):
+        cid, r, ln = c["id"], c["evidence"]["path"], c["evidence"]["line"]
+        if cid in cands or cid in seen: continue
+        if c["source"] == "browser_write":
+            if described(c["table"], c["kind"], r, ln, way=c.get("way")): continue
+            seen.add(cid); errs.append(f"flow_candidates: the frontend writes {c['table']} ({c['kind']}) at {r}:{ln} but the app map lists no candidate {cid} and no flow describes it; rerun the scaffold with --merge")
+        elif not described(None, None, r, ln, c["kind"], c.get("way")):
+            seen.add(cid); errs.append(f"flow_candidates: the code {AUTH_VERB[c['kind']]} at {r}:{ln} but the app map lists no candidate {cid} and no flow with purpose {c['kind']}; rerun the scaffold with --merge")
     return errs
 
 
-AI_CALL = re.compile(r"""\.(chat\.completions\.create|chat\.completions\.parse|responses\.create|embeddings\.create|messages\.create|generateContent|generate_content)\s*\(""")
+# every method the SDK wrappers measure (WRAPPED in footprint.py) and Anthropic's messages.stream, which they do not (it needs ai_call at its place)
+AI_CALL = re.compile(r"""\.((?:beta\.)?chat\.completions\.(?:create|parse)|responses\.(?:create|parse)|completions\.create|embeddings\.create|images\.(?:generate|edit)"""
+                     r"""|audio\.(?:transcriptions|translations|speech)\.create|(?:beta\.)?messages\.(?:create|parse|stream)|generateContent|generate_content)\s*\(""")
 PAY_CALL = [("checkout", "opens a checkout", re.compile(r"""\b(stripe\.checkout\.(?:sessions|Session)\.create|stripe\.PaymentIntent\.create|stripe\.paymentIntents\.create|Paddle\.Checkout\.open|Purchases\.purchase(?:Package|Product|StoreProduct))\s*\(""")),
             ("webhook", "receives the payment provider's webhook", re.compile(r"""\b(stripe\.webhooks\.constructEvent(?:Async)?|stripe\.Webhook\.construct_event)\s*\("""))]
 
 
 def money_ai_errors(b: dict[str, Any], repo: Path) -> list[str]:
     """The independent cross-check of money and AI: every AI call (OpenAI-compatible, Anthropic, Google) and every checkout or webhook of a payment provider
-    that everydeck-check finds in the code is in the app map (ai_calls, money.providers[].calls) at that place (± 3 lines). Anthropic's messages.create
-    counts only in a file that names anthropic."""
+    that everydeck-check finds in the code is in the app map (ai_calls, money.providers[].calls) at that place (± 3 lines), also images and audio. Anthropic's
+    messages.* counts only in a file that names anthropic."""
     errs: list[str] = []
     ai = [(a["evidence"]["path"], int(a["evidence"]["line"])) for a in b.get("ai_calls", []) or []]
     pay = [(c["evidence"]["path"], int(c["evidence"]["line"])) for pv in ((b.get("money") or {}).get("providers") or []) for c in pv.get("calls", []) or []]
@@ -707,7 +826,7 @@ def money_ai_errors(b: dict[str, Any], repo: Path) -> list[str]:
         for i, line in enumerate(text.split("\n")):
             if re.match(r"^\s*(//|#|\*)", line): continue
             m = AI_CALL.search(line)
-            if m and not (m.group(1) == "messages.create" and not re.search(r"anthropic", text, re.I)) and not has(ai, r, i + 1):
+            if m and not ("messages." in m.group(1) and not re.search(r"anthropic", text, re.I)) and not has(ai, r, i + 1):
                 errs.append(f"ai_calls: the code calls an AI model ({m.group(1)}) at {r}:{i + 1} but the app map has no ai_calls entry there; rerun the scaffold with --merge")
             for kind, verb, re_ in PAY_CALL:
                 p = re_.search(line)
@@ -715,8 +834,68 @@ def money_ai_errors(b: dict[str, Any], repo: Path) -> list[str]:
     return errs[:50]
 
 
+USE_FILES = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".vue", ".svelte", ".dart"}
+TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|e2e|cypress)/|\.(test|spec|d)\.[tj]sx?$|(^|/)test_[^/]*\.py$")
+
+
+def _first_use(repo: Path, patterns: list[re.Pattern[str]]) -> str | None:
+    """The first place in the code (not tests) where one of the patterns matches, as path:line."""
+    for rel, text in _files_of(repo, USE_FILES):
+        if TEST_PATH.search(rel.as_posix()): continue
+        for rx in patterns:
+            m = rx.search(text)
+            if m: return f"{rel.as_posix()}:{text.count(chr(10), 0, m.start()) + 1}"
+    return None
+
+
+def _table_use(name: str, write_only: bool = False) -> list[re.Pattern[str]]:
+    n = re.escape(name)
+    if write_only: return [re.compile(rf"""\.from\(\s*['"`]{n}['"`][^;]{{0,400}}?\.(?:insert|update|upsert|delete)\(""")]
+    return [re.compile(rf"""\.from\(\s*['"`]{n}['"`]"""), re.compile(rf"""\bcollection\(\s*(?:[A-Za-z_]\w*\s*,\s*)?['"]{n}['"]"""), re.compile(rf"""\.table\(\s*['"]{n}['"]\s*\)"""), re.compile(rf"""\b(?:prisma|db)\.{n}\.""")]
+
+
+def _provider_use(block: str) -> list[re.Pattern[str]]:
+    """A call or import of a provider of this block: its host (fcm.googleapis.com, api.resend.com …) or its package imported in code (also by URL)."""
+    from .detect import HOSTS
+    pkgs = [k.rstrip("*") for k, v in NPM.items() if v == block] + [k for k, v in PY.items() if v == block]
+    hosts = [h for h, b, _ in HOSTS if b == block]
+    out = [re.compile(re.escape(h)) for h in hosts]
+    if pkgs:
+        alt = "|".join(re.escape(p) for p in sorted(set(pkgs), key=len, reverse=True))
+        out.append(re.compile(rf"""(?:from\s+|import\s*\(\s*|require\(\s*|^\s*import\s+)['"](?:npm:|jsr:|https?://[^'"]*/)?(?:{alt})(?:[@/'"])""", re.M))
+        out.append(re.compile(rf"""^\s*(?:from|import)\s+(?:{alt})\b""", re.M))
+    return out
+
+
+def outcome_usage_errors(b: dict[str, Any], repo: Path) -> list[str]:
+    """A part closed with not_applicable while everydeck-check itself finds it used in the code is refused, with the place. Only the own find against
+    the claim, no similarity: a money table read or written, a channel or payment provider called or imported, a group's table written, a sign-up call."""
+    errs: list[str] = []
+    tables = {e["block"]: e.get("tables") or [] for e in b.get("checklist", [])}
+    for i, o in enumerate(b.get("outcomes") or []):
+        if not o.get("not_applicable"): continue
+        oid: str = o["id"]; kind, _, rest = oid.partition(":")
+        found: str | None = None; what = ""
+        if kind == "money" and rest.startswith("table:"):
+            t = rest[len("table:"):]; found = _first_use(repo, _table_use(t)); what = f"the code uses the table {t}"
+        elif kind == "money" and rest.startswith("provider:"):
+            pkg = rest[len("provider:"):]
+            found = _first_use(repo, [re.compile(rf"""['"](?:npm:|jsr:|https?://[^'"]*/)?{re.escape(pkg)}(?:[@/'"])""")]); what = f"the code imports {pkg}"
+        elif kind in ("channel", "scan") and rest in ("email", "push", "payments", "ai"):
+            found = _first_use(repo, _provider_use(rest)); what = f"the code calls a {rest} provider"
+        elif kind == "flow":
+            for t in tables.get(rest, []):
+                found = _first_use(repo, _table_use(t, write_only=True))
+                if found: what = f"the code writes {t}"; break
+        elif oid == "login:sign_up":
+            found = _first_use(repo, [AUTH_CALLS[0][2]]); what = "the code signs people up"
+        if found: errs.append(f"outcomes[{i}] {oid}: not_applicable, but {what} at {found}; connect it in the app map or keep it open (deferred)")
+    return errs
+
+
 def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
     errs: list[str] = []
+    errs += outcome_usage_errors(b, repo)
     errs += flow_candidate_errors(b, repo)
     errs += money_ai_errors(b, repo)
     declared_tables = {t["name"] for t in b.get("tables", [])}
@@ -783,8 +962,7 @@ def database_tables(url: str) -> set[str]:
 def database_errors(b: dict[str, Any], db: set[str]) -> list[str]:
     """Every table of the database is in the app map (otherwise it drops out silently); everydeck's own schemas do not count."""
     declared = {(t.get("schema") or "public") + "." + t["name"] for t in b.get("tables", [])}
-    everydeck = {"everydeck", "everydeck_outbox", "everydeck_bridge"}
-    return [f"tables[]: {t} is in the database but not in the app map; add it with its columns (the generator reads it with --db)" for t in sorted(db) if t not in declared and t.split(".")[0] not in everydeck]
+    return [f"tables[]: {t} is in the database but not in the app map; add it with its columns (the generator reads it with --db)" for t in sorted(db) if t not in declared and t.split(".")[0] not in EVERYDECK_SCHEMAS]
 
 
 # ── Copies of contact data and messages. If an SQL function of the app (trigger: NEW./OLD., local variables from them;
@@ -952,7 +1130,7 @@ def validate_app_map(doc: dict[str, Any], repo: Path | None, db: str | None = No
 
 def drift_manifest(b: dict[str, Any]) -> dict[str, Any]:
     """For `everydeck-check drift`: the signals, screens, routes and jobs of the app map in the form the drift comparison knows (no derivation)."""
-    signals = [{"name": s["name"], "capability_id": f["id"], "label": s["name"], "allowed_source": "server", "location": {"path": s["evidence"]["path"], "symbol": s["evidence"].get("symbol") or s["name"], "commit": b["commit"]}}
+    signals = [{"name": s["name"], "capability_id": f["id"], "label": s["name"], "allowed_source": s.get("source") or "server", "location": {"path": s["evidence"]["path"], "symbol": s["evidence"].get("symbol") or s["name"], "commit": b["commit"]}}
                for f in b.get("flows", []) for s in (f.get("signals") or [])]
     return {"schema_version": "1.11-r0", "release_key": b.get("release_key", ""), "capabilities": [{"id": f["id"], "label": f["id"], "kind": "flow", "observation": "instrumented" if f.get("signals") else "proposed"} for f in b.get("flows", [])],
             "signals": signals, "rules": [], "diagnostic_fields": [],

@@ -4,9 +4,10 @@
  * Needs the app's `pg` package. Settings come from the environment (never from code):
  *   EVERYDECK_OUTBOX_DATABASE_URL  database with outbox/everydeck_outbox.sql (a role that may read, update and delete everydeck_outbox.event)
  *   EVERYDECK_ENDPOINT, EVERYDECK_SERVER_KEY, EVERYDECK_RELEASE_KEY, EVERYDECK_MANIFEST_DIGEST
- *   EVERYDECK_OUTBOX_INTERVAL_SECONDS (default 5, keeps the delay under 10 s), EVERYDECK_OUTBOX_HEARTBEAT_SECONDS (default 60: the job heartbeat)
+ *   EVERYDECK_OUTBOX_INTERVAL_SECONDS (default 5, keeps the delay under 10 s), EVERYDECK_OUTBOX_HEARTBEAT_SECONDS (default 300: the job heartbeat every 5 minutes)
  * Usage: everydeck-outbox-relay [--once]
  */
+import { DEFAULT_HEARTBEAT_SECONDS } from './heartbeat.js';
 import { OUTBOX_JOB, relayOnce, type RelayOptions } from './outbox.js';
 
 type Pool = { query: (text: string, params?: unknown[]) => Promise<unknown>; end: () => Promise<void> };
@@ -16,7 +17,7 @@ const pgName = 'pg';
 const { default: pg } = await import(pgName) as { default: { Pool: new (o: { connectionString: string; max: number }) => Pool } };
 const pool = new pg.Pool({ connectionString: env('EVERYDECK_OUTBOX_DATABASE_URL'), max: 1 });
 const interval = Number(env('EVERYDECK_OUTBOX_INTERVAL_SECONDS', '5'));
-const beatEvery = Number(env('EVERYDECK_OUTBOX_HEARTBEAT_SECONDS', '60'));
+const beatEvery = Number(env('EVERYDECK_OUTBOX_HEARTBEAT_SECONDS', String(DEFAULT_HEARTBEAT_SECONDS)));
 const opts: RelayOptions = { query: (text, params) => pool.query(text, params), endpoint: env('EVERYDECK_ENDPOINT'), credential: env('EVERYDECK_SERVER_KEY'), releaseKey: env('EVERYDECK_RELEASE_KEY'), manifestDigest: env('EVERYDECK_MANIFEST_DIGEST'), job: env('EVERYDECK_OUTBOX_JOB', OUTBOX_JOB), intervalSeconds: beatEvery, instanceId: env('EVERYDECK_OUTBOX_INSTANCE_ID', 'everydeck-outbox-relay') };
 
 let lastBeat = 0;

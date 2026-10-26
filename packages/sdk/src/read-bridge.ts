@@ -9,7 +9,8 @@
  * function, `fetch()` the adapter for Request/Response (Deno.serve), `node()` the one for node:http.
  *
  * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit
- * · GET /everydeck/read/messages/{type}/{ref}?cursor&limit (messages of a conversation, on demand only, with `match`);
+ * · GET /everydeck/read/messages/{type}/{ref}?cursor&limit (messages of a conversation, on demand only, with `match`)
+ * · GET /everydeck/read/counts (with `count`: per type the number of records a full read would deliver, so everydeck's data loss watch need not wait for a full read);
  * incremental (like Fivetran): with `changed_since` only changed rows, stable by (change column, key), plus `deleted` where the app knows deletions; single fetch after a signal; the capabilities name `changed_since` and `fetch_one` per object type;
  * own Bearer key (compared in constant time); every write verb is rejected; pages <= 200; identifiers as text (several key columns
  * joined with "|"); timestamps as ISO-8601; object values as JSON text; no value longer than 256 characters. Relations (link tables)
@@ -75,12 +76,14 @@ export type ReadRows = (q: { table: string; columns: string[]; keys: string[]; a
 export type ReadOne = (q: { table: string; columns: string[]; keys: string[]; ref: string[] }) => Promise<Record<string, unknown> | null>;
 /** Deletions the app knows (soft-delete column, deletion table): [{ ref, deleted_at }] since `since`; without an adapter, deleted rows show up through the inventory */
 export type ReadDeleted = (q: { table: string; keys: string[]; since: string; limit: number }) => Promise<{ ref: string; deleted_at: string }[]>;
+/** The number of rows of a table (what a full read of the type would deliver), like Elementary's row count; everydeck compares counts for its data loss watch */
+export type ReadCount = (q: { table: string; keys: string[] }) => Promise<number>;
 /** Rows whose column `where.column` has one of the values, sorted by `order`, from a cursor (values of the sort columns); for the messages of a conversation */
 export type ReadMatch = (q: { table: string; columns: string[]; where: { column: string; values: string[] }; order: string[]; after: string[] | null; limit: number }) => Promise<Record<string, unknown>[]>;
 export interface ReadBridgeOptions { scope: ReadScope; token: string;
   /** messages of a conversation on demand (pgMatch); without `match` the bridge offers no conversations */ match?: ReadMatch;
   /** everydeck signs every call: `required` (default) rejects unsigned calls, `optional` accepts the Bearer when there is no signature (everydeck instances that do not sign yet), `off` checks only the Bearer */ signatures?: 'required' | 'optional' | 'off';
-  /** valid keys for the signature (default: `token`; during a rotation the new and the old one) */ keys?: string[]; /** replay protection across several instances (default: memory of this process) */ seen?: VerifyOptions['seen']; rows: ReadRows; one?: ReadOne; deleted?: ReadDeleted; app?: string; pageLimit?: number; /** fixed, or checked on the first call (pgRights) */ rights?: ReadRights | (() => Promise<ReadRights>) }
+  /** valid keys for the signature (default: `token`; during a rotation the new and the old one) */ keys?: string[]; /** replay protection across several instances (default: memory of this process) */ seen?: VerifyOptions['seen']; rows: ReadRows; one?: ReadOne; deleted?: ReadDeleted; /** counts per type (pgCount); without it the bridge offers no counts and everydeck waits for a full read */ count?: ReadCount; app?: string; pageLimit?: number; /** fixed, or checked on the first call (pgRights) */ rights?: ReadRights | (() => Promise<ReadRights>) }
 export interface ReadBridgeRequest { method: string; path: string; query?: Record<string, string | undefined>; authorization?: string | undefined;
   /** headers (X-Everydeck-Timestamp, X-Everydeck-Request-Id, X-Everydeck-Signature) and the path with query as the app sees it, for the signature check */ headers?: HeadersLike | undefined; url?: string | undefined; body?: string | Uint8Array | null | undefined }
 export interface ReadBridgeResponse { status: number; body: unknown }
@@ -117,7 +120,7 @@ export function createReadBridge(o: ReadBridgeOptions) {
   for (const r of o.scope.relations) objects.set(r.id, { table: r.table, keys: r.ref, fields: r.fields, columns: uniq([...r.ref, ...r.fields.map((f) => f.column)]) });
   // the capabilities say per object type whether `changed_since` works (change column in the scope) and whether the single fetch works
   const capabilities = async () => ({ version: '1' as const, ...(o.app ? { app: o.app } : {}), identity: 'subject_ref' as const,
-    objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!x.changed })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false }))],
+    objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!x.changed, ...(o.count ? { count: true } : {}) })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false, ...(o.count ? { count: true } : {}) }))],
     ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields) } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
   const page = (q: Record<string, string | undefined> | undefined) => { const limit = Math.min(limitMax, Math.max(1, Number(q?.['limit'] ?? limitMax) || limitMax)); const after = q?.['cursor'] ? unb64(q['cursor']) : null; return { limit, after, bad: !!q?.['cursor'] && !after }; };
   const refOf = (row: Record<string, unknown>, keys: string[]) => keys.map((k) => text(row[k])).join('|');
@@ -142,6 +145,13 @@ export function createReadBridge(o: ReadBridgeOptions) {
     if (req.method.toUpperCase() !== 'GET') return { status: 405, body: { error: 'read only' } };
     if (path === '/everydeck/read/capabilities') return { status: 200, body: await capabilities() };
     const asOf = new Date().toISOString();
+    // GET /everydeck/read/counts: per type of the scope the number of rows of its table, counted now
+    if (path === '/everydeck/read/counts') {
+      if (!o.count) return { status: 404, body: { error: 'this bridge does not count' } };
+      const counts: Record<string, number> = {};
+      for (const [type, x] of objects) counts[type] = Math.max(0, Math.floor(Number(await o.count({ table: x.table, keys: x.keys })) || 0));
+      return { status: 200, body: { as_of: asOf, counts } };
+    }
     if (path === '/everydeck/read/people') {
       const p = o.scope.people; if (!p) return { status: 404, body: { error: 'no people in the read scope' } };
       const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
@@ -222,6 +232,30 @@ export function createReadBridge(o: ReadBridgeOptions) {
   return { handle, fetch: fetchHandler, node, capabilities, rights };
 }
 
+/** node-pg reads a `date` as a Date at midnight in the local time zone of the app server: in Bali (UTC+8) the 19th left as `…-18T16:00:00.000Z`.
+ *  The bridge reads `date` and `date[]` as text and sends the calendar day as midnight UTC (`2026-10-19T00:00:00.000Z`, like postgres.js and the Supabase
+ *  bridge), only on its own queries (node-pg `types` per query): the app's own queries keep their parsers, and every other type keeps the parser of the
+ *  app's client. Other clients (postgres.js, wrappers) get `query(text, values)` as before. */
+const DAY_TEXT = /^\d{4}-\d{2}-\d{2}$/;
+const dayOf = (v: string): string => (DAY_TEXT.test(v) ? `${v}T00:00:00.000Z` : v);   // 'infinity' and BC dates stay text
+const daysOf = (v: string): (string | null)[] | string => { const inner = v.slice(1, -1); if (!v.startsWith('{') || inner.includes('{')) return v; return inner ? inner.split(',').map((x) => (x === 'NULL' ? null : dayOf(x))) : []; };
+type TypeParser = (oid: number, format?: string) => unknown;
+interface PgClient { query: (config: { text: string; values: unknown[]; types: { getTypeParser: TypeParser } }) => Promise<{ rows: Record<string, unknown>[] }>; getTypeParser: TypeParser }
+interface PgPool { connect: () => Promise<QueryClient & { release: (err?: Error | boolean) => void }>; Client: unknown }
+const isPgClient = (c: unknown): c is PgClient => typeof c === 'object' && c !== null && typeof (c as { getTypeParser?: unknown }).getTypeParser === 'function' && typeof (c as { query?: unknown }).query === 'function';
+const isPgPool = (c: unknown): c is PgPool => typeof c === 'object' && c !== null && typeof (c as { connect?: unknown }).connect === 'function' && typeof (c as { Client?: unknown }).Client === 'function';
+/** One query of the bridge: with a pg Client (or a client of a pg Pool) `date` as the calendar day, otherwise the client as it is */
+export async function readQuery(client: QueryClient, text: string, values: unknown[] = []): Promise<{ rows: Record<string, unknown>[] }> {
+  if (isPgClient(client)) {
+    const own = client.getTypeParser.bind(client);
+    return client.query({ text, values, types: { getTypeParser: (oid, format) => ((format ?? 'text') !== 'text' ? own(oid, format) : oid === 1082 ? dayOf : oid === 1182 ? daysOf : own(oid, format)) } });
+  }
+  if (isPgPool(client)) {   // like pool.query(): one client of the pool for this query
+    const c = await client.connect();
+    try { const r = await readQuery(c, text, values); c.release(); return r; } catch (e) { c.release(e instanceof Error ? e : true); throw e; }
+  }
+  return client.query(text, values);
+}
 const ident = (name: string) => name.split('.').map((p) => `"${p.replace(/"/g, '""')}"`).join('.');
 /** Name of the view in the reader role's schema (everydeck's SQL creates it): the table, outside public `<schema>__<table>` */
 export const readViewName = (table: string): string => (table.includes('.') ? table.replace('.', '__') : table);
@@ -235,19 +269,26 @@ export function pgRows(client: QueryClient, o: { schema?: string } = {}): ReadRo
       const order = [changed.column, ...keys]; const params: unknown[] = [changed.since];
       let where = ` WHERE ${ident(changed.column)} >= $1`;
       if (after && after.length === order.length) { where += ` AND (${order.map(ident).join(', ')}) > (${order.map((_, i) => `$${i + 2}`).join(', ')})`; params.push(...after); }
-      return (await client.query(`SELECT ${uniq([...columns, changed.column]).map(ident).join(', ')} FROM ${from}${where} ORDER BY ${order.map(ident).join(', ')} ${lim}`, params)).rows;
+      return (await readQuery(client, `SELECT ${uniq([...columns, changed.column]).map(ident).join(', ')} FROM ${from}${where} ORDER BY ${order.map(ident).join(', ')} ${lim}`, params)).rows;
     }
     const where = after && after.length === keys.length ? ` WHERE (${keys.map(ident).join(', ')}) > (${keys.map((_, i) => `$${i + 1}`).join(', ')})` : '';
     const sql = `SELECT ${columns.map(ident).join(', ')} FROM ${from}${where} ORDER BY ${keys.map(ident).join(', ')} ${lim}`;
-    return (await client.query(sql, where ? after! : [])).rows;
+    return (await readQuery(client, sql, where ? after! : [])).rows;
   };
 }
 /** `one` for `pg`/`postgres`: exactly one row by its key values */
 export function pgOne(client: QueryClient, o: { schema?: string } = {}): ReadOne {
   return async ({ table, columns, keys, ref }) => {
     const from = o.schema ? `${ident(o.schema)}.${ident(readViewName(table))}` : ident(table);
-    const r = (await client.query(`SELECT ${columns.map(ident).join(', ')} FROM ${from} WHERE (${keys.map(ident).join(', ')}) = (${keys.map((_, i) => `$${i + 1}`).join(', ')}) LIMIT 1`, ref)).rows;
+    const r = (await readQuery(client, `SELECT ${columns.map(ident).join(', ')} FROM ${from} WHERE (${keys.map(ident).join(', ')}) = (${keys.map((_, i) => `$${i + 1}`).join(', ')}) LIMIT 1`, ref)).rows;
     return r[0] ?? null;
+  };
+}
+/** `count` for `pg`/`postgres`: count(*) of the table (or the reader role's view) */
+export function pgCount(client: QueryClient, o: { schema?: string } = {}): ReadCount {
+  return async ({ table }) => {
+    const from = o.schema ? `${ident(o.schema)}.${ident(readViewName(table))}` : ident(table);
+    return Number((await readQuery(client, `SELECT count(*) AS n FROM ${from}`)).rows[0]?.['n'] ?? 0);
   };
 }
 /** `match` for `pg`/`postgres`: rows with `where.column = ANY(values)`, keyset cursor over `order` */
@@ -256,7 +297,7 @@ export function pgMatch(client: QueryClient, o: { schema?: string } = {}): ReadM
     const from = o.schema ? `${ident(o.schema)}.${ident(readViewName(table))}` : ident(table);
     const params: unknown[] = [where.values]; let cond = `${ident(where.column)}::text = ANY($1::text[])`;
     if (after && after.length === order.length) { cond += ` AND (${order.map(ident).join(', ')}) > (${order.map((_, i) => `$${i + 2}`).join(', ')})`; params.push(...after); }
-    return (await client.query(`SELECT ${uniq([...columns, ...order]).map(ident).join(', ')} FROM ${from} WHERE ${cond} ORDER BY ${order.map(ident).join(', ')} LIMIT ${Math.max(1, Math.min(PAGE_MAX + 1, limit))}`, params)).rows;
+    return (await readQuery(client, `SELECT ${uniq([...columns, ...order]).map(ident).join(', ')} FROM ${from} WHERE ${cond} ORDER BY ${order.map(ident).join(', ')} LIMIT ${Math.max(1, Math.min(PAGE_MAX + 1, limit))}`, params)).rows;
   };
 }
 /** All tables of the scope (objects, relations, conversations, people), for the rights check and the reader role's SQL */

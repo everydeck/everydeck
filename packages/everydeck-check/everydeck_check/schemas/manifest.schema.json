@@ -151,9 +151,10 @@
               "sign_up",
               "sign_in",
               "password_reset",
-              "payment"
+              "payment",
+              "verification"
             ],
-            "description": "1.12-r0: the flow is the app's sign-up, sign-in, password reset or payment (from flows[].purpose of the app map)"
+            "description": "1.12-r0: the flow is the app's sign-up, sign-in, password reset, payment or identity check (from flows[].purpose of the app map)"
           }
         },
         "required": [
@@ -186,7 +187,11 @@
             "maxLength": 100
           },
           "allowed_source": {
-            "const": "server"
+            "enum": [
+              "server",
+              "browser"
+            ],
+            "description": "Who may send the signal: server (server key only) or browser (also the public browser key; ES1, the result of a flow that happens in browser code)"
           },
           "location": {
             "type": "object",
@@ -805,7 +810,9 @@
                     "end",
                     "duration",
                     "person",
-                    "promotion"
+                    "promotion",
+                    "currency",
+                    "product"
                   ],
                   "description": "1.8-r0: meaning of the field on the admin pages: content (title/text/images/price/url), the named time column of the list (time, a date field), reference to another object (ref, with ref_type), a plan limit counted against the inventory (limit, with ref_type), amount and period (amount/period), group for distributions (group), moderation signal (moderation.signal, with signals), contact channel (contact.*), period (start/end, date fields), answer time in minutes (duration), the other person as subject_ref (person), promoted until (promotion, a date field)"
                 },
@@ -1000,7 +1007,9 @@
                     "paying",
                     "free",
                     "ended",
-                    "requested"
+                    "requested",
+                    "refunded",
+                    "failed"
                   ],
                   "description": "1.8-r0: what the status means for revenue (paying, free, ended, requested)"
                 },
@@ -1327,6 +1336,73 @@
               }
             },
             "description": "the record has no title column; everydeck composes the title from these fields (people by their name, references by the title of the referenced record, e.g. 'Anna ↔ Ben · Villa Canggu'); the identifier is never the title"
+          },
+          "money": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "holds"
+            ],
+            "description": "what a record of this revenue type is and how everydeck reads its amount (facts from the app map)",
+            "properties": {
+              "holds": {
+                "enum": [
+                  "plans",
+                  "purchases",
+                  "requests",
+                  "prices"
+                ]
+              },
+              "currency": {
+                "type": "string",
+                "pattern": "^[A-Z]{3}$"
+              },
+              "minor_unit": {
+                "type": "boolean"
+              },
+              "price": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type",
+                  "amounts"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  },
+                  "key": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  },
+                  "amounts": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "minProperties": 1,
+                    "properties": {
+                      "month": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                      },
+                      "year": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                      },
+                      "once": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                      }
+                    }
+                  },
+                  "currency_field": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  }
+                },
+                "description": "the price list of the app: key = the field of the price list the product field names (without key: the identifier of the price list record)"
+              }
+            }
           }
         },
         "required": [

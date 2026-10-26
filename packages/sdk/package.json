@@ -1,6 +1,6 @@
 {
   "name": "@everydeck/sdk",
-  "version": "0.4.4",
+  "version": "0.5.2",
   "description": "everydeck SDK for TypeScript: server (Node ≥ 22, Deno / Supabase Edge) and browser adapters, transport contract 1.1-r0",
   "license": "MIT",
   "homepage": "https://everydeck.ai",
@@ -21,6 +21,10 @@
       "types": "./dist/browser.d.ts",
       "import": "./dist/browser.js"
     },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
     "./read-bridge": {
       "types": "./dist/read-route.d.ts",
       "import": "./dist/read-route.js"
@@ -28,6 +32,14 @@
     "./outbox": {
       "types": "./dist/outbox.d.ts",
       "import": "./dist/outbox.js"
+    },
+    "./sourcemaps": {
+      "types": "./dist/sourcemaps.d.ts",
+      "import": "./dist/sourcemaps.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
     },
     "./dist": {
       "types": "./dist/index.d.ts",
@@ -43,13 +55,16 @@
     }
   },
   "bin": {
-    "everydeck-outbox-relay": "./dist/outbox-relay.js"
+    "everydeck-outbox-relay": "./dist/outbox-relay.js",
+    "everydeck-sourcemaps": "./dist/sourcemaps-cli.js"
   },
   "files": [
     "dist",
     "outbox",
+    "bridge",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
