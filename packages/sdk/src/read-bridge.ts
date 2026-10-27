@@ -57,10 +57,11 @@ async function grantOf(keys: string[], q: Record<string, string | undefined> | u
   return v;
 }
 export interface ReadScopeField { name: string; column: string }
-export interface ReadScopeObject { type: string; table: string; ref: string[]; title?: string; status?: string; owner?: string; fields: ReadScopeField[]; statuses?: string[]; /** the column the database sets on every change (trigger/onupdate); allows `changed_since`; without it only full runs */ changed?: string }
+export interface ReadScopeObject { type: string; table: string; ref: string[]; title?: string; status?: string; owner?: string; fields: ReadScopeField[]; statuses?: string[]; /** the column the database sets on every change (trigger/onupdate); allows `changed_since`; without it only full runs */ changed?: string;
+  /** the column the database sets to the current time when a record is created and nothing changes later; delivered as `created_at` (the app's history before everydeck) */ created?: string }
 export interface ReadScopeRelation { id: string; table: string; ref: string[]; fields: ReadScopeField[] }
 /** name = the app's rule for the display name (stages in order; per stage the columns, joined with the app's separator) */
-export interface ReadScopePeople { table: string; ref: string; fields: Record<string, string>; name?: { columns: string[]; separator?: string }[] }
+export interface ReadScopePeople { table: string; ref: string; fields: Record<string, string>; name?: { columns: string[]; separator?: string }[]; /** when the person signed up; delivered as `created_at` */ created?: string }
 /** A conversation: the bridge delivers its messages only on demand (GET /everydeck/read/messages/{type}/{ref}); everydeck does not store them */
 export interface ReadScopeConversation { type: string; table: string; ref: string[]; messages: { table: string; ref: string[]; conversation: string; sender: string; time: string; text: string[] }; attachments?: { table: string; message: string; url: string; name?: string; kind: 'image' | 'file' } }
 export interface ReadScope { version: '1'; objects: ReadScopeObject[]; relations: ReadScopeRelation[]; conversations?: ReadScopeConversation[]; people: ReadScopePeople | null }
@@ -115,8 +116,8 @@ export function createReadBridge(o: ReadBridgeOptions) {
   const limitMax = Math.min(PAGE_MAX, Math.max(1, o.pageLimit ?? 100));
   let rightsCache: ReadRights | null = typeof o.rights === 'function' ? null : (o.rights ?? { role: 'unknown', select_only: false });
   const rights = async (): Promise<ReadRights> => { if (!rightsCache) rightsCache = await (o.rights as () => Promise<ReadRights>)(); return rightsCache; };
-  const objects = new Map<string, { table: string; keys: string[]; columns: string[]; title?: string | undefined; status?: string | undefined; owner?: string | undefined; changed?: string | undefined; fields: ReadScopeField[] }>();
-  for (const x of o.scope.objects) objects.set(x.type, { table: x.table, keys: x.ref, title: x.title, status: x.status, owner: x.owner, changed: x.changed, fields: x.fields, columns: uniq([...x.ref, ...(x.title ? [x.title] : []), ...(x.status ? [x.status] : []), ...(x.owner ? [x.owner] : []), ...(x.changed ? [x.changed] : []), ...x.fields.map((f) => f.column)]) });
+  const objects = new Map<string, { table: string; keys: string[]; columns: string[]; title?: string | undefined; status?: string | undefined; owner?: string | undefined; changed?: string | undefined; created?: string | undefined; fields: ReadScopeField[] }>();
+  for (const x of o.scope.objects) objects.set(x.type, { table: x.table, keys: x.ref, title: x.title, status: x.status, owner: x.owner, changed: x.changed, created: x.created, fields: x.fields, columns: uniq([...x.ref, ...(x.title ? [x.title] : []), ...(x.status ? [x.status] : []), ...(x.owner ? [x.owner] : []), ...(x.changed ? [x.changed] : []), ...(x.created ? [x.created] : []), ...x.fields.map((f) => f.column)]) });
   for (const r of o.scope.relations) objects.set(r.id, { table: r.table, keys: r.ref, fields: r.fields, columns: uniq([...r.ref, ...r.fields.map((f) => f.column)]) });
   // the capabilities say per object type whether `changed_since` works (change column in the scope) and whether the single fetch works
   const capabilities = async () => ({ version: '1' as const, ...(o.app ? { app: o.app } : {}), identity: 'subject_ref' as const,
@@ -124,11 +125,13 @@ export function createReadBridge(o: ReadBridgeOptions) {
     ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields) } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
   const page = (q: Record<string, string | undefined> | undefined) => { const limit = Math.min(limitMax, Math.max(1, Number(q?.['limit'] ?? limitMax) || limitMax)); const after = q?.['cursor'] ? unb64(q['cursor']) : null; return { limit, after, bad: !!q?.['cursor'] && !after }; };
   const refOf = (row: Record<string, unknown>, keys: string[]) => keys.map((k) => text(row[k])).join('|');
-  const isoOf = (v: unknown): string | null => { if (v === null || v === undefined) return null; const d = v instanceof Date ? v : new Date(text(v)); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
+  // a timestamp as Postgres writes it as text ("2026-10-25 23:59:16.774+00", offset without minutes) is read too
+  const isoOf = (v: unknown): string | null => { if (v === null || v === undefined) return null; const d = v instanceof Date ? v : new Date(text(v).replace(/([+-]\d{2})$/, '$1:00')); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
   const itemOf = (x: NonNullable<ReturnType<typeof objects.get>>, r: Record<string, unknown>) => ({ ref: refOf(r, x.keys).slice(0, 128), ...(x.title && r[x.title] !== null && r[x.title] !== undefined ? { title: text(r[x.title]).slice(0, 200) } : {}),
     status: x.status ? (r[x.status] === null || r[x.status] === undefined ? { value: 'none', reason: `no value in ${x.status}` } : { value: text(r[x.status]).slice(0, 64) }) : { value: 'present' },
     ...(x.owner ? { owner_ref: r[x.owner] === null || r[x.owner] === undefined ? null : text(r[x.owner]).slice(0, 128) } : {}),
     ...(x.changed ? { updated_at: isoOf(r[x.changed]) } : {}),
+    ...(x.created ? { created_at: isoOf(r[x.created]) } : {}),
     fields: Object.fromEntries(x.fields.map((f) => [f.name, value(r[f.column])])) });
 
   async function handle(req: ReadBridgeRequest): Promise<ReadBridgeResponse> {
@@ -155,12 +158,12 @@ export function createReadBridge(o: ReadBridgeOptions) {
     if (path === '/everydeck/read/people') {
       const p = o.scope.people; if (!p) return { status: 404, body: { error: 'no people in the read scope' } };
       const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
-      const cols = uniq([p.ref, ...Object.values(p.fields), ...(p.name ?? []).flatMap((st) => st.columns)]);
+      const cols = uniq([p.ref, ...Object.values(p.fields), ...(p.name ?? []).flatMap((st) => st.columns), ...(p.created ? [p.created] : [])]);
       const rows = await o.rows({ table: p.table, columns: cols, keys: [p.ref], after, limit: limit + 1 });
       const kept = rows.slice(0, limit);
       // the display name by the app's rule: the first stage with content; per stage the non-empty parts joined with the app's separator
       const nameOf = (r: Record<string, unknown>): string | null => { for (const st of p.name ?? []) { const parts = st.columns.map((c) => (r[c] === null || r[c] === undefined ? '' : text(r[c]).trim())).filter(Boolean); if (parts.length) return parts.join(st.separator ?? ' ').slice(0, VALUE_MAX); } return null; };
-      const items = kept.map((r) => ({ subject_ref: text(r[p.ref]).slice(0, 128), ...Object.fromEntries(Object.entries(p.fields).map(([f, c]) => [f, r[c] === null || r[c] === undefined ? null : text(r[c]).slice(0, VALUE_MAX)])), ...(p.name?.length && 'display_name' in p.fields ? { display_name: nameOf(r) } : {}) }));
+      const items = kept.map((r) => ({ subject_ref: text(r[p.ref]).slice(0, 128), ...Object.fromEntries(Object.entries(p.fields).map(([f, c]) => [f, r[c] === null || r[c] === undefined ? null : text(r[c]).slice(0, VALUE_MAX)])), ...(p.name?.length && 'display_name' in p.fields ? { display_name: nameOf(r) } : {}), ...(p.created ? { created_at: isoOf(r[p.created]) } : {}) }));
       return { status: 200, body: { as_of: asOf, items, next_cursor: rows.length > limit ? b64([text(kept[kept.length - 1]![p.ref])]) : null } };
     }
     // GET /everydeck/read/messages/{type}/{ref}: the messages of a conversation, ascending by time; on demand only, everydeck stores nothing

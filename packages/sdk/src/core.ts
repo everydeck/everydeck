@@ -195,7 +195,7 @@ export function fullJitterMs(failures: number, capMs: number, random: () => numb
   const ceiling = Math.min(capMs, 500 * 2 ** Math.max(0, Math.min(6, failures)));
   return Math.floor(random() * ceiling);
 }
-/** Q2: wait after a 429 without a readable Retry-After (Sentry's default) */
+/** wait after a 429 without a readable Retry-After (Sentry's default) */
 export const DEFAULT_RETRY_AFTER_MS = 60_000;
 /** `Retry-After` as seconds or HTTP date → milliseconds, capped at one hour; null when missing or unreadable. */
 export function parseRetryAfter(value: string | null | undefined, nowMs: number = Date.now()): number | null {
@@ -244,7 +244,7 @@ export class EverydeckClient {
   private request: Promise<'accepted' | 'retry' | 'rejected' | 'paused' | 'idle'> | null = null;
   private readonly onSendResult: EverydeckOptions['onSendResult'];
   private pausedUntil = 0;
-  /** Q2: until when everydeck asked to wait (Retry-After of a 429 or 503) */
+  /** until when everydeck asked to wait (Retry-After of a 429 or 503) */
   private refusedUntil = 0;
   private failures = 0;
   private closed = false;
@@ -341,7 +341,7 @@ export class EverydeckClient {
   }
   log(templateId: string, name: string, r: Refs = {}): void { this.enqueue({ event_id: uuid(), kind: 'log', name, occurred_at: now(), template_id: templateId, ...refs(r) }); }
   /** Browser step (a claim): needs a session; never form values, tokens or texts in `fields`. */
-  breadcrumb(name: string, sessionId: string, o: Omit<Refs, 'sessionId'> & { http?: HttpContext; /** HG1: where a hung request started (class `request_hung`), browser frames without code lines */ at?: { class: string; frames: Frame[] } } = {}): void {
+  breadcrumb(name: string, sessionId: string, o: Omit<Refs, 'sessionId'> & { http?: HttpContext; /** where a hung request started (class `request_hung`), browser frames without code lines */ at?: { class: string; frames: Frame[] } } = {}): void {
     const { http, at, ...r } = o;
     const frames = at?.frames.slice(0, 20).map((f) => compact({ function: clip(f.function || 'anonymous', 128), file: f.file ? clip(f.file, 240) : undefined, line: f.line && f.line >= 1 ? Math.round(f.line) : undefined, column: f.column && f.column >= 1 ? Math.round(f.column) : undefined, debug_id: f.debug_id && DEBUG_ID.test(f.debug_id) ? f.debug_id : undefined }));
     const error = at ? compact({ class: NAME.test(at.class) ? at.class : 'error', frames: frames?.length ? frames : undefined, context_status: frames?.length ? 'browser_no_source_maps' as ContextStatus : undefined }) : undefined;
@@ -402,9 +402,9 @@ export class EverydeckClient {
     for (const e of events.slice(0, this.opts.maxBuffer)) if (e && typeof e === 'object' && typeof (e as Event).event_id === 'string' && typeof (e as Event).name === 'string') { this.enqueue(e as Event); n++; }
     return n;
   }
-  /** Q2: end of the wait everydeck asked for (Retry-After of a 429 or 503) while it lasts, otherwise 0; the browser SDK keeps refused events in the page's storage until then */
+  /** end of the wait everydeck asked for (Retry-After of a 429 or 503) while it lasts, otherwise 0; the browser SDK keeps refused events in the page's storage until then */
   get refusedUntilMs(): number { return this.refusedUntil > Date.now() ? this.refusedUntil : 0; }
-  /** Q2: a wait carried over from an earlier visit of the page (at most one hour, like Retry-After): nothing is sent before it ends */
+  /** a wait carried over from an earlier visit of the page (at most one hour, like Retry-After): nothing is sent before it ends */
   waitUntil(t: number): void {
     if (!Number.isFinite(t) || t <= Date.now()) return;
     const until = Math.min(t, Date.now() + 3_600_000);
@@ -496,7 +496,7 @@ export class EverydeckClient {
       const res = await this.opts.fetch(`${this.opts.endpoint}/v1/events`, { method: 'POST', headers: { authorization: `Bearer ${this.opts.credential}`, 'content-type': 'application/json', 'x-everydeck-sent-at': now(), ...(gz ? { 'content-encoding': 'gzip' } : {}) }, body: (gz ?? text) as NonNullable<NonNullable<Parameters<typeof fetch>[1]>['body']>, signal: ctl.signal, ...(keepalive ? { keepalive: true } : {}) });
       status = res.status;
       if (status === 429 || status === 503) retryAfterMs = parseRetryAfter(res.headers.get('retry-after'));
-      // Q2: a 429 whose Retry-After the page cannot read (an older everydeck without the CORS release) waits 60 s, like Sentry's default
+      // a 429 whose Retry-After the page cannot read (an older everydeck without the CORS release) waits 60 s, like Sentry's default
       if (status === 429 && retryAfterMs === null) retryAfterMs = DEFAULT_RETRY_AFTER_MS;
       try { await res.arrayBuffer(); } catch { /* body does not matter */ }
     } catch (e) {
@@ -546,7 +546,7 @@ export class EverydeckClient {
   }
   /**
    * Browser: last attempt when leaving the page (keepalive, no waiting). While a send is still running (pagehide sent, then visibilitychange brings
-   * the last load times of the page, C10), what was queued since goes out in a keepalive request of its own right away: the page may be gone before
+   * the last load times of the page), what was queued since goes out in a keepalive request of its own right away: the page may be gone before
    * the running send ends.
    */
   flushKeepalive(): void {

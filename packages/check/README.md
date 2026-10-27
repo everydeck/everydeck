@@ -9,12 +9,13 @@ npx @everydeck/check@<version> . --out everydeck/app-map.json
 The program is `everydeck-scaffold`:
 
 ```
-everydeck-scaffold <repo> [--db <database url, a read-only role is enough>] [--out everydeck/app-map.json] [--merge <existing app map>]
+everydeck-scaffold <repo> [--db <database url, a read-only role is enough; or the structure address everydeck gives>] [--out everydeck/app-map.json] [--merge <existing app map>]
 ```
 
 - Without `--out` the result goes to stdout; nothing is written into the repository.
 - `--merge` keeps what was added to an existing app map and renews only the skeleton parts.
 - `--db` (or `EVERYDECK_SCHEMA_DB_URL`) reads the schema from the database first (tables, columns, keys, CHECK lists, policies, triggers, SQL functions from `pg_catalog`); the migrations stay the places. Connection through the package `pg` or `postgres` of the app, otherwise `psql`.
+- For a hosted database the owner connected to everydeck (Supabase), `--db` takes the structure address everydeck gives in its setup step (`https://…/api/live-structure/…`) or a JSON file with that catalog: the same query, read by everydeck from the connected project, structure only, never rows. Tables that exist only in the database keep the place `database`.
 - Reads tables and columns from SQL migrations, Alembic and Firestore rules; provider packages from `package.json` and `requirements*.txt`; API routes (Express, Fastify, Hono, FastAPI, Next.js); pages (Next.js, Expo Router, React Router); platforms; and where the frontend shows data, through the syntax tree (TypeScript compiler API of the app, Python `ast`).
 - TypeScript comes from the app's repository (or `NODE_PATH`); without it there is no analysis of the frontend, with a message.
 
@@ -37,7 +38,7 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ### 0.3.4
 
-- The bundled rules know `outcomes[]` and `inventory` of the app map (EV1: a part everydeck found is connected or stays open).
+- The bundled rules know `outcomes[]` and `inventory` of the app map (a part everydeck found is connected or stays open).
 
 ### 0.3.3
 

@@ -4,6 +4,9 @@
  *   node .github/release/smoke.mjs <sdk | check | py | py-check> <folder with the built package>
  * sdk: every entry point loads, an event reaches a local receiver. check: everydeck-scaffold reads a small app into an app map.
  * py: an event from the Python SDK reaches a local receiver. py-check: everydeck-check validates an app map with the bundled rules.
+ * check and py-check also test the pair (a scaffold and a check published apart must not disagree on a single place): the scaffold reads an app
+ * with a backend route and a request path with a parameter, and everydeck-check checks every place it wrote; the other half comes from this repository
+ * (packages/everydeck-check, packages/check; EVERYDECK_PAIR_SOURCE overrides the folder).
  */
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -35,6 +38,34 @@ async function receiver() {
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   return { url: `http://127.0.0.1:${srv.address().port}`, names, close: () => srv.close() };
 }
+
+/** The pair. A small app (FastAPI route with a parameter, React page that PATCHes it with a template path), the scaffold's app map, and every place
+ * of it checked by everydeck-check (app_map.evidence_errors): a place the scaffold writes and the check refuses fails the release of either package. */
+function pairApp() {
+  const app = mkdtempSync(join(tmpdir(), 'smoke-pair-'));
+  for (const d of ['backend', 'frontend/src']) mkdirSync(join(app, d), { recursive: true });
+  writeFileSync(join(app, 'backend/requirements.txt'), 'fastapi==0.115.0\nsupabase==2.9.0\n');
+  writeFileSync(join(app, 'backend/schema.sql'), 'create table public.jobs (id uuid primary key, title text not null, status text not null default \'open\');\n');
+  writeFileSync(join(app, 'backend/main.py'), 'from fastapi import FastAPI\nfrom supabase import create_client\n\napp = FastAPI()\nsupabase = create_client("http://127.0.0.1:54321", "anon")\n\n\n@app.get("/jobs/{job_id}")\ndef get_job(job_id: str):\n    return supabase.table("jobs").select("*").eq("id", job_id).single().execute().data\n\n\n@app.patch("/jobs/{job_id}/status")\ndef set_status(job_id: str, body: dict):\n    supabase.table("jobs").update({"status": body["status"]}).eq("id", job_id).execute()\n    return {"ok": True}\n');
+  writeFileSync(join(app, 'frontend/package.json'), JSON.stringify({ name: 'pair-app', private: true, dependencies: { react: '18.3.1', 'react-dom': '18.3.1' } }));
+  writeFileSync(join(app, 'frontend/index.html'), '<div id="root"></div><script type="module" src="/src/main.tsx"></script>\n');
+  writeFileSync(join(app, 'frontend/src/main.tsx'), "import { createRoot } from 'react-dom/client';\nimport { Job } from './Job';\ncreateRoot(document.getElementById('root')!).render(<Job />);\n");
+  writeFileSync(join(app, 'frontend/src/Job.tsx'), ["import { useEffect, useState } from 'react';", "const API = import.meta.env.VITE_API_URL ?? '';", 'export function Job() {', '  const [job, setJob] = useState<{ id: string; title: string; status: string } | null>(null);',
+    "  useEffect(() => { fetch(`${API}/jobs/${location.hash.slice(1)}`).then((r) => r.json()).then(setJob); }, []);", '  const close = async () => {', '    if (!job) return;', "    await fetch(`${API}/jobs/${job.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'closed' }) });", '  };',
+    '  return job ? <h1 onClick={close}>{job.title} {job.status}</h1> : null;', '}', ''].join('\n'));
+  sh('git', ['init', '-q'], app); sh('git', ['-c', 'user.name=release', '-c', 'user.email=release@example.com', 'add', '.'], app); sh('git', ['-c', 'user.name=release', '-c', 'user.email=release@example.com', 'commit', '-q', '-m', 'app'], app);
+  return app;
+}
+function pair(scaffoldBin, python, nodePath) {
+  const app = pairApp(); const map = join(app, 'everydeck/app-map.json');
+  sh(scaffoldBin, [app, '--out', map], app, nodePath ? { NODE_PATH: nodePath } : {});
+  const b = JSON.parse(readFileSync(map, 'utf8'));
+  if (!(b.flow_candidates ?? []).some((c) => /\/jobs\/:\w+\/status/.test(c.id))) fail('pair: the scaffold found no write request to /jobs/{job_id}/status');
+  const out = JSON.parse(sh(python, ['-c', "import json, re, sys\nfrom pathlib import Path\nfrom everydeck_check.app_map import evidence_errors\nb = json.load(open(sys.argv[1]))\nplace = re.compile(r'is not inside |does not mention |holds no request path |lines, evidence names line |does not exist')\nprint(json.dumps([e for e in evidence_errors(b, Path(sys.argv[2])) if place.search(e)]))", map, app], app));
+  console.log(`pair: ${(b.flow_candidates ?? []).length} candidate(s), ${b.tables.length} table(s); places the check refuses: ${out.length}`);
+  if (out.length) fail(`pair: everydeck-check refuses ${out.length} place(s) the scaffold wrote: ${out.slice(0, 3).join(' | ')}`);
+}
+const PAIR_SOURCE = (fallback) => resolve(process.env.EVERYDECK_PAIR_SOURCE ?? fallback);
 
 const venv = (into) => { sh(PYTHON, ['-m', 'venv', join(into, 'venv')], into); return { python: join(into, 'venv/bin/python'), bin: (n) => join(into, 'venv/bin', n) }; };
 
@@ -71,6 +102,9 @@ e.signal('release.sdk.works', 'op-1'); console.log('flushed', await e.flush(5000
   const map = JSON.parse(readFileSync(join(app, 'everydeck/app-map.json'), 'utf8'));
   console.log(`app map: ${map.tables.length} table(s), ${map.screens.length} page(s)`);
   if (!map.tables.some((t) => t.name === 'notes')) fail('everydeck-scaffold did not read the table notes');
+  const env = venv(tool);
+  sh(env.python, ['-m', 'pip', 'install', '--quiet', PAIR_SOURCE('packages/everydeck-check')], tool);
+  pair(join(tool, 'node_modules/.bin/everydeck-scaffold'), env.python, join(tool, 'node_modules'));
 } else if (key === 'py') {
   const whl = one(/^everydeck-[\d.]+[^/]*-py3-none-any\.whl$/);
   const env = venv(mkdtempSync(join(tmpdir(), 'smoke-py-')));
@@ -102,5 +136,8 @@ e.signal('release.sdk.works', 'op-1'); console.log('flushed', await e.flush(5000
   let out; try { out = JSON.parse(v.stdout); } catch { process.stdout.write(v.stdout); process.stderr.write(v.stderr); fail(`everydeck-check validate gave no result (exit ${v.status})`); }
   console.log(`everydeck-check validate: exit ${v.status}, form ${out.form}, status ${out.status}, ${out.errors.length} reason(s)`);
   if (out.form !== 'app_map' || out.status !== 'invalid' || !out.errors.length || out.errors.some((e) => /everydeck rules:/.test(e))) fail('everydeck-check validate did not check the app map with the bundled rules');
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ private: true }));
+  sh('npm', ['install', '--no-audit', '--no-fund', PAIR_SOURCE('packages/check'), 'typescript@5.9.3'], dir);
+  pair(join(dir, 'node_modules/.bin/everydeck-scaffold'), env.python, join(dir, 'node_modules'));
 } else fail(`unknown package ${key}`);
 console.log(`package test passed: ${key}`);

@@ -358,7 +358,7 @@ def reference_errors(m: dict[str, Any]) -> list[str]:
                     errs.append(f"object {o['type']}: field {f['name']} has duplicate reason values")
             if any(g not in ("duplicate", "fraud", "other") for g in (f.get("signals") or {}).values()) and not at_least("1.9-r0"):
                 errs.append(f"object {o['type']}: field {f['name']} signal groups beyond duplicate/fraud/other require schema_version 1.9-r0")
-    for s in m.get("signals", []):   # ES1: the browser key may send this signal (the result of a flow in browser code)
+    for s in m.get("signals", []):   # the browser key may send this signal (the result of a flow in browser code)
         if s.get("allowed_source") == "browser" and not at_least("1.12-r0"):
             errs.append(f"signal {s['name']}: allowed_source browser requires schema_version 1.12-r0")
     browser_errors: set[str] = set()

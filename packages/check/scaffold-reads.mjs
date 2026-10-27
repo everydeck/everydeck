@@ -305,7 +305,8 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   // ── Frontend: display places (reads) and mentions (for not_shown) ──
   const shown = []; const mentions = [];   // mentions: { table, path, line, reason }
   const colReads = [];   // { table, cols, path, line, via } per frontend read
-  const props = new Map();   // property names the frontend accesses (x.name, x?.name, x['name'], { name } = x) → first place
+  const props = new Map();   // property names the frontend accesses (x.name, x?.name, x['name'], { name } = x) → file → first place in it
+  const rendering = new Set();   // frontend files that render (JSX)
   const nameRes = [...tables.keys()].map((t) => [t, new RegExp(`(^|[^A-Za-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_]|$)`)]);
   // Writes of the browser (flow candidates): a write to a table (insert/update/upsert/delete, Firestore, ORM, SQL) or a request with POST/PUT/PATCH/DELETE to a
   // route of the app's own backend (with the handler's place), in files an entry of the app reaches
@@ -322,8 +323,9 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
       if (a.kind !== 'read') continue;
       for (const h of tablesOf(a)) { colReads.push({ table: h.table, cols: h.cols, path: r, line: a.line, via: h.via }); const key = `${h.table}|${r}|${a.line}`; if (seenRead.has(key)) continue; seenRead.add(key); shown.push({ table: h.table, path: r, line: a.line, via: h.via, symbol: a.what === 'route' ? h.symbol : a.symbol }); }
     }
-    if (!unreachable) { const note = (name, node) => { if (!props.has(name)) props.set(name, { path: r, line: lineOf(sf, node) }); };
-      const pv = (n) => { if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.name)) note(n.name.text, n.name);
+    if (!unreachable) { const note = (name, node) => { if (!props.has(name)) props.set(name, new Map()); const at = props.get(name); if (!at.has(r)) at.set(r, { path: r, line: lineOf(sf, node) }); };
+      const pv = (n) => { if (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n)) rendering.add(r);
+        if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.name)) note(n.name.text, n.name);
         else if (ts.isElementAccessExpression(n) && n.argumentExpression && strOf(n.argumentExpression)) note(strOf(n.argumentExpression), n.argumentExpression);
         // { name } = x counts, a destructured parameter does not: jwt({ token, user }) or ({ title }) => … takes a caller's arguments, not a row read
         else if (ts.isBindingElement(n) && n.parent && ts.isObjectBindingPattern(n.parent) && !(n.parent.parent && ts.isParameter(n.parent.parent))) { const k = n.propertyName ?? n.name; if (ts.isIdentifier(k) || ts.isStringLiteral(k)) note(k.text, k); }
@@ -365,10 +367,20 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   // Display places per column: the app shows a column if the frontend (or the handler of a route the frontend calls)
   // reads it explicitly (select list, SQL list; place = where the name is), or if a read returns all columns (*, no list, view,
   // SQL function) and the frontend accesses a property of that name (place = the access). What has no place, everydeck does not read.
+  // The access must be where the rows go: the reading file and what it renders (its imports), or, for a file that renders nothing (a
+  // hook, a data module), the files that import it and what they render. An access of that name anywhere else is no display place (the metadata of a
+  // token table is not shown by the metadata of an admin log on another page).
+  const importers = new Map(); for (const [f, imps] of Object.entries(import_graph)) for (const i of imps) { if (!importers.has(i)) importers.set(i, []); importers.get(i).push(f); }
+  const down = (starts, depth) => { const seen = new Set(starts); let level = [...starts]; for (let d = 0; d < depth; d++) { const next = []; for (const f of level) for (const i of import_graph[f] ?? []) if (!seen.has(i)) { seen.add(i); next.push(i); } level = next; } return [...seen]; };
+  const rowsGoTo = new Map();
+  const filesFor = (f) => { if (!rowsGoTo.has(f)) { let up = [];
+    if (!rendering.has(f)) { const first = importers.get(f) ?? []; up = [...first, ...first.filter((x) => !rendering.has(x)).flatMap((x) => importers.get(x) ?? [])]; }   // a hook used by a hook
+    rowsGoTo.set(f, [...new Set([...down([f], 3), ...down([...new Set(up)], 2)])]); } return rowsGoTo.get(f); };
+  const accessFor = (name, f) => { const at = props.get(name); if (!at) return null; for (const x of filesFor(f)) if (at.has(x)) return at.get(x); return null; };
   const columns_shown = [];
   for (const cr of colReads) { const t = tables.get(cr.table); if (!t) continue;
     for (const c of t.columns) {
-      const hit = cr.cols === '*' ? (props.has(c.name) ? { ...props.get(c.name), via: `${cr.via} (all columns) at ${cr.path}:${cr.line}` } : null) : (() => { const x = cr.cols.find((y) => y.name === c.name); return x ? { path: x.file ? rel(resolve(repo, x.file)) : cr.path, line: x.line, via: `${cr.via} at ${cr.path}:${cr.line}` } : null; })();
+      const hit = cr.cols === '*' ? (() => { const a = accessFor(c.name, cr.path); return a ? { ...a, via: `${cr.via} (all columns) at ${cr.path}:${cr.line}` } : null; })() : (() => { const x = cr.cols.find((y) => y.name === c.name); return x ? { path: x.file ? rel(resolve(repo, x.file)) : cr.path, line: x.line, via: `${cr.via} at ${cr.path}:${cr.line}` } : null; })();
       if (hit && !columns_shown.some((x) => x.table === cr.table && x.column === c.name && x.path === hit.path && x.line === hit.line)) columns_shown.push({ table: cr.table, column: c.name, path: hit.path, line: hit.line, via: hit.via.slice(0, 160) }); } }
   const not_shown = mentions.filter((m) => !shownTables.has(m.table));
   // ── Money from facts in the code. A value is money where the app formats it as a currency: Intl.NumberFormat(…, { style: 'currency' })

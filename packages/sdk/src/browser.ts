@@ -279,7 +279,7 @@ export function detectClient(g: G = globalThis as unknown as G, mods: RuntimeMod
   return { client: { platform: 'web', runtime: 'browser', ...dev }, later: null };
 }
 const PENDING_KEY = 'everydeck.pending.v1';
-/** Q2: end of a wait everydeck asked for (milliseconds since 1970), kept with the refused events */
+/** end of a wait everydeck asked for (milliseconds since 1970), kept with the refused events */
 const WAIT_KEY = 'everydeck.wait.v1';
 /** A page that matches no declared pattern: only a fingerprint of its shape and depth, never the address */
 export const UNKNOWN_SCREEN = 'everydeck.sdk.unknown_screen';
@@ -298,13 +298,13 @@ const PATCHED = Symbol.for('everydeck.fetch.patched'); const ORIGINAL = Symbol.f
 const XHR_PATCHED = Symbol.for('everydeck.xhr.patched'); const XHR_INFO = Symbol.for('everydeck.xhr.info');
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 /**
- * HG1: a request of a running flow without an answer for this long is a hang (measured, not interpreted): reported after this time and again when the
+ * a request of a running flow without an answer for this long is a hang (measured, not interpreted): reported after this time and again when the
  * person leaves the page. Like Sentry's final timeout of an idle transaction (30 s, then `deadline_exceeded`).
  */
 export const HANG_AFTER_MS = 30_000;
-/** HG1: at most this many hang steps per page life (a hung request at most twice: after HANG_AFTER_MS and at leaving); the rest arrives as a gap */
+/** at most this many hang steps per page life (a hung request at most twice: after HANG_AFTER_MS and at leaving); the rest arrives as a gap */
 export const HANG_REPORTS_MAX = 50;
-/** HG1: a request of a flow that has not answered yet */
+/** a request of a flow that has not answered yet */
 interface Inflight { ctx: ActionContext; method: string; url: URL; started: number; frames: Frame[] | undefined; timer: ReturnType<typeof setTimeout> | null; left: boolean }
 const noop = () => {};
 /** Hosting domains shared by many apps: a sibling subdomain there is another app, not the same site */
@@ -408,7 +408,7 @@ export class EverydeckBrowser {
     // offline on the phone: save unsent events on exit and send them on the next start (everydeck deduplicates)
     const native = ['ios', 'android'].includes(this.client.getClient()?.platform ?? '');
     this.persistOn = (persist ?? (native || !!storage)) && this.client.opts.enabled;
-    // Q2: a web page keeps only what everydeck refused (429 or 503 with Retry-After) and the visitor left before the wait ended; the next visit sends it
+    // a web page keeps only what everydeck refused (429 or 503 with Retry-After) and the visitor left before the wait ended; the next visit sends it
     this.keepRefused = !this.persistOn && persist !== false && this.client.opts.enabled;
     // restoring can be asynchronous (AsyncStorage): `ready` waits for it, and the first flush after that also sends the old events
     this.ready = Promise.all([detected, this.persistOn || this.keepRefused ? this.restorePending() : Promise.resolve()]).then(() => undefined);
@@ -439,7 +439,7 @@ export class EverydeckBrowser {
     // keep where the person came from on the first visit (once; later visits do not overwrite it)
     this.origin = captureOrigin !== false && this.client.opts.enabled ? this.rememberOrigin() : Promise.resolve(null);
     if (captureUnhandled !== false && captureConsole !== false && this.client.opts.enabled) this.patchConsole();
-    // C10: load times of every page view, only in a browser page (not React Native, Expo or Capacitor) that can observe them
+    // load times of every page view, only in a browser page (not React Native, Expo or Capacitor) that can observe them
     this.vitals = captureVitals !== false && this.client.opts.enabled && measuresVitals(this.client.getClient()) ? this.startVitals() : null;
     if (captureUnhandled !== false && typeof globalThis.addEventListener === 'function') {
       globalThis.addEventListener('error', (e: unknown) => { const ev = e as { error?: unknown; message?: string; filename?: string; lineno?: number; colno?: number }; this.captureUnhandled('browser.unhandled_error', ev.error ?? ev.message, ev); });
@@ -447,7 +447,7 @@ export class EverydeckBrowser {
     }
     if ((captureUnhandled !== false || this.vitals || this.client.opts.enabled) && typeof globalThis.addEventListener === 'function') {
       // web-vitals reports CLS and INP in its own (capturing) listener just before this one; the collected page views go out in the same batch
-      // HG1: hung requests of running flows go out with them
+      // hung requests of running flows go out with them
       const hidden = () => { this.reportHangs(); this.vitals?.drain(); void this.savePending(); this.client.flushKeepalive(); };
       globalThis.addEventListener('pagehide', hidden);
       globalThis.addEventListener('visibilitychange', () => { if ((globalThis as { document?: { visibilityState?: string } }).document?.visibilityState === 'hidden') hidden(); });
@@ -455,10 +455,10 @@ export class EverydeckBrowser {
   }
   private persistOn = false;
   private keepRefused = false;
-  /** Q2: something of this page lies in the storage (a web page clears it after the next accepted send, without touching the storage otherwise) */
+  /** something of this page lies in the storage (a web page clears it after the next accepted send, without touching the storage otherwise) */
   private stored = false;
   private readonly vitals: VitalsCollector | null;
-  /** C10: page of a measurement: the address of its navigation (soft navigations), otherwise the page that was loaded, only as its pattern */
+  /** page of a measurement: the address of its navigation (soft navigations), otherwise the page that was loaded, only as its pattern */
   private startVitals(): VitalsCollector {
     const landing = (globalThis as { location?: { href?: string } }).location?.href;
     const c = new VitalsCollector((url) => {
@@ -468,13 +468,13 @@ export class EverydeckBrowser {
     return c;
   }
   private readonly writes: BrowserWrite[];
-  /** HG1: running actions, newest last; a request without its own action belongs to the newest one (a browser has no async context) */
+  /** running actions, newest last; a request without its own action belongs to the newest one (a browser has no async context) */
   private readonly running: ActionContext[] = [];
-  /** HG1: requests of running flows without an answer yet */
+  /** requests of running flows without an answer yet */
   private readonly inflight = new Set<Inflight>();
   private hangReports = 0;
   /**
-   * HG1: a request starts. Its action, otherwise the newest running action; without one it is no request of a flow and not watched (HG1: no hangs
+   * a request starts. Its action, otherwise the newest running action; without one it is no request of a flow and not watched (no hangs
    * of background requests). Returns the end. The app's request is never touched: no signal, no abort, no timeout.
    */
   private watchRequest(ctx: ActionContext | null, method: string, url: URL): () => void {
@@ -486,12 +486,12 @@ export class EverydeckBrowser {
     (r.timer as { unref?: () => void }).unref?.();
     return () => { this.inflight.delete(r); if (r.timer) clearTimeout(r.timer); };
   }
-  /** HG1: the person leaves the page: every request of a flow without an answer for at least HANG_AFTER_MS, once per request at leaving */
+  /** the person leaves the page: every request of a flow without an answer for at least HANG_AFTER_MS, once per request at leaving */
   private reportHangs(): void {
     const now = Date.now();
     for (const r of this.inflight) if (!r.left && now - r.started >= HANG_AFTER_MS) { r.left = true; this.reportHang(r); }
   }
-  /** HG1: step `<flow>.request_hung`: method, host, address pattern (like failed requests), how long without an answer, where it started in the code */
+  /** step `<flow>.request_hung`: method, host, address pattern (like failed requests), how long without an answer, where it started in the code */
   private reportHang(r: Inflight): void {
     if (this.hangReports >= HANG_REPORTS_MAX) { this.client.noteLoss('sdk_hang_reports'); return; }
     this.hangReports++;
@@ -644,7 +644,7 @@ export class EverydeckBrowser {
       const w = st.getItem(WAIT_KEY); const wait = w instanceof Promise ? await w : w;
       const rm = st.removeItem(PENDING_KEY); if (rm instanceof Promise) await rm;
       const rw = st.removeItem(WAIT_KEY); if (rw instanceof Promise) await rw;
-      // Q2: the wait of the last visit first, so the restored events are not sent before it ends
+      // the wait of the last visit first, so the restored events are not sent before it ends
       if (wait) this.client.waitUntil(Number(wait));
       this.client.importPending(JSON.parse(raw));
     } catch { /* corrupt: discard */ }
@@ -722,7 +722,7 @@ export class EverydeckBrowser {
     this.client.error(name, classOf(err), { ...r, sessionId, trail: this.trail(), message: this.msg(err), ...(frames ? { frames, contextStatus: 'browser_no_source_maps' as const } : {}) });
   }
   /**
-   * ES1: the result of a flow that happens in the browser (no server of the app in between), like PostHog `capture` and Sentry `captureEvent` in the
+   * the result of a flow that happens in the browser (no server of the app in between), like PostHog `capture` and Sentry `captureEvent` in the
    * browser, with the same name and form as the server SDK: `everydeck.signal('order.submitted', ctx.operationId)` inside the action of the flow. Inside an
    * action it carries that action's attempt, person and object, always the browser session; `r` adds or overrides them. everydeck accepts it only for
    * signals the app map marks `source: "browser"` and keeps it as the browser's claim (a server signal of the same run wins).
@@ -824,7 +824,7 @@ export class EverydeckBrowser {
 
 export function initEverydeckBrowser(o: BrowserOptions): EverydeckBrowser { return new EverydeckBrowser(o); }
 
-/** C10: a page in a browser (also a phone's browser) with PerformanceObserver; native apps and their web views measure nothing (their start time is not in C10) */
+/** a page in a browser (also a phone's browser) with PerformanceObserver; native apps and their web views measure nothing (their start time is not among these load times) */
 function measuresVitals(c: ClientInfo | undefined): boolean {
   const g = globalThis as { PerformanceObserver?: unknown; document?: unknown };
   if (typeof g.PerformanceObserver !== 'function' || !g.document) return false;

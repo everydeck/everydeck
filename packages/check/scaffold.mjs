@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // app map scaffold from the repo: a tool for the coding agent that reads only facts with their place in the code (file:line) and judges nothing.
-//   everydeck-scaffold <repo> [--db <database url, a read-only role is enough>] [--out everydeck/app-map.json] [--merge <existing app map>]   (without --out: output to stdout, nothing is written into the repo)
+//   everydeck-scaffold <repo> [--db <database url, a read-only role is enough; or everydeck's structure address of a hosted database>] [--out everydeck/app-map.json] [--merge <existing app map>]   (without --out: output to stdout, nothing is written into the repo)
 // With --db (or EVERYDECK_SCHEMA_DB_URL) the skeleton reads the schema from the database first (scaffold-db.mjs); the migrations are the places.
+// For a hosted database everydeck gives a structure address instead of a url: the same catalog, read by everydeck, structure only (same place "database").
 // Reads: tables and columns from SQL migrations (CREATE TABLE … (…), ALTER TABLE … ADD COLUMN, CHECK (col IN (…)), REFERENCES, DEFAULT; final state: DROP TABLE and DROP COLUMN remove, RENAME COLUMN renames, CREATE TABLE … AS SELECT * FROM takes over the columns; schemas other than public; auth.users as foreign key, also from policies auth.uid() = column),
 //        Alembic (op.create_table) and Firestore rules (match /name/{id}); packages from package.json/requirements*.txt (only provider packages
 //        that everydeck-check knows); API routes (Express/Fastify/Hono calls, FastAPI decorators, Next.js app/api/**/route.ts); pages
@@ -12,12 +13,12 @@
 // with places; `--merge` keeps these parts from an existing app map and renews only the skeleton parts.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative, dirname } from 'node:path';
+import { join, relative, dirname, resolve } from 'node:path';
 import { analyseReads } from './scaffold-reads.mjs';
 import { ICON_MAX_BYTES, findIcon, iconsTooLarge } from './scaffold-icon.mjs';
 import { candidateWays, detectPeople } from './rules/everydeck-rules.mjs';
 
-const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: scaffold.mjs <repo> [--db <url>] [--out file] [--merge file]'); process.exit(2); }
+const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: scaffold.mjs <repo> [--db <url or structure address>] [--out file] [--merge file]'); process.exit(2); }
 const opt = (k) => (args.includes(k) ? args[args.indexOf(k) + 1] : null);
 const SKIP = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', '.next', '.expo', 'coverage', '__pycache__', '.venv', 'venv', 'Pods', '.everydeck', 'everydeck', 'everydeck-outbox', 'supabase_types']);
 const files = [];
@@ -66,8 +67,10 @@ const stripSql = (src) => src.replace(/--[^\n]*/g, (m) => ' '.repeat(m.length));
 // Migrations in file order: only the final state of the schema counts; a table dropped later (DROP TABLE) is not in the app map
 for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
   const src = stripSql(text(f));
-  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\s+select\s+\*\s+from\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) {   // CREATE TABLE … AS SELECT * FROM y: the same columns as y
-    const t = addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]); const from = tables.get(m[3]); if (from && !t.columns.length) t.columns = from.columns.map((c) => ({ ...c }));
+  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\s+(?:select\s+\*\s+from|table)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) {   // CREATE TABLE … AS SELECT * FROM y (or AS TABLE y): the same columns as y
+    const at = { path: rel(f), line: lineOf(src, m.index), symbol: m[2] };
+    const t = addTable(m[2], 'table', at, m[1]); const from = tables.get(m[3]); if (from && !t.columns.length) t.columns = from.columns.map((c) => ({ ...c }));
+    t.copy_of = { table: m[3], evidence: at };   // a copy of y (for example a backup before a change), a fact with its place
   }
   for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\b/gi)) addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]);   // CREATE TABLE … AS: without a column list
   for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi)) {
@@ -192,7 +195,7 @@ if (dbUrl) {
   const key = (schema, name) => `${schema}.${name}`;
   const fromDb = new Set(catalog.tables.map((t) => key(t.schema, t.name)));
   const known = [...tables.values()].filter((t) => fromDb.has(key(t.schema ?? 'public', t.name)));
-  if (tables.size && !known.length) throw new Error(`the database at --db has none of the ${tables.size} tables of the migrations; is it the database of this app?`);
+  if (tables.size && !known.length) throw new Error(`the ${/^https?:\/\//i.test(dbUrl) ? 'structure at --db' : 'database at --db'} has none of the ${tables.size} tables of the migrations; is it the database of this app?`);
   for (const [name, t] of [...tables]) if (t.kind === 'table' && !fromDb.has(key(t.schema ?? 'public', t.name))) tables.delete(name);   // in the repo, not in the database: it does not exist
   for (const dt of catalog.tables) {
     let t = tables.get(dt.name);
@@ -392,7 +395,7 @@ for (const m of reads.not_shown) { const t = tables.get(m.table); if (!t) contin
 
 // Tables of the existing app map that the skeleton does not know (added by the agent) stay, unless the database says they do not exist
 const keptOld = (merge?.tables ?? []).filter((x) => !tables.has(x.name) && (!catalog || catalog.tables.some((d) => d.name === x.name)));
-const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.tables?.find((x) => x.name === t.name); if (!old) return t; const keep = (old.shown ?? []).filter((x) => x.element !== 'data'); const { not_shown: _dropped, shown: _old, ...rest } = old; return { ...rest, defined: t.defined, ...(keep.length || t.shown ? { shown: [...keep, ...(t.shown ?? [])].slice(0, 60) } : {}), ...(t.not_shown ? { not_shown: t.not_shown } : {}), columns: [...t.columns.map((c) => { const oc = old.columns.find((x) => x.name === c.name); if (!oc) return c; const keepShown = (oc.shown ?? []).filter((x) => x.element !== 'data' && !(c.shown ?? []).some((y) => y.element === x.element && y.path === x.path && y.line === x.line));   /* what the skeleton finds again itself (money), not twice */ const shownAll = [...keepShown, ...(c.shown ?? [])].slice(0, 12); return { ...c, ...(oc.external_id && !c.external_id ? { external_id: oc.external_id } : {}), ...(oc.contact && !c.contact ? { contact: oc.contact } : {}), ...(shownAll.length ? { shown: shownAll } : {}) };   /* the agent's contact fact stays */ }), ...old.columns.filter((x) => !t.columns.some((c) => c.name === x.name) && !(catalog && t.kind === 'table'))] }; }), ...keptOld];   // the agent's column display places (heading, money …) stay, the skeleton renews data places; with --db only the database columns count   // skeleton parts (data display places, not_shown) are renewed; agent entries and columns added by the agent (e.g. Firestore) stay
+const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.tables?.find((x) => x.name === t.name); if (!old) return t; const keep = (old.shown ?? []).filter((x) => x.element !== 'data'); const { not_shown: _dropped, shown: _old, copy_of: _copy, ...rest } = old; return { ...rest, defined: t.defined, ...(t.copy_of ? { copy_of: t.copy_of } : {}), ...(keep.length || t.shown ? { shown: [...keep, ...(t.shown ?? [])].slice(0, 60) } : {}), ...(t.not_shown ? { not_shown: t.not_shown } : {}), columns: [...t.columns.map((c) => { const oc = old.columns.find((x) => x.name === c.name); if (!oc) return c; const keepShown = (oc.shown ?? []).filter((x) => x.element !== 'data' && !(c.shown ?? []).some((y) => y.element === x.element && y.path === x.path && y.line === x.line));   /* what the skeleton finds again itself (money), not twice */ const shownAll = [...keepShown, ...(c.shown ?? [])].slice(0, 12); return { ...c, ...(oc.external_id && !c.external_id ? { external_id: oc.external_id } : {}), ...(oc.contact && !c.contact ? { contact: oc.contact } : {}), ...(shownAll.length ? { shown: shownAll } : {}) };   /* the agent's contact fact stays */ }), ...old.columns.filter((x) => !t.columns.some((c) => c.name === x.name) && !(catalog && t.kind === 'table'))] }; }), ...keptOld];   // the agent's column display places (heading, money …) stay, the skeleton renews data places; with --db only the database columns count   // skeleton parts (data display places, not_shown) are renewed; agent entries and columns added by the agent (e.g. Firestore) stay
 // ── Copies of contact data and messages. If an SQL function of the app writes a value marked as contact (also shortened
 //    or transformed, left(NEW.content, 140)) into another column, that column is the same fact: NEW./OLD. of a trigger's table, local variables
 //    from them, and INSERT … SELECT from the table itself. The place is where the function writes the column (the column is named there). Copies
@@ -544,10 +547,15 @@ const keyOf = (x) => `${x.provider}|${x.kind ?? ''}|${x.evidence?.path}:${x.evid
 // plans a host holds point to the price list); the agent describes what it holds.
 const agentMoney = new Map((merge?.money?.tables ?? []).filter((o) => mergedTables.some((t) => t.name === o.table)).map((o) => [o.table, o]));
 const withAgent = (t) => { const o = agentMoney.get(t.table); if (!o) return t; const { table: _t, because: _b, evidence: _e, columns: _c, ...facts } = o; return { ...t, ...facts }; };
-const moneyAll = [...moneyTables.map(withAgent), ...[...agentMoney.values()].filter((o) => !moneyTables.some((t) => t.table === o.table))];
-// Only a direct foreign key to a money table the agent described (holds: plans, purchases, requests, prices), never transitively and never through a price a
+// An entry of the last run this run does not find again stays only with what the agent wrote on it (described_by_agent, or holds, log, roles, statuses,
+// reason); a bare entry of the skeleton (a foreign key that refers to money, no description) is renewed like every skeleton part, not kept.
+const agentWrote = (o) => o.because === 'described_by_agent' || ['holds', 'log', 'roles', 'statuses', 'reason', 'price'].some((k) => o[k] !== undefined);
+const moneyAll = [...moneyTables.map(withAgent), ...[...agentMoney.values()].filter((o) => !moneyTables.some((t) => t.table === o.table) && agentWrote(o))];
+// Only a direct foreign key to a money table the agent described as a price list or as purchases, never transitively and never through a price a
 // page only shows (shown_as_money without holds): the plans of a customer point to the price list, a chat about a priced item does not hold money.
-const described = new Set(moneyAll.filter((m) => m.holds).map((m) => m.table));
+// A table that holds plans or requests is often the account itself (organizations, profiles with plan columns); its members,
+// invitations and candidates hold no money, so a foreign key to it is not followed.
+const described = new Set(moneyAll.filter((m) => m.holds === 'prices' || m.holds === 'purchases').map((m) => m.table));
 for (const t of mergedTables) { if (moneyAll.some((x) => x.table === t.name)) continue;
   const c = t.columns.find((x) => x.fk && described.has(x.fk.table) && x.fk.table !== t.name);
   if (c) moneyAll.push({ table: t.name, because: 'refers_to_money', evidence: { path: t.defined.path, line: t.defined.line, symbol: c.name }, columns: [c.name] }); }
@@ -557,7 +565,14 @@ const money = payProviders.length || moneyAll.length || merge?.money ? { provide
 //    (everydeck never reads them), memberships, and the login provider from the packages. What the agent described adds to it and never replaces it:
 //    an agent's null (no login) or another table does not overrule the schema; a field the agent names with its place stays.
 const identityOut = detectPeople({ tables: mergedTables, components, money, ...(merge && 'identity' in merge ? { identity: merge.identity } : {}) }).identity;
-const aiOut = [...aiCalls, ...(merge?.ai_calls ?? []).filter((o) => !aiCalls.some((a) => keyOf(a) === keyOf(o)))].slice(0, 200);
+// An entry of the last run that this run finds again (same provider, kind, file and symbol) is renewed at its new line; a model the
+// agent named moves with it (by the same number of lines). Only entries this run does not find at all (an own wrapper the agent named) stay as they were.
+const sameAiCall = (a, o) => a.provider === o.provider && a.kind === o.kind && a.evidence?.path === o.evidence?.path && (a.evidence?.symbol ?? '') === (o.evidence?.symbol ?? '');
+const aiOut = [...aiCalls.map((a) => { if (a.model) return a;
+  const o = (merge?.ai_calls ?? []).filter((x) => x.model && sameAiCall(a, x)).sort((x, y) => Math.abs(x.evidence.line - a.evidence.line) - Math.abs(y.evidence.line - a.evidence.line))[0];
+  if (!o) return a; const d = a.evidence.line - o.evidence.line;
+  return { ...a, model: o.model.evidence.path === a.evidence.path ? { ...o.model, evidence: { ...o.model.evidence, line: o.model.evidence.line + d } } : o.model }; }),
+  ...(merge?.ai_calls ?? []).filter((o) => !aiCalls.some((a) => keyOf(a) === keyOf(o) || sameAiCall(a, o)))].slice(0, 200);
 const authPlaces = [];
 // The page the app sends people to after a password reset email (redirectTo or redirect_to of the call, within its next lines): only a path
 //    from a literal in the code (an address keeps only its path, a template keeps what follows its last placeholder); a variable gives nothing
@@ -613,7 +628,9 @@ const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git
   ...(merge?.everydeck_tables ? { everydeck_tables: merge.everydeck_tables.filter((y) => mergedTables.some((t) => t.name === y.table)) } : {}),
   ...(merge?.works_with ? { works_with: merge.works_with.filter((w) => tables.has(w.table) && (!w.part_of || tables.has(w.part_of))) } : {}),   // the agent's description stays; entries for tables that no longer exist in the final state are dropped
   identity: (() => { const id = identityOut; if (!id) return null; const { name_rule: _old, ...rest } = id; const rule = nameRuleOf(id); return rule ? { ...rest, name_rule: rule } : rest; })(), tables: mergedTables, functions: merge?.functions ?? [], flows: merge?.flows ?? [], ...(flowCandidates.length ? { flow_candidates: flowCandidates } : {}), money, ...(aiOut.length ? { ai_calls: aiOut } : {}), ...(merge?.channels ? { channels: merge.channels } : {}), ...(merge?.jobs ? { jobs: merge.jobs } : {}), ...(merge?.payments !== undefined ? { payments: merge.payments } : {}), ...(merge?.adapters ? { adapters: merge.adapters } : {}),
-  checklist: merge?.checklist ?? BLOCKS.map((block) => ({ block, present: false })) };
+  checklist: merge?.checklist ?? BLOCKS.map((block) => ({ block, present: false })),
+  // what the agent recorded (outcomes) and what everydeck-check wrote (inventory, renewed by its next validate) stay
+  ...(merge?.outcomes ? { outcomes: merge.outcomes } : {}), ...(merge?.inventory ? { inventory: merge.inventory } : {}) };
 // --types prints the object type names as everydeck derives them (singular of the table name), for triggers, actions, door and cleanup list before submitting
 if (args.includes('--types')) {
   const singular = (n) => (/ies$/.test(n) ? n.replace(/ies$/, 'y') : /(ses|xes|zes|ches|shes)$/.test(n) ? n.replace(/es$/, '') : /[^s]s$/.test(n) ? n.replace(/s$/, '') : n);
@@ -623,5 +640,12 @@ if (args.includes('--types')) {
 // Never write into the repo unasked: without --out the app map goes to stdout
 const outPath = opt('--out');
 // --out creates its folder (everydeck/ does not exist before the first run)
-if (outPath) { mkdirSync(dirname(outPath), { recursive: true }); writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n'); } else process.stdout.write(JSON.stringify(out, null, 1) + '\n');
+// The indentation of the merged file stays (an agent or an editor that writes two spaces is not rewritten line by line)
+const indent = (() => { const m = mergeFile ? /^\{\r?\n([ \t]+)"/.exec(readFileSync(mergeFile, 'utf8')) : null; return m ? (m[1].includes('\t') ? '\t' : m[1].length) : 1; })();
+if (outPath) { mkdirSync(dirname(outPath), { recursive: true }); writeFileSync(outPath, JSON.stringify(out, null, indent) + '\n'); notePlaces(outPath); } else process.stdout.write(JSON.stringify(out, null, indent) + '\n');
+// The places hold for the files as they were read now, which may already carry the agent's edits (not for `commit`): noted in the git folder (never
+// committed, nothing changed: `git stash create`), so that `everydeck-check reanchor --worktree` later moves them from exactly this state
+function notePlaces(file) { try { const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const tree = git('stash', 'create') || git('rev-parse', 'HEAD'); const at = git('rev-parse', '--git-path', 'everydeck/places.json'); const f = at.startsWith('/') ? at : join(repo, at);
+  mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, JSON.stringify({ tree, app_map: relative(resolve(repo), resolve(file)) }) + '\n'); } catch { /* not a git repository: nothing to note */ } }
 console.error(JSON.stringify({ out: outPath, tables: out.tables.length, columns: out.tables.reduce((n, t) => n + t.columns.length, 0), shown: out.tables.filter((t) => (t.shown ?? []).length || t.columns.some((c) => (c.shown ?? []).length)).length, not_shown: out.tables.reduce((n, t) => n + (t.not_shown ?? []).length, 0), components: out.components.length, api_routes: api_routes.length, screens: screens.length, platforms: out.platforms.length, routes_with_reads: reads.routes.filter((r) => r.reads.length).length, views: reads.views.length, sql_functions: reads.sql_functions.length, merged: !!merge , ...(iconSkipped.length ? { icon_skipped: iconSkipped, icon_note: `the app's logo is larger than ${ICON_MAX_BYTES} bytes, so everydeck shows no logo; add a smaller copy (PNG or SVG) and run again` } : {}) }));

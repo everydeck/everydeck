@@ -160,7 +160,8 @@ class ReadBridge:
         for o in scope.get("objects", []):
             cols = _uniq([*o["ref"], *([o["title"]] if o.get("title") else []), *([o["status"]] if o.get("status") else []), *([o["owner"]] if o.get("owner") else []), *(f["column"] for f in o["fields"])])
             if o.get("changed") and o["changed"] not in cols: cols = [*cols, o["changed"]]
-            self.types[o["type"]] = {"table": o["table"], "keys": list(o["ref"]), "columns": cols, "title": o.get("title"), "status": o.get("status"), "owner": o.get("owner"), "changed": o.get("changed"), "fields": list(o["fields"])}
+            if o.get("created") and o["created"] not in cols: cols = [*cols, o["created"]]   # when the app created the record: delivered as created_at
+            self.types[o["type"]] = {"table": o["table"], "keys": list(o["ref"]), "columns": cols, "title": o.get("title"), "status": o.get("status"), "owner": o.get("owner"), "changed": o.get("changed"), "created": o.get("created"), "fields": list(o["fields"])}
         for r in scope.get("relations", []):
             self.types[r["id"]] = {"table": r["table"], "keys": list(r["ref"]), "columns": _uniq([*r["ref"], *(f["column"] for f in r["fields"])]), "title": None, "status": None, "owner": None, "changed": None, "fields": list(r["fields"])}
 
@@ -223,7 +224,7 @@ class ReadBridge:
             if bad:
                 return 400, {"error": "bad cursor"}
             steps = p.get("name") or []
-            cols = _uniq([p["ref"], *p["fields"].values(), *[c for st in steps for c in st["columns"]]])
+            cols = _uniq([p["ref"], *p["fields"].values(), *[c for st in steps for c in st["columns"]], *([p["created"]] if p.get("created") else [])])
             rows = list(self.rows(p["table"], cols, [p["ref"]], after, limit + 1))
             kept = rows[:limit]
 
@@ -233,7 +234,7 @@ class ReadBridge:
                     if parts:
                         return st.get("separator", " ").join(parts)[:VALUE_MAX]
                 return None
-            items = [{"subject_ref": _text(r[p["ref"]])[:128], **{f: (None if r.get(c) is None else _text(r[c])[:VALUE_MAX]) for f, c in p["fields"].items()}, **({"display_name": name_of(r)} if steps and "display_name" in p["fields"] else {})} for r in kept]
+            items = [{"subject_ref": _text(r[p["ref"]])[:128], **{f: (None if r.get(c) is None else _text(r[c])[:VALUE_MAX]) for f, c in p["fields"].items()}, **({"display_name": name_of(r)} if steps and "display_name" in p["fields"] else {}), **({"created_at": _iso(r.get(p["created"]))} if p.get("created") else {})} for r in kept]
             return 200, {"as_of": as_of, "items": items, "next_cursor": _b64([_text(kept[-1][p["ref"]])]) if len(rows) > limit else None}
         if path.startswith("/everydeck/read/messages/") and path[len("/everydeck/read/messages/"):].count("/") == 1:   # messages of one conversation, on demand only
             typ, ref = path[len("/everydeck/read/messages/"):].split("/", 1)
@@ -316,6 +317,8 @@ class ReadBridge:
             it["owner_ref"] = None if r.get(x["owner"]) is None else _text(r[x["owner"]])[:128]
         if x.get("changed"):
             it["updated_at"] = _iso(r.get(x["changed"]))
+        if x.get("created"):
+            it["created_at"] = _iso(r.get(x["created"]))
         it["fields"] = {f["name"]: _value(r.get(f["column"])) for f in x["fields"]}
         return it
 

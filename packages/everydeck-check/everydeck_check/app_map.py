@@ -240,7 +240,7 @@ def _check_evidence(files: _Files, ev: dict[str, Any], at: str, expect: list[str
     """File there, line there, and at least one of the expected words is in the line ± LINE_SLACK."""
     rel = ev["path"]; ln = int(ev["line"])
     if rel == "database":
-        if DB_TABLES is None: errs.append(f"{at}: evidence from the database; run everydeck-check validate with --db <url> (the read role is enough) to confirm it"); return
+        if DB_TABLES is None: errs.append(f"{at}: evidence from the database; run everydeck-check validate with --db <url> (the read role is enough; for a hosted database the structure address everydeck gives) to confirm it"); return
         sym = str(ev.get("symbol") or "")
         name = sym.split(" ")[-1]; tbl = name.split(".")[0] if name.count(".") == 1 and not name.startswith("public.") and name.split(".")[0] not in {t.split(".")[0] for t in DB_TABLES} else name
         if sym.startswith("function ") or sym.startswith("trigger "): return   # functions and triggers: read in the catalog, the comparison checks the table
@@ -256,6 +256,9 @@ def _check_evidence(files: _Files, ev: dict[str, Any], at: str, expect: list[str
     missing = [w for w in words if w not in window]
     if ev.get("symbol"):   # the symbol is the anchor: in the line ± 3, or the line is inside the body of exactly this function (next definition above)
         if ev["symbol"] not in missing: return
+        # a request path the scaffold writes as a pattern (`${job.id}` → :p, flow_candidates[].evidence.symbol) is matched
+        # like a route, not as text: the same rule as the display places of routes (_route_in_window)
+        if ev["symbol"].startswith("/") and _route_in_window(lines, ln, ev["symbol"]): return
         chain = _enclosing_chain(files, rel, ln)
         if isinstance(chain, str): errs.append(f"{at}: {rel}:{ln}: cannot read the functions of {rel}: {chain}"); return
         # the line is inside the body of the named function (or one that encloses it): name or Class.method
@@ -378,7 +381,7 @@ def _next_app(repo: Path, path: str) -> bool:
 
 
 def _signal_source_errors(repo: Path, s: dict[str, Any], at: str) -> list[str]:
-    """ES1: who sends a signal must match where the code sends it. A signal in browser code (the rule of the frontend reads; in a Next.js app only
+    """Who sends a signal must match where the code sends it. A signal in browser code (the rule of the frontend reads; in a Next.js app only
     'use client' files and pages/ outside pages/api; 'use server' and server-only never) needs `source: "browser"`: the browser SDK sends it with the public browser key, and everydeck
     takes a signal from that key only with this mark (as the browser's claim). `source: "browser"` in server code (a backend folder or Python) is wrong:
     the server SDK sends it."""
@@ -462,6 +465,7 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
     for i, t in enumerate(b.get("tables", [])):
         at = f"tables[{i}] {t['name']}"
         _check_evidence(files, t["defined"], at + ".defined", [t["name"]], errs)
+        if t.get("copy_of"): _check_evidence(files, t["copy_of"]["evidence"], at + ".copy_of", [t["copy_of"]["table"]], errs)   # the copy's statement names the source
         for j, c in enumerate(t["columns"]):
             for k, sh in enumerate(c.get("shown", []) or []): _check_evidence(files, sh, f"{at}.columns[{j}] {c['name']}.shown[{k}]", [c["name"]] + ([sh["label"]] if sh.get("label") else []), errs)
             for k, ev in enumerate(c.get("enum", []) or []): _check_evidence(files, ev["evidence"], f"{at}.columns[{j}] {c['name']}.enum[{k}]", [ev["value"]], errs)
@@ -471,6 +475,9 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
             if c.get("external_id"): _check_evidence(files, c["external_id"]["evidence"], f"{at}.columns[{j}] {c['name']}.external_id", [c["name"]], errs)
             for k, ev in enumerate(c.get("written", []) or []): _check_evidence(files, ev, f"{at}.columns[{j}] {c['name']}.written[{k}]", [c["name"]], errs)   # the place that sets it names the column
             if c.get("contact"): _check_evidence(files, c["contact"]["evidence"], f"{at}.columns[{j}] {c['name']}.contact", [c["name"]], errs)   # the place where the app treats the value as a contact names the column (or its symbol)
+            # the place where the app uses a column named like contact data as something else names the column (or its symbol); never both
+            if c.get("not_contact"): _check_evidence(files, c["not_contact"]["evidence"], f"{at}.columns[{j}] {c['name']}.not_contact", [c["name"]], errs)
+            if c.get("not_contact") and c.get("contact"): errs.append(f"{at}.columns[{j}] {c['name']}: contact and not_contact together; keep the one the code shows")
         for j, s in enumerate(t.get("statuses", []) or []):
             _check_evidence(files, s["evidence"], f"{at}.statuses[{j}] {s['value']}", [s["value"]], errs)
             for k, sh in enumerate(s.get("shown", []) or []): _check_evidence(files, sh, f"{at}.statuses[{j}] {s['value']}.shown[{k}]", [s["value"]] + ([sh["label"]] if sh.get("label") else []), errs)
@@ -872,12 +879,22 @@ def outcome_usage_errors(b: dict[str, Any], repo: Path) -> list[str]:
     the claim, no similarity: a money table read or written, a channel or payment provider called or imported, a group's table written, a sign-up call."""
     errs: list[str] = []
     tables = {e["block"]: e.get("tables") or [] for e in b.get("checklist", [])}
+    money_names: set[str] | None = None
     for i, o in enumerate(b.get("outcomes") or []):
         if not o.get("not_applicable"): continue
         oid: str = o["id"]; kind, _, rest = oid.partition(":")
         found: str | None = None; what = ""
         if kind == "money" and rest.startswith("table:"):
-            t = rest[len("table:"):]; found = _first_use(repo, _table_use(t)); what = f"the code uses the table {t}"
+            t = rest[len("table:"):]
+            # only a table everydeck's own rule calls money (the rules bundle, as everydeck's server: moneyKindOf) contradicts a
+            # not_applicable by being used; a table the scaffold only lists as a candidate (refers_to_money, used_with_provider) is used and
+            # still may hold no money, so its not_applicable with a place stands, as everydeck accepts it
+            if money_names is None:
+                from .rules import RulesUnavailable, run_rule
+                names = sorted({x["id"][len("money:table:"):] for x in b.get("outcomes") or [] if str(x.get("id", "")).startswith("money:table:")})
+                try: money_names = set(run_rule("money_tables", {"names": names})["money"])
+                except (RulesUnavailable, KeyError, ValueError, OSError): money_names = set(names)   # without the rules: as strict as before
+            if t in money_names: found = _first_use(repo, _table_use(t)); what = f"the code uses the table {t}"
         elif kind == "money" and rest.startswith("provider:"):
             pkg = rest[len("provider:"):]
             found = _first_use(repo, [re.compile(rf"""['"](?:npm:|jsr:|https?://[^'"]*/)?{re.escape(pkg)}(?:[@/'"])""")]); what = f"the code imports {pkg}"
@@ -943,9 +960,49 @@ def exposure_errors(repo: Path) -> list[str]:
     return errs
 
 
+_STRUCTURES: dict[str, dict[str, Any]] = {}
+
+
+def _structure(src: str) -> dict[str, Any]:
+    """The catalog of a hosted database that everydeck read (structure address https://…, or a JSON file with it): { tables, policies, functions },
+    the same shape the scaffold reads with --db; no rows, no connection to the database. Read once per run."""
+    if src in _STRUCTURES: return _STRUCTURES[src]
+    import urllib.error, urllib.request
+    if re.match(r"(?i)^https?://", src):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(src, headers={"accept": "application/json", "user-agent": "everydeck-check"}), timeout=120) as r: text = r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")[:300]
+            try: body = json.loads(body).get("message", body)
+            except ValueError: pass
+            raise RuntimeError(f"the structure address answered {e.code}: {body}")
+        except (urllib.error.URLError, OSError) as e: raise RuntimeError(f"cannot reach the structure address ({getattr(e, 'reason', e)})")
+    else:
+        try: text = Path(src).read_text(encoding="utf-8")
+        except OSError as e: raise RuntimeError(f"cannot read the structure file {src} ({e.strerror or e})")
+    try: cat = json.loads(text)
+    except ValueError: raise RuntimeError("the structure is not JSON")
+    tables = cat.get("tables") if isinstance(cat, dict) else None
+    if not isinstance(tables, list) or not all(isinstance(t, dict) and isinstance(t.get("schema"), str) and isinstance(t.get("name"), str) and isinstance(t.get("columns", []), list) for t in tables):
+        raise RuntimeError("not a database structure (expected { tables, policies, functions } as everydeck gives it)")
+    # everydeck reads as a role that may not use the schema extensions, so types from there come with it (extensions.geography); the type is
+    # taken without that leading schema, as the scaffold writes it (plainTypes) and as --db as postgres gives it. Defaults and expressions stay.
+    for t in tables:
+        for c in t.get("columns", []):
+            if isinstance(c, dict) and isinstance(c.get("type"), str): c["type"] = re.sub(r"^extensions\.", "", c["type"])
+    _STRUCTURES[src] = cat
+    return cat
+
+
+def _is_structure(src: str) -> bool:
+    return bool(re.match(r"(?i)^https?://", src)) or src.lower().endswith(".json")
+
+
 def database_tables(url: str) -> set[str]:
-    """Tables of the app according to the database (schema.name), without the platform schemas; through psql or psycopg (the read role is enough)."""
+    """Tables of the app according to the database (schema.name), without the platform schemas; through psql or psycopg (the read role is enough).
+    An http(s) address or a .json file is everydeck's structure of a hosted database (the same catalog, read by everydeck)."""
     import shutil, subprocess
+    if _is_structure(url): return {f"{t['schema']}.{t['name']}" for t in _structure(url)["tables"]}
     platform = ['information_schema', 'pg_catalog', 'pg_toast', 'auth', 'storage', 'realtime', '_realtime', 'extensions', 'graphql', 'graphql_public', 'pgbouncer', 'vault', 'net', 'supabase_functions', 'supabase_migrations', 'cron', 'pgsodium', 'pgsodium_masks', '_analytics', 'topology', 'tiger', 'tiger_data', 'pgtle', 'repack', 'everydeck_read']
     sql = "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p') AND NOT c.relispartition AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> ALL(ARRAY[" + ",".join(f"'{x}'" for x in platform) + "])"
     try:
@@ -957,6 +1014,42 @@ def database_tables(url: str) -> set[str]:
     out = subprocess.run(["psql", url, "-X", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql], capture_output=True, text=True)
     if out.returncode != 0: raise RuntimeError(f"cannot read the database: {out.stderr.strip().splitlines()[0] if out.stderr.strip() else out.returncode}")
     return {l.strip() for l in out.stdout.splitlines() if l.strip()}
+
+
+def database_time_defaults(url: str) -> dict[str, str | None]:
+    """The default of every time column of the app according to the database (schema.table.column → expression or None); like database_tables."""
+    import shutil, subprocess
+    if _is_structure(url):   # the same facts from everydeck's structure of a hosted database (type and default of each column)
+        return {f"{t['schema']}.{t['name']}.{c['name']}": (c.get("default") or None) for t in _structure(url)["tables"] for c in t.get("columns", [])
+                if isinstance(c, dict) and re.match(r"^(timestamp|date|time)", str(c.get("type") or ""))}
+    sql = ("SELECT n.nspname || '.' || c.relname || '.' || a.attname, coalesce(pg_get_expr(d.adbin, d.adrelid), '') FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+           "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped AND format_type(a.atttypid, a.atttypmod) ~ '^(timestamp|date|time)' AND n.nspname NOT LIKE 'pg\\_%'")
+    try:
+        import psycopg  # type: ignore
+        with psycopg.connect(url) as conn: return {r[0]: (r[1] or None) for r in conn.execute(sql).fetchall()}
+    except ImportError:
+        pass
+    if not shutil.which("psql"): raise RuntimeError("--db needs psql or the psycopg package")
+    out = subprocess.run(["psql", url, "-X", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", sql], capture_output=True, text=True)
+    if out.returncode != 0: raise RuntimeError(f"cannot read the database: {out.stderr.strip().splitlines()[0] if out.stderr.strip() else out.returncode}")
+    return {l.split("\t")[0]: (l.split("\t")[1] if "\t" in l and l.split("\t")[1] else None) for l in out.stdout.splitlines() if l.strip()}
+
+
+def _default_text(v: str | None) -> str:
+    return re.sub(r"::[a-z ]+(\[\])?", "", re.sub(r"\s+", "", (v or "").lower())).replace("'", "")
+
+
+def default_errors(b: dict[str, Any], defaults: dict[str, str | None]) -> list[str]:
+    """everydeck shows the app's past from the time column the database sets when a record is created (columns[].default, the same rule as on submission);
+    the default in the app map is therefore the database's own, never written by hand: compared for every time column the database knows."""
+    errs: list[str] = []
+    for i, t in enumerate(b.get("tables", [])):
+        for j, c in enumerate(t.get("columns", [])):
+            key = f"{t.get('schema') or 'public'}.{t['name']}.{c['name']}"
+            if key not in defaults or not re.match(r"^(timestamp|date|time)", str(c.get("type", "")).lower()): continue
+            if _default_text(c.get("default")) != _default_text(defaults[key]):
+                errs.append(f"tables[{i}].columns[{j}]: {t['name']}.{c['name']} has the default {c.get('default')!r} in the app map, the database has {defaults[key]!r}; write the default the database has (the generator reads it with --db)")
+    return errs
 
 
 def database_errors(b: dict[str, Any], db: set[str]) -> list[str]:
@@ -1123,6 +1216,8 @@ def validate_app_map(doc: dict[str, Any], repo: Path | None, db: str | None = No
         try: DB_TABLES = database_tables(db)
         except RuntimeError as e: return [f"--db: {e}"]
         errs += database_errors(doc, DB_TABLES)
+        try: errs += default_errors(doc, database_time_defaults(db))
+        except RuntimeError as e: return [f"--db: {e}"]
     if repo and not errs:
         errs = evidence_errors(doc, repo) + completeness_errors(doc, repo) + contact_copy_errors(doc, repo)
     return errs

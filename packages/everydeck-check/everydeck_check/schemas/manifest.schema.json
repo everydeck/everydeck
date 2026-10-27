@@ -191,7 +191,7 @@
               "server",
               "browser"
             ],
-            "description": "Who may send the signal: server (server key only) or browser (also the public browser key; ES1, the result of a flow that happens in browser code)"
+            "description": "Who may send the signal: server (server key only) or browser (also the public browser key, for the result of a flow that happens in browser code)"
           },
           "location": {
             "type": "object",

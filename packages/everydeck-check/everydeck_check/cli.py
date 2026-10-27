@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -36,6 +37,20 @@ def write_path(path: str) -> str:
 
 def _load(p: str) -> dict:
     return json.loads(Path(p).read_text(encoding="utf-8"))
+
+
+# an error of a place that may only have moved (everydeck_check.app_map._check_evidence and the route check)
+PLACE_MOVED = re.compile(r"is not inside |does not mention |holds no request path |lines, evidence names line ")
+
+
+def _write_like(source: str, target: str, doc: dict) -> None:
+    """Write the app map with the indentation of the file it was read from (validate, reanchor and the scaffold's --merge
+    each wrote their own before, so every run rewrote every line); a file without one gets the scaffold's (one space)."""
+    try: head = Path(source).read_text(encoding="utf-8")[:200]
+    except OSError: head = ""
+    m = re.match(r"\{\r?\n([ \t]+)\"", head)
+    indent: int | str = (m.group(1) if "\t" in m.group(1) else len(m.group(1))) if m else 1
+    Path(target).write_text(json.dumps(doc, indent=indent, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def _load_manifest(p: str) -> tuple[dict, dict | None, str]:
@@ -117,7 +132,7 @@ def cmd_validate(a: argparse.Namespace) -> int:
             if inventory == "written":
                 raw["inventory"] = inv
                 # an old file name (everydeck-befund.json) is read, but written is only the new one
-                Path(APP_MAP if a.file_note else a.manifest).write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                _write_like(a.manifest, APP_MAP if a.file_note else a.manifest, raw)
         errs = validate_app_map(raw, Path(repo).resolve() if repo else None, db)
         from .rules import app_map_open
         parts = app_map_open(raw) if not errs else {"setup": None, "open": [], "still_open": 0}
@@ -126,6 +141,10 @@ def cmd_validate(a: argparse.Namespace) -> int:
         # a refusal says what comes next too, so the agent does not end its turn with a question to the owner
         if errs: nxt = ("Fix each error in everydeck/app-map.json (and the code it names) yourself with your file tools: every error names the place and what to change. "
                         "Then run validate again until it exits 0. Nothing here is the owner's decision: do not ask the owner and do not end your turn.")
+        # places moved by the agent's own edits are moved by git, not by hand (and code goes where it belongs, not to the end of a file)
+        if errs and any(PLACE_MOVED.search(e) for e in errs):
+            nxt += (" Places that moved because you edited a file: run `everydeck-check reanchor --worktree --write` (it moves every place of the app map to the"
+                    " files as they are now, from git) and validate again; do not correct line numbers by hand and do not move your code to the end of a file for it.")
         print(json.dumps({"status": "ok" if not errs else "invalid", "form": "app_map", "file": a.manifest, **({"note": a.file_note} if a.file_note else {}), "checked_against_repo": bool(repo), "checked_against_database": bool(db), "errors": errs,
                           **({"inventory": inventory} if inventory else {"inventory": "not scanned: run with --repo ."}), **({"setup": parts["setup"]} if parts.get("setup") else {}), "open": parts["open"], **({"next": nxt} if nxt else {}),
                           "counts": {"tables": len(raw.get("tables", [])), "functions": len(raw.get("functions", [])), "flows": len(raw.get("flows", [])), "present": sum(1 for c in raw.get("checklist", []) if c.get("present"))}}, indent=1))
@@ -173,16 +192,21 @@ def cmd_drift(a: argparse.Namespace) -> int:
 
 
 def cmd_reanchor(a: argparse.Namespace) -> int:
-    """Move places from the app map's commit to HEAD (git, text, symbol). Without --out/--write only the report."""
+    """Move places from the app map's commit to HEAD, or with --worktree to the uncommitted files (git, text, symbol). Without --out/--write only the report."""
     from .reanchor import reanchor
     b = _load(a.app_map)
-    rep = reanchor(b, Path(a.repo), a.base)
+    from .reanchor import record_places
+    repo = Path(a.repo).resolve()
+    try: map_rel = str(Path(a.app_map).resolve().relative_to(repo))
+    except ValueError: map_rel = None
+    rep = reanchor(b, repo, a.base, worktree=a.worktree, map_rel=map_rel)
     if not rep.get("error"):
-        if isinstance(b.get("release_key"), str) and b["release_key"].startswith("git:") and rep["head"]:
+        if isinstance(b.get("release_key"), str) and b["release_key"].startswith("git:") and rep["head"] and not a.worktree:
             b["release_key"] = f"git:{rep['head'][:12]}"   # the app map's version follows the commit (the same form as the SDK release key)
         target = a.out or (write_path(a.app_map) if a.write else None)
         if target:
-            Path(target).write_text(json.dumps(b, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"); rep["out"] = str(target)
+            _write_like(a.app_map, target, b); rep["out"] = str(target)
+            if a.worktree and map_rel: record_places(repo, map_rel)
     print(json.dumps(rep, indent=1))
     return 0 if not rep.get("error") else 2
 
@@ -300,13 +324,21 @@ def cmd_restart_stack(a: argparse.Namespace) -> int:
     return 0 if out["status"] == "ok" else 2
 
 
+def cmd_local_db(a: argparse.Namespace) -> int:
+    """The app's local database from supabase/config.toml or the app's environment (read here, never printed); the url only with the fixed local password."""
+    from .localdb import find_local_db
+    out = find_local_db(Path(a.repo))
+    print(json.dumps(out, indent=1))
+    return 0 if out["status"] == "found" else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="everydeck-check")
     sub = p.add_subparsers(dest="cmd", required=True)
-    v = sub.add_parser("validate"); v.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); v.add_argument("--repo", default=None, help="app repository: detect building blocks (dependencies, config, code hints) that must appear in coverage[]"); v.add_argument("--db", default=None, help="database URL (the read role is enough; or EVERYDECK_SCHEMA_DB_URL); every table of the database must be in the app map, evidence 'database' is checked against it"); v.set_defaults(fn=cmd_validate)
+    v = sub.add_parser("validate"); v.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); v.add_argument("--repo", default=None, help="app repository: detect building blocks (dependencies, config, code hints) that must appear in coverage[]"); v.add_argument("--db", default=None, help="database URL (the read role is enough; or EVERYDECK_SCHEMA_DB_URL), or for a hosted database the structure address everydeck gives; every table of the database must be in the app map, evidence 'database' is checked against it"); v.set_defaults(fn=cmd_validate)
     d = sub.add_parser("drift"); d.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); d.add_argument("--repo", default="."); d.add_argument("--freeze", action="store_true"); d.set_defaults(fn=cmd_drift)
     ra = sub.add_parser("reanchor", help="move every place of the app map from its commit to HEAD (git diff, text, symbol); nothing guessed; unresolved places are listed")
-    ra.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); ra.add_argument("--repo", default="."); ra.add_argument("--base", default=None, help="commit the places refer to (default: commit of the app map)"); ra.add_argument("--out", default=None); ra.add_argument("--write", action="store_true", help="write the re-anchored app map back to its file"); ra.set_defaults(fn=cmd_reanchor)
+    ra.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); ra.add_argument("--repo", default="."); ra.add_argument("--base", default=None, help="commit the places refer to (default: commit of the app map)"); ra.add_argument("--out", default=None); ra.add_argument("--write", action="store_true", help="write the re-anchored app map back to its file"); ra.add_argument("--worktree", action="store_true", help="to the files as they are now, before a commit: after your own edits during the setup (commit stays)"); ra.set_defaults(fn=cmd_reanchor)
     rd = sub.add_parser("reads", help="the cross-check of display locations: every table named in a frontend string: main navigation (with access path), technical (with reason) or open"); rd.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); rd.add_argument("--repo", required=True); rd.add_argument("--markdown", action="store_true"); rd.set_defaults(fn=cmd_reads)
     pub = sub.add_parser("publish"); pub.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list; use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: an app map goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of an app map against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
     fp = sub.add_parser("footprint", help="what the setup added and changed in the repository against --base (the commit before the setup); refuses a rewritten lockfile and leftovers")
@@ -316,12 +348,14 @@ def main(argv: list[str] | None = None) -> int:
     from .stack import STACK_RESTART_TIMEOUT
     rs = sub.add_parser("restart-stack", help="restart the local Supabase stack of this repository (supabase stop, supabase start) with the installed CLI and a time limit")
     rs.add_argument("--repo", default="."); rs.add_argument("--timeout", type=int, default=STACK_RESTART_TIMEOUT, help=f"seconds per command (default {STACK_RESTART_TIMEOUT})"); rs.set_defaults(fn=cmd_restart_stack)
+    ld = sub.add_parser("local-db", help="the app's local database for --db: supabase/config.toml, or a local Supabase stack or PostgreSQL the app's env files name (no value is printed)")
+    ld.add_argument("--repo", default="."); ld.set_defaults(fn=cmd_local_db)
     ch = sub.add_parser("change", help="check everydeck-change.json against manifest, repo and HEAD; optionally publish it")
     ch.add_argument("change"); ch.add_argument("--manifest", required=True); ch.add_argument("--repo", default="."); ch.add_argument("--sha", default=None)
     ch.add_argument("--url"); ch.add_argument("--project"); ch.add_argument("--token"); ch.set_defaults(fn=cmd_change)
     a = p.parse_args(argv)
     a.file_note = None
-    if a.cmd not in ("change", "footprint", "keys", "restart-stack"):
+    if a.cmd not in ("change", "footprint", "keys", "restart-stack", "local-db"):
         for attr in ("manifest", "app_map"):
             if hasattr(a, attr):
                 path, a.file_note = map_path(getattr(a, attr)); setattr(a, attr, path)

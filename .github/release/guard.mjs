@@ -20,6 +20,8 @@ const regex = (p) => new RegExp(unhex(p.source), p.flags);
 const PATTERNS = RULES.patterns.map((p) => ({ id: p.id, re: regex(p) }));
 const ORDER = { id: RULES.order.id, re: regex(RULES.order) };
 const ALLOW = RULES.allow.map((a) => ({ id: a.id, line: regex(a.line) }));
+/** Real names shaped like a reference number (a signature prefix, an ISO time): only that expression is blanked, the rest of the text is still checked */
+const ORDER_ALLOW = RULES.orderAllow.map((a) => new RegExp(unhex(a.source), 'g'));
 
 const memo = new Map();
 const hash = (group, s) => {
@@ -71,7 +73,7 @@ const CHECKS = [
   ...PATTERNS.map((p) => ({ id: p.id, exec: (l) => { const m = p.re.exec(l); return m && { index: m.index, match: m[0] }; } })),
   ...GROUPS.map((g) => ({ id: g.id, exec: (l) => wordHit(g, l) })),
 ].sort((a, b) => RULES.sequence.indexOf(a.id) - RULES.sequence.indexOf(b.id));
-const ORDER_CHECK = { id: ORDER.id, exec: (l) => { const m = ORDER.re.exec(l); return m && { index: m.index, match: m[0] }; } };
+const ORDER_CHECK = { id: ORDER.id, exec: (l) => { const m = ORDER.re.exec(ORDER_ALLOW.reduce((t, a) => t.replace(a, (x) => ' '.repeat(x.length)), l)); return m && { index: m.index, match: m[0] }; } };
 
 const TEXT = new Set(['.ts', '.mts', '.js', '.mjs', '.cjs', '.py', '.json', '.md', '.sql', '.toml', '.yml', '.yaml', '.txt', '.cfg', '.in', '']);
 const NAMES = new Set(['LICENSE', 'METADATA', 'PKG-INFO', 'RECORD', 'WHEEL', 'top_level.txt', 'entry_points.txt']);

@@ -15,11 +15,17 @@ Commands:
 - `reanchor <app_map> --repo .`: moves every place of the app map from its commit to HEAD (git diff, text, symbol); nothing is guessed, unresolved places are listed.
 - `reads <app_map>`: the cross-check of display locations.
 - `footprint --base <commit before the setup> [--fix-lock]`: the files the setup added and changed, a lockfile rewritten beyond the new packages (`--fix-lock` restores it with only the new packages) leftovers such as `.playwright-mcp/` or screenshots, and every AI client of the app map (`ai_calls`) that is not wrapped with the everydeck SDK.
+- `local-db --repo .`: the app's local database for `--db`, from `supabase/config.toml` or from a local Supabase stack or PostgreSQL the app's env files point to. It reads the env files itself (like Prisma reads `.env`) and prints no value of them, only the file, the variable name and the port; the url only with the fixed password of a local Supabase stack.
+- `validate --db` takes a database url, or for a hosted database the structure address everydeck gives (or a JSON file with that catalog); every table of it must be in the app map.
 - `publish <app_map> --url <everydeck> --project <id>` and `change`: send the facts to everydeck.
 
 everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rules.mjs`) and run with `node` (18 or newer). Python 3.11 or newer. License: MIT.
 
 ## Changes
+
+### 0.3.9
+
+- `local-db --repo .`: finds the app's local database without the agent reading an env file: `supabase/config.toml` of the repository (the port under `[db]`, 54322 when it names none), else a variable in the app's env files that points to the gateway of a running local Supabase stack (Docker label `com.supabase.cli.project`, the stack's database port), else a local PostgreSQL with the fixed local password. Exit 0 when found, 2 otherwise, with the next step.
 
 ### 0.3.8
 

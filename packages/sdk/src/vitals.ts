@@ -1,5 +1,5 @@
 /**
- * C10: load times of every page view (Core Web Vitals), measured in the browser with Google's `web-vitals` code (6.2.3, Apache-2.0, vendored under
+ * load times of every page view (Core Web Vitals), measured in the browser with Google's `web-vitals` code (6.2.3, Apache-2.0, vendored under
  * `vendor/web-vitals`, see THIRD-PARTY-NOTICES.md), the same measurement as Vercel Speed Insights, PostHog and Sentry. One event per page view
  * (`everydeck.web.vitals`) with LCP, INP, CLS, FCP and TTFB as far as the browser reported them, and the page only as its pattern (`screens`).
  * No person, no address, no identifiers. everydeck never counts it towards the month and keeps only daily values per page.

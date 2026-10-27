@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.3
+
+- **When a record was created.** The read bridge delivers `created_at` from the column the database sets when a record is created (`created` in the read scope, per object type and for people), so everydeck can show the app's past from before it was connected. A timestamp as Postgres writes it as text (`2026-10-25 23:59:16.774+00`, offset without minutes) is read too.
+
 ## 0.5.2
 
 - **Schedules in plain SQL send their heartbeat through the outbox** (like Sentry Crons check-ins). `outbox/everydeck_outbox.sql` brings `everydeck_outbox.run_job('<job>', $job$ <command> $job$)` and `everydeck_outbox.job_heartbeat('<job>', 'ok' | 'error' | 'in_progress')`: a pg_cron job runs its command inside run_job, which writes the beat with its result into the outbox in the same transaction; the relay delivers it as the job heartbeat (`fields.job`, `fields.status`). No key in SQL. A failed command rolls back its writes and reports `error`; the schedule itself then ends without error (only the SQLSTATE goes to the log), because a failed schedule would roll back its beat too. Copy the new `everydeck_outbox.sql` unchanged as a new migration (idempotent; it adds the column `job_status`). The relay reads outboxes from before 0.5.2 as before. Update everydeck first: an older everydeck takes every job beat as a success.
