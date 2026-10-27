@@ -716,6 +716,10 @@
       }
      }
     },
+    "browser_subject": {
+      "$ref": "#/$defs/evidence",
+      "description": "Where the browser names the signed-in person to the everydeck SDK (everydeck.setSubject(<user id>), setSubject(null) on sign-out). Without it every visit and sign-in stays anonymous."
+    },
     "name_rule": {
      "type": "object",
      "additionalProperties": false,
@@ -1589,6 +1593,23 @@
     }
    },
    "description": "what the users of the app work with: the things they see, create or edit in the UI; one entry per table with the place in the UI (page or component, file:line); part_of names the table whose detail page shows it (CVs with the candidate, members with the workspace) and gets no menu item of its own. This list is the main navigation; every other table is under 'All data'. A description with evidence, no judgement: everydeck-check checks that the place exists and names the table (or carries a display location of the table)"
+  },
+  "core_object": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "table",
+    "evidence"
+   ],
+   "properties": {
+    "table": {
+     "$ref": "#/$defs/name"
+    },
+    "evidence": {
+     "$ref": "#/$defs/evidence"
+    }
+   },
+   "description": "The core object of the app, the kind of record its people create most (a job in a job board, a booking in a booking app, a note in a notes app): one table of works_with and the place in the UI or server where people create it. Creating it is always a built-in flow with a result signal (result.write insert on this table), like sign-in and sign-up; never only planned"
   },
   "flow_candidates": {
    "type": "array",

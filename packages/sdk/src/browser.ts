@@ -37,7 +37,9 @@ export interface BrowserOptions extends EverydeckOptions { /** keep where the pe
   /** report `console.error` as `browser.console_error` (on by default, off with `captureUnhandled: false` too): scrubbed text, frames of a passed error, never objects of the app */ captureConsole?: boolean;
   /** writes to Supabase (PostgREST `/rest/v1/<table>`) that the app map lists as `result.write` of a flow; each one becomes a run of that flow (start, error, id and platform as headers for the outbox trigger) */ writes?: BrowserWrite[];
   /** measure the load time of every page view (Core Web Vitals: LCP, INP, CLS, FCP, TTFB, with Google's web-vitals) and send it once when the page is hidden; the page only as its pattern, never counted towards the month. On by default in browsers, never in native apps */
-  captureVitals?: boolean }
+  captureVitals?: boolean;
+  /** a visit per page: one event `everydeck.sdk.page` on every change of the address (and every `screen()` in native apps) with the page only as its pattern (`screens`), the session of this page life and the person of `setSubject`; one event `everydeck.sdk.sign_in` when `setSubject` names a person who was not signed in on this device. Like PostHog `$pageview` and `$identify`. everydeck never counts them towards the month. On by default */
+  capturePageViews?: boolean }
 /** A write from the app map (`flows[].result.write`): flow, table, kind */
 export interface BrowserWrite { flow: string; table: string; kind: 'insert' | 'update' | 'upsert' | 'delete' }
 const WRITE_KINDS = new Set(['insert', 'update', 'upsert', 'delete']);
@@ -334,6 +336,15 @@ export function foreignRoute(path: string): string {
 interface XhrLike { status: number; responseType?: string; responseText?: string; response?: unknown; getResponseHeader?(name: string): string | null; addEventListener(type: string, fn: () => void): void; [XHR_INFO]?: { method: string; url: string } }
 
 
+/** A page view: the page as its pattern, never the address (like PostHog `$pageview`, Plausible `pageview`); sent in the normal batches */
+export const PAGE_EVENT = 'everydeck.sdk.page';
+/** A person signs in on this device: `setSubject` names a person after none or another one (like PostHog `$identify`) */
+export const SIGN_IN_EVENT = 'everydeck.sdk.sign_in';
+/** at most this many page views per page life; the rest arrives as a gap (a router in a loop never floods everydeck) */
+export const PAGE_VIEWS_MAX = 500;
+/** the person last signed in on this device, written only once `setSubject` names one and removed by `setSubject(null)` */
+const SIGNED_IN_KEY = 'everydeck.signed_in';
+
 /** Step with the origin of a person's first visit (like PostHog $initial_utm_* and $initial_referring_domain), sent once per person and device */
 export const ORIGIN_EVENT = 'everydeck.sdk.origin';
 export const UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
@@ -389,7 +400,7 @@ export class EverydeckBrowser {
     return null;
   }
   constructor(o: BrowserOptions) {
-    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, ...core } = o;
+    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, ...core } = o;
     // valid entries only (flow like a signal name, known kind)
     this.writes = (writes ?? []).filter((w) => w && SAFE.test(String(w.flow)) && typeof w.table === 'string' && w.table.length > 0 && WRITE_KINDS.has(w.kind)).slice(0, 200);
     // the original fetch: for the app's requests through the SDK and for the SDK's own sending (never through the wrapper)
@@ -404,6 +415,8 @@ export class EverydeckBrowser {
     const detected = found.later ? found.later.then((x) => { this.client.setClient({ ...x, ...(o.client ?? {}) }); }).catch(() => undefined) : Promise.resolve();
     this.screens = (screens ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 300);
     this.routeName = routeName ?? ((u: URL) => screenOf(pathOf(u), this.screens));
+    this.sessionId = sessionId ?? uuid();
+    this.pageViewsOn = capturePageViews !== false && this.client.opts.enabled;
     this.trackRoutes();
     // offline on the phone: save unsent events on exit and send them on the next start (everydeck deduplicates)
     const native = ['ios', 'android'].includes(this.client.getClient()?.platform ?? '');
@@ -412,7 +425,6 @@ export class EverydeckBrowser {
     this.keepRefused = !this.persistOn && persist !== false && this.client.opts.enabled;
     // restoring can be asynchronous (AsyncStorage): `ready` waits for it, and the first flush after that also sends the old events
     this.ready = Promise.all([detected, this.persistOn || this.keepRefused ? this.restorePending() : Promise.resolve()]).then(() => undefined);
-    this.sessionId = sessionId ?? uuid();
     this.baseFetch = (o.fetch ?? orig ?? ((...a: Parameters<typeof fetch>) => globalThis.fetch(...a)));
     this.apiRoutes = (apiRoutes ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 500);
     // the path of a request only as a pattern, also the result of a custom sanitizeRoute function
@@ -605,13 +617,29 @@ export class EverydeckBrowser {
     if (this.unknownSeen.size >= 20) { this.client.noteLoss('sdk_unknown_pages'); return; }
     this.unknownSeen.add(s.shape); this.breadcrumb(UNKNOWN_SCREEN, { shape: s.shape, depth: s.depth });
   }
-  screen(name: string): void { const raw = String(name); if (raw.startsWith('/')) this.unknownScreen(raw); this.pushTrail(raw); }
+  screen(name: string): void { const raw = String(name); if (raw.startsWith('/')) this.unknownScreen(raw); this.pushTrail(raw); this.pageView(raw.replace(/[?#].*$/, ''), raw); }
+  private pageViewsOn = false;
+  private pageViews = 0;
+  /** the address (path) of the last page view: a new one only when it changes (a query or a replaceState to the same path is the same page) */
+  private lastPage: string | null = null;
+  /** one page view: the page as its pattern (or the screen name of a native app), the session, the person if known */
+  private pageView(path: string, name: string): void {
+    if (!this.pageViewsOn || path === this.lastPage) return;
+    this.lastPage = path;
+    const screen = this.pageName(name); if (!screen) return;
+    if (this.pageViews >= PAGE_VIEWS_MAX) { this.client.noteLoss('sdk_page_views'); return; }
+    this.pageViews++;
+    const { sessionId, ...r } = this.ctxRefs(null);
+    this.client.breadcrumb(PAGE_EVENT, sessionId, { ...r, fields: { screen } });
+  }
+  /** a page as everydeck keeps it: an address only as its pattern, a screen name without query or blanks */
+  private pageName(raw: string): string { return (raw.startsWith('/') ? screenOf(raw, this.screens) : raw.replace(/[?#\s].*$/, '')).slice(0, 200); }
   private pushTrail(raw: string): void { const n = (raw.startsWith('/') ? screenOf(raw, this.screens) : raw.replace(/[?#\s].*$/, '')).slice(0, 80); if (!n || this.trailList.at(-1) === n) return; this.trailList.push(n); if (this.trailList.length > 10) this.trailList.shift(); }
   /** Path before the error (copy) */
   trail(): string[] { return [...this.trailList]; }
   private trackRoutes(): void {
     const g = globalThis as unknown as { location?: { href?: string }; history?: { pushState?: (...a: unknown[]) => void; replaceState?: (...a: unknown[]) => void }; addEventListener?: (t: string, f: () => void) => void };
-    const note = () => { try { if (g.location?.href) { const u = new URL(g.location.href); this.unknownScreen(pathOf(u)); this.pushTrail(this.routeName(u)); } } catch { /* no address */ } };
+    const note = () => { try { if (g.location?.href) { const u = new URL(g.location.href); this.unknownScreen(pathOf(u)); const name = this.routeName(u); this.pushTrail(name); this.pageView(pathOf(u), name); } } catch { /* no address */ } };
     note();
     if (g.history && typeof g.history.pushState === 'function') {
       for (const k of ['pushState', 'replaceState'] as const) {
@@ -653,6 +681,26 @@ export class EverydeckBrowser {
   setSubject(subjectRef: string | null, accountRef?: string | null): void {
     this.subject = { ...(subjectRef ? { subjectRef } : {}), ...(accountRef ? { accountRef } : {}) };
     if (subjectRef) void this.sendOrigin(subjectRef);
+    if (this.pageViewsOn) void this.noteSignIn(subjectRef);
+  }
+  /** without a storage: the person signed in on this page life */
+  private signedIn: string | null = null;
+  /**
+   * `everydeck.sdk.sign_in` once a person is named who was not signed in on this device (like PostHog `$identify` after an anonymous visit): a restored
+   * session after a reload (the same person again) is no sign-in. `setSubject(null)` (signed out) forgets the person. Without a storage once per page life.
+   */
+  private async noteSignIn(subjectRef: string | null): Promise<void> {
+    try {
+      const st = this.storage();
+      const got = st ? st.getItem(SIGNED_IN_KEY) : this.signedIn; const was = got instanceof Promise ? await got : got;
+      if (!subjectRef) { this.signedIn = null; if (st && was !== null) { const w = st.removeItem(SIGNED_IN_KEY); if (w instanceof Promise) await w; } return; }
+      if (was === subjectRef) return;
+      this.signedIn = subjectRef;
+      if (st) { const w = st.setItem(SIGNED_IN_KEY, subjectRef); if (w instanceof Promise) await w; }
+      // the person of this call, even if setSubject changed meanwhile (asynchronous storage)
+      const page = this.trailList.at(-1);
+      this.client.breadcrumb(SIGN_IN_EVENT, this.sessionId, { subjectRef, ...(this.subject.subjectRef === subjectRef && this.subject.accountRef ? { accountRef: this.subject.accountRef } : {}), ...(page ? { fields: { screen: page } } : {}) });
+    } catch { /* storage blocked: no sign-in sent */ }
   }
   /** Origin of the first visit on this device (null: not kept) */
   private readonly origin: Promise<Record<string, string> | null>;

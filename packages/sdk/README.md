@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.4
+
+- **Visits and sign-ins arrive by themselves** (like PostHog `$pageview` and `$identify`). The browser SDK sends one event `everydeck.sdk.page` for every change of the address (and every `screen()` of a native app) with the page only as its pattern from `screens` (`/jobs/:jobId`, never the address with an id or a query), the session of this page life and the person of `setSubject`. `setSubject` with a person who was not signed in on this device sends `everydeck.sdk.sign_in` once; a reload with the same person is no sign-in, `setSubject(null)` (signed out) forgets the person (the only thing kept in the browser's storage, and only while someone is signed in). Page views go out in the normal batches; at most 500 per page life, the rest is reported as a gap (`sdk_page_views`). everydeck never counts them towards the month. Off with `capturePageViews: false`. Nothing to build into the app: `screens` and `setSubject` are already part of the setup. An older everydeck keeps these events out, so update everydeck first.
+
 ## 0.5.3
 
 - **When a record was created.** The read bridge delivers `created_at` from the column the database sets when a record is created (`created` in the read scope, per object type and for people), so everydeck can show the app's past from before it was connected. A timestamp as Postgres writes it as text (`2026-10-25 23:59:16.774+00`, offset without minutes) is read too.

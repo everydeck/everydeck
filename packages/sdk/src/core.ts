@@ -156,7 +156,7 @@ export interface EverydeckOptions {
 export interface ConfigValues { endpoint: string | null; credential: string | null; manifestDigest: string | null }
 export interface EverydeckStats { enqueued: number; accepted: number; retries: number; dropped_overflow: number; dropped_rejected: number; dropped_oversize: number; batches_accepted: number; batches_retried: number; batches_rejected: number; send_errors: number; unreported_loss: number; last_error: string | null; /** compression */ batches_compressed: number; bytes_raw: number; bytes_sent: number; retry_after_waits: number }
 /** Limits of the SDK at which it drops events; reported to everydeck as a gap `everydeck.sdk.loss` (cause `sdk_limit`, with the limit), so the owner sees them under Plan and limits and gets an e-mail */
-export type SdkLimit = 'sdk_event_bytes' | 'sdk_pending_web' | 'sdk_console_errors' | 'sdk_unknown_pages' | 'sdk_vitals_navigations' | 'sdk_vitals_events' | 'sdk_payment_id' | 'sdk_hang_reports';
+export type SdkLimit = 'sdk_event_bytes' | 'sdk_pending_web' | 'sdk_console_errors' | 'sdk_unknown_pages' | 'sdk_vitals_navigations' | 'sdk_vitals_events' | 'sdk_payment_id' | 'sdk_hang_reports' | 'sdk_page_views';
 interface Event { event_id: string; kind: 'signal' | 'error' | 'breadcrumb' | 'log' | 'gap'; name: string; occurred_at: string; [k: string]: unknown }
 interface Batch { schema_version: string; batch_id: string; release_key: string; manifest_digest: string; probe_id?: string; events: Event[] }
 

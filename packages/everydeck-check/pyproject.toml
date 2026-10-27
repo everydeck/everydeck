@@ -1,6 +1,6 @@
 [project]
 name = "everydeck-check"
-version = "0.3.9"
+version = "0.3.10"
 description = "everydeck check for app repositories: validate the app map, detect drift of everydeck calls, re-anchor places, publish"
 readme = "README.md"
 license = "MIT"

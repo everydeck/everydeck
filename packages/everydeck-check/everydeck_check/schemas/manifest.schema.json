@@ -155,6 +155,13 @@
               "verification"
             ],
             "description": "1.12-r0: the flow is the app's sign-up, sign-in, password reset, payment or identity check (from flows[].purpose of the app map)"
+          },
+          "recorded_by": {
+            "enum": [
+              "browser_sign_in",
+              "auth_sign_ups"
+            ],
+            "description": "everydeck records this flow without a signal in the app's code: browser_sign_in from the sign-ins the browser SDK reports once the app names the person (identity.browser_subject), auth_sign_ups from the created_at of the accounts in auth.users that the read bridge reads"
           }
         },
         "required": [

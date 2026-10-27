@@ -537,7 +537,7 @@ def digest(manifest: dict[str, Any]) -> str:
 
 @dataclass
 class Finding:
-    kind: str          # missing_file | missing_symbol | signal_not_in_symbol | call_sites_decreased | new_build | job_not_in_heartbeat | screen_not_in_code | api_route_not_in_code
+    kind: str          # missing_file | missing_symbol | signal_not_in_symbol | call_sites_decreased | new_build | job_not_in_heartbeat | screen_not_in_code | api_route_not_in_code | subject_not_in_code
     signal: str
     where: str
 
@@ -644,6 +644,7 @@ def check_drift(repo: Path, manifest: dict[str, Any], lock: dict[str, int] | Non
             rep.findings.append(Finding("new_build", s["name"], f"manifest@{loc['commit'][:7]} repo@{rep.head[:7]}"))
     check_jobs(repo, manifest, rep)
     check_screens(repo, manifest, rep)
+    check_subject(repo, manifest, rep)
     return rep
 
 
@@ -727,6 +728,31 @@ def check_screens(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> Non
             continue
         rep.findings.append(Finding("screen_not_in_code" if kind == "screen" else "api_route_not_in_code", f"{kind}:{p}",
                                     f"not passed to the SDK (initEverydeckBrowser({{ {'screens' if kind == 'screen' else 'apiRoutes'} }}))"))
+
+
+_SIGN_IN_PURPOSES = {"sign_in", "sign_up"}
+
+
+def check_subject(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
+    """An app with people who sign in (`people` in the app map or a flow with purpose sign_in/sign_up) and the browser SDK names the signed-in person
+    to the SDK (`everydeck.setSubject(<user id>)` where the browser learns the person, `setSubject(null)` on sign-out). Without it every visit and every
+    sign-in stays anonymous: nobody counts as active, Live shows only "a visitor", Users never shows "last active" (like PostHog without `identify`)."""
+    people = bool(manifest.get("people")) or any(c.get("purpose") in _SIGN_IN_PURPOSES for c in manifest.get("capabilities", []) or [])
+    if not people:
+        return
+    browser = False
+    for f in repo.rglob("*"):
+        if any(part in _SCREEN_SKIP for part in f.relative_to(repo).parts) or not f.is_file() or f.suffix not in _SCREEN_EXT or f.suffix in {".json", ".py", ".html"}:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        browser = browser or "initEverydeckBrowser" in text
+        if ".setSubject(" in text:
+            return
+    if browser:
+        rep.findings.append(Finding("subject_not_in_code", "setSubject", "the browser SDK never learns who is signed in: call everydeck.setSubject(<user id>) where the app learns the signed-in person (and setSubject(null) on sign-out), otherwise visits and sign-ins stay anonymous"))
 
 
 def freeze_lock(report: DriftReport) -> dict[str, Any]:

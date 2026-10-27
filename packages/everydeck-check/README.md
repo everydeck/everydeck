@@ -23,6 +23,11 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.10
+
+- `validate` asks for the built-in flows: sign-in, sign-up and creating the core object are never only planned. A sign-in flow needs a result signal unless `identity.browser_subject` names the place of `everydeck.setSubject` (the browser SDK reports every sign-in); a sign-up flow needs one unless the app uses Supabase Auth with `identity.auth_table` `auth.users` (everydeck reads each new account from `created_at`). The new `core_object` (`{ table, evidence }`, a table of `works_with`) names what the people of the app create most; the flow that inserts it needs a result signal, and an app map whose people create records without it is refused. The place of `core_object` is checked like every place. Every other flow may stay planned.
+- `drift` reports `subject_not_in_code` when an app with people who sign in uses the browser SDK but never calls `everydeck.setSubject(<user id>)`: without it every visit and every sign-in stays anonymous.
+
 ### 0.3.9
 
 - `local-db --repo .`: finds the app's local database without the agent reading an env file: `supabase/config.toml` of the repository (the port under `[db]`, 54322 when it names none), else a variable in the app's env files that points to the gateway of a running local Supabase stack (Docker label `com.supabase.cli.project`, the stack's database port), else a local PostgreSQL with the fixed local password. Exit 0 when found, 2 otherwise, with the next step.

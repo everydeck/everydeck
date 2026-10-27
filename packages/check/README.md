@@ -23,6 +23,10 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.10
+
+- The bundled rules ask for the built-in flows: sign-in, sign-up and creating the core object (`core_object` in the app map) are never only planned; sign-in needs no signal of its own with `identity.browser_subject`, sign-up none with Supabase Auth (`auth.users`).
+
 ### 0.3.7
 
 - The bundled rules no longer accept `unsupported` for a schedule everydeck-check finds (pg_cron in SQL, a GitHub Actions workflow, vercel.json, render.yaml): each of them can send a heartbeat (through the outbox, or with a check-in step at the end of the run), so the part stays open with the way to do it.

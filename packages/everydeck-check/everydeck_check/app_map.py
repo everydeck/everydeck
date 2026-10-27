@@ -440,6 +440,10 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
             if v: _check_evidence(files, v["evidence"], f"identity.fields.{k}", [v["column"]], errs)
         if ident.get("suspend"): _check_evidence(files, ident["suspend"]["checked"], "identity.suspend.checked", [ident["suspend"]["column"]], errs)
         for j, m in enumerate(ident.get("memberships", []) or []): _check_evidence(files, m["evidence"], f"identity.memberships[{j}]", [m["table"]], errs)
+        # the browser names the signed-in person to the SDK there (visits and sign-ins, without it every visit stays anonymous)
+        if ident.get("browser_subject"): _check_evidence(files, ident["browser_subject"], "identity.browser_subject", ["setSubject"], errs)
+    # the core object (what the people of the app create most): the place where they create it exists
+    if b.get("core_object"): _check_evidence(files, b["core_object"]["evidence"], f"core_object {b['core_object']['table']}", [], errs)
     # the place of the description "what the users work with" is in the UI and names the table, or it coincides with a
     # display location of the table (e.g. a route call whose handler returns the table, or a visible element with a label)
     tables_by_name = {t["name"]: t for t in b.get("tables", [])}
