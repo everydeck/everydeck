@@ -718,7 +718,7 @@
     },
     "browser_subject": {
       "$ref": "#/$defs/evidence",
-      "description": "Where the browser names the signed-in person to the everydeck SDK (everydeck.setSubject(<user id>), setSubject(null) on sign-out). Without it every visit and sign-in stays anonymous."
+      "description": "Where the browser names the signed-in person to the everydeck SDK (everydeck.setSubject(<user id>); everydeck.reset() where the app signs the person out, never setSubject(null) for that). Without it every visit and sign-in stays anonymous."
     },
     "name_rule": {
      "type": "object",

@@ -23,6 +23,10 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.11
+
+- The bundled rules skip schedules whose name is a placeholder (`<job>`) or everydeck's own, and count a flow whose result the browser writes straight into the database as built in (the browser SDK records it through `writes`). The bundled rules ask for `everydeck.reset()` where the app signs the person out, never `setSubject(null)` (browser SDK 0.5.5).
+
 ### 0.3.10
 
 - The bundled rules ask for the built-in flows: sign-in, sign-up and creating the core object (`core_object` in the app map) are never only planned; sign-in needs no signal of its own with `identity.browser_subject`, sign-up none with Supabase Auth (`auth.users`).

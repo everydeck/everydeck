@@ -23,6 +23,12 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.11
+
+- The inventory no longer reads a schedule out of an SQL comment: `cron.schedule('<job>', '<rhythm>', …)` in the comment of everydeck's own outbox migration became an open part "Scheduled job <job>". Names that are a placeholder (`<…>`) are skipped as well.
+- `validate` counts a flow whose result the browser writes straight into the database (a `browser_write` candidate with the same table and kind) as built in: the browser SDK records each such write as a run (`writes`), so it is never shown as only planned.
+- Sign-out is `everydeck.reset()` (browser SDK 0.5.5, like PostHog): `drift` (`subject_not_in_code`) and the app map schema (`identity.browser_subject`) no longer say `setSubject(null)` on sign-out. `setSubject(null)` while the app loads its session made every reload count as a new sign-in.
+
 ### 0.3.10
 
 - `validate` asks for the built-in flows: sign-in, sign-up and creating the core object are never only planned. A sign-in flow needs a result signal unless `identity.browser_subject` names the place of `everydeck.setSubject` (the browser SDK reports every sign-in); a sign-up flow needs one unless the app uses Supabase Auth with `identity.auth_table` `auth.users` (everydeck reads each new account from `created_at`). The new `core_object` (`{ table, evidence }`, a table of `works_with`) names what the people of the app create most; the flow that inserts it needs a result signal, and an app map whose people create records without it is refused. The place of `core_object` is checked like every place. Every other flow may stay planned.

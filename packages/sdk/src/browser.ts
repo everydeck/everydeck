@@ -40,9 +40,29 @@ export interface BrowserOptions extends EverydeckOptions { /** keep where the pe
   captureVitals?: boolean;
   /** a visit per page: one event `everydeck.sdk.page` on every change of the address (and every `screen()` in native apps) with the page only as its pattern (`screens`), the session of this page life and the person of `setSubject`; one event `everydeck.sdk.sign_in` when `setSubject` names a person who was not signed in on this device. Like PostHog `$pageview` and `$identify`. everydeck never counts them towards the month. On by default */
   capturePageViews?: boolean }
-/** A write from the app map (`flows[].result.write`): flow, table, kind */
-export interface BrowserWrite { flow: string; table: string; kind: 'insert' | 'update' | 'upsert' | 'delete' }
+/**
+ * A write from the app map (`flows[].result.write`): flow, table, kind. Since 0.5.5, as everydeck hands them out: `object` (the object type of the table)
+ * with `key` (its key column) names the record of an update or delete from the request's filter (`?id=eq.<ref>`, a reference like the outbox sends), and
+ * `status` (the status column) the new status an update sets, only when it is a short code (`confirmed`, `completed`), never another value of the body.
+ */
+export interface BrowserWrite { flow: string; table: string; kind: 'insert' | 'update' | 'upsert' | 'delete'; object?: string; key?: string; status?: string }
 const WRITE_KINDS = new Set(['insert', 'update', 'upsert', 'delete']);
+const OBJECT_TYPE = /^[a-z][a-z0-9_-]{0,31}$/;
+const COLUMN = /^[a-z_][a-z0-9_]{0,62}$/;
+/** a status as the database stores it: a short code, never free text */
+const STATUS_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+/** The record of an update or delete from PostgREST's filter on the key column (`?id=eq.<ref>`); none for a filter on anything else or on several records */
+export function postgrestRecord(url: URL, key: string): string | null {
+  const all = url.searchParams.getAll(key);
+  if (all.length !== 1) return null;
+  const m = /^eq\.(.{1,128})$/.exec(all[0]!);
+  return m ? m[1]! : null;
+}
+/** The new status an update sets: the status column of a JSON body that is one record, only a short code */
+export function postgrestStatus(body: unknown, column: string): string | null {
+  if (typeof body !== 'string' || body.length > 100_000) return null;
+  try { const v = (JSON.parse(body) as Record<string, unknown> | null)?.[column]; return typeof v === 'string' && STATUS_CODE.test(v) ? v : null; } catch { return null; }
+}
 /** Kind of a PostgREST call to a table: POST = insert (with `Prefer: resolution=…` upsert), PUT = upsert, PATCH = update, DELETE = delete */
 export function postgrestWrite(method: string, url: URL, prefer: string | null): { table: string; kind: BrowserWrite['kind'] } | null {
   const segs = url.pathname.split('/').filter(Boolean);
@@ -342,7 +362,7 @@ export const PAGE_EVENT = 'everydeck.sdk.page';
 export const SIGN_IN_EVENT = 'everydeck.sdk.sign_in';
 /** at most this many page views per page life; the rest arrives as a gap (a router in a loop never floods everydeck) */
 export const PAGE_VIEWS_MAX = 500;
-/** the person last signed in on this device, written only once `setSubject` names one and removed by `setSubject(null)` */
+/** the person last signed in on this device, written only once `setSubject` names one and removed by `reset()` */
 const SIGNED_IN_KEY = 'everydeck.signed_in';
 
 /** Step with the origin of a person's first visit (like PostHog $initial_utm_* and $initial_referring_domain), sent once per person and device */
@@ -402,7 +422,8 @@ export class EverydeckBrowser {
   constructor(o: BrowserOptions) {
     const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, ...core } = o;
     // valid entries only (flow like a signal name, known kind)
-    this.writes = (writes ?? []).filter((w) => w && SAFE.test(String(w.flow)) && typeof w.table === 'string' && w.table.length > 0 && WRITE_KINDS.has(w.kind)).slice(0, 200);
+    this.writes = (writes ?? []).filter((w) => w && SAFE.test(String(w.flow)) && typeof w.table === 'string' && w.table.length > 0 && WRITE_KINDS.has(w.kind)).slice(0, 200)
+      .map((w) => ({ flow: w.flow, table: w.table, kind: w.kind, ...(w.object && OBJECT_TYPE.test(w.object) && w.key && COLUMN.test(w.key) ? { object: w.object, key: w.key } : {}), ...(w.status && COLUMN.test(w.status) ? { status: w.status } : {}) }));
     // the original fetch: for the app's requests through the SDK and for the SDK's own sending (never through the wrapper)
     const g0 = globalThis as unknown as { fetch?: typeof fetch & { [PATCHED]?: boolean; [ORIGINAL]?: typeof fetch } };
     const orig: typeof fetch | null = typeof g0.fetch === 'function' ? (g0.fetch[ORIGINAL] ?? g0.fetch.bind(globalThis)) : null;
@@ -417,6 +438,9 @@ export class EverydeckBrowser {
     this.routeName = routeName ?? ((u: URL) => screenOf(pathOf(u), this.screens));
     this.sessionId = sessionId ?? uuid();
     this.pageViewsOn = capturePageViews !== false && this.client.opts.enabled;
+    // the person signed in on this device (until reset()) carries the page views until the app names someone, like PostHog's stored distinct_id after a
+    // reload; otherwise the first page view after every reload would stay anonymous (a restored session sends no sign-in that could claim it)
+    if (this.pageViewsOn) { try { const v = this.storage()?.getItem(SIGNED_IN_KEY); if (typeof v === 'string' && v) this.restored = v; } catch { /* storage blocked */ } }
     this.trackRoutes();
     // offline on the phone: save unsent events on exit and send them on the next start (everydeck deduplicates)
     const native = ['ios', 'android'].includes(this.client.getClient()?.platform ?? '');
@@ -630,7 +654,7 @@ export class EverydeckBrowser {
     if (this.pageViews >= PAGE_VIEWS_MAX) { this.client.noteLoss('sdk_page_views'); return; }
     this.pageViews++;
     const { sessionId, ...r } = this.ctxRefs(null);
-    this.client.breadcrumb(PAGE_EVENT, sessionId, { ...r, fields: { screen } });
+    this.client.breadcrumb(PAGE_EVENT, sessionId, { ...r, ...(!r.subjectRef && this.restored ? { subjectRef: this.restored } : {}), fields: { screen } });
   }
   /** a page as everydeck keeps it: an address only as its pattern, a screen name without query or blanks */
   private pageName(raw: string): string { return (raw.startsWith('/') ? screenOf(raw, this.screens) : raw.replace(/[?#\s].*$/, '')).slice(0, 200); }
@@ -677,23 +701,39 @@ export class EverydeckBrowser {
       this.client.importPending(JSON.parse(raw));
     } catch { /* corrupt: discard */ }
   }
-  /** Known person/organization of this session (a claim; it only becomes authoritative through the server's identity source). */
+  /**
+   * Known person/organization of this session (a claim; it only becomes authoritative through the server's identity source). `null` only says that nobody
+   * is known right now, for example while the app still restores its session after a reload; it is no sign-out (like PostHog `identify`). Call `reset()`
+   * where the person signs out.
+   */
   setSubject(subjectRef: string | null, accountRef?: string | null): void {
     this.subject = { ...(subjectRef ? { subjectRef } : {}), ...(accountRef ? { accountRef } : {}) };
     if (subjectRef) void this.sendOrigin(subjectRef);
-    if (this.pageViewsOn) void this.noteSignIn(subjectRef);
+    if (subjectRef) this.restored = null;
+    if (this.pageViewsOn && subjectRef) void this.noteSignIn(subjectRef);
+  }
+  /**
+   * The person signs out (like PostHog `reset()`): forgets the person of this session and of this device, so the next person named is a sign-in again.
+   * Only where the app signs someone out, never for a session that is not loaded yet.
+   */
+  reset(): void {
+    this.subject = {};
+    this.signedIn = null; this.restored = null;
+    try { const st = this.storage(); const w = st?.removeItem(SIGNED_IN_KEY); if (w instanceof Promise) void w.catch(() => undefined); } catch { /* storage blocked */ }
   }
   /** without a storage: the person signed in on this page life */
   private signedIn: string | null = null;
+  /** the person signed in on this device when this page life began (read once, synchronous storage only), until setSubject names one or reset() */
+  private restored: string | null = null;
   /**
    * `everydeck.sdk.sign_in` once a person is named who was not signed in on this device (like PostHog `$identify` after an anonymous visit): a restored
-   * session after a reload (the same person again) is no sign-in. `setSubject(null)` (signed out) forgets the person. Without a storage once per page life.
+   * session after a reload (the same person again) is no sign-in, also when the app named nobody (`setSubject(null)`) while it loaded. Only `reset()` (signed
+   * out) forgets the person. Without a storage once per page life.
    */
-  private async noteSignIn(subjectRef: string | null): Promise<void> {
+  private async noteSignIn(subjectRef: string): Promise<void> {
     try {
       const st = this.storage();
       const got = st ? st.getItem(SIGNED_IN_KEY) : this.signedIn; const was = got instanceof Promise ? await got : got;
-      if (!subjectRef) { this.signedIn = null; if (st && was !== null) { const w = st.removeItem(SIGNED_IN_KEY); if (w instanceof Promise) await w; } return; }
       if (was === subjectRef) return;
       this.signedIn = subjectRef;
       if (st) { const w = st.setItem(SIGNED_IN_KEY, subjectRef); if (w instanceof Promise) await w; }
@@ -822,11 +862,14 @@ export class EverydeckBrowser {
     const ownHost = (globalThis as { location?: { host?: string } }).location?.host ?? null;
     const everydeckOwn = !!url && !!this.endpoint && url.href.startsWith(this.endpoint);
     // a declared write without an action becomes a run of its flow: start now, result from the database (outbox), error from the response
-    let implicit = false;
+    let implicit = false; let toStatus: string | null = null;
     if (!ctx && this.writes.length && this.client.opts.enabled && url && !everydeckOwn) {
       const pw = postgrestWrite(method, url, new Headers(init?.headers ?? req?.headers ?? undefined).get('prefer'));
       const w = pw ? this.writes.find((x) => x.table === pw.table && x.kind === pw.kind) : undefined;
-      if (w) { ctx = this.newContext(w.flow, { ...this.subject }, uuid(), 1); implicit = true; const { sessionId, ...r } = this.ctxRefs(ctx); this.client.breadcrumb(`${w.flow}.started`, sessionId, r); }
+      // 0.5.5: the record of an update or delete (filter on the key column) and the new status of an update, as everydeck names them in `writes`
+      const ref = w?.object && w.key && (w.kind === 'update' || w.kind === 'delete') ? postgrestRecord(url, w.key) : null;
+      if (w) { ctx = this.newContext(w.flow, { ...this.subject, ...(ref ? { objectType: w.object!, objectRef: ref } : {}) }, uuid(), 1); implicit = true; const { sessionId, ...r } = this.ctxRefs(ctx); this.client.breadcrumb(`${w.flow}.started`, sessionId, r); }
+      if (w?.status && w.kind === 'update') toStatus = postgrestStatus(init?.body ?? null, w.status);
     }
     // without an action every host (the app's fully, others only 5xx; backgroundAnswer); never everydeck's own sending
     const background = !ctx && this.client.opts.enabled && !!url && !everydeckOwn;
@@ -849,7 +892,7 @@ export class EverydeckBrowser {
           const base = { ...r, sessionId, trail: this.trail(), http, message: `HTTP ${res.status} at ${http.route}` };
           void this.answer(res).then((response) => this.client.error(`${ctx!.name}.request_failed`, `http_${res.status}`, { ...base, ...(response ? { response } : {}) }));
         }
-        else if (implicit) this.client.breadcrumb(`${ctx!.name}.finished`, sessionId, { ...r, http, fields: { duration_ms: http.durationMs ?? 0 } });   // the write is the whole browser part of the run
+        else if (implicit) this.client.breadcrumb(`${ctx!.name}.finished`, sessionId, { ...r, http, fields: { duration_ms: http.durationMs ?? 0, ...(toStatus ? { to_status: toStatus } : {}) } });   // the write is the whole browser part of the run
         else if (method !== 'GET' && method !== 'HEAD') this.client.breadcrumb(`${ctx!.name}.request`, sessionId, { ...r, http });
       }
       return res;

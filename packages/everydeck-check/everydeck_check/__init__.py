@@ -735,7 +735,8 @@ _SIGN_IN_PURPOSES = {"sign_in", "sign_up"}
 
 def check_subject(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
     """An app with people who sign in (`people` in the app map or a flow with purpose sign_in/sign_up) and the browser SDK names the signed-in person
-    to the SDK (`everydeck.setSubject(<user id>)` where the browser learns the person, `setSubject(null)` on sign-out). Without it every visit and every
+    to the SDK (`everydeck.setSubject(<user id>)` where the browser learns the person, `everydeck.reset()` where the app signs the person out; like
+    PostHog, `setSubject(null)` is no sign-out, so a session restored after a reload is no new sign-in). Without it every visit and every
     sign-in stays anonymous: nobody counts as active, Live shows only "a visitor", Users never shows "last active" (like PostHog without `identify`)."""
     people = bool(manifest.get("people")) or any(c.get("purpose") in _SIGN_IN_PURPOSES for c in manifest.get("capabilities", []) or [])
     if not people:
@@ -752,7 +753,7 @@ def check_subject(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> Non
         if ".setSubject(" in text:
             return
     if browser:
-        rep.findings.append(Finding("subject_not_in_code", "setSubject", "the browser SDK never learns who is signed in: call everydeck.setSubject(<user id>) where the app learns the signed-in person (and setSubject(null) on sign-out), otherwise visits and sign-ins stay anonymous"))
+        rep.findings.append(Finding("subject_not_in_code", "setSubject", "the browser SDK never learns who is signed in: call everydeck.setSubject(<user id>) where the app learns the signed-in person (and everydeck.reset() where it signs the person out, not setSubject(null)), otherwise visits and sign-ins stay anonymous"))
 
 
 def freeze_lock(report: DriftReport) -> dict[str, Any]:

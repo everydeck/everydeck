@@ -41,13 +41,26 @@ def _own(name: str) -> bool:
     return name.lower().startswith("everydeck")
 
 
+# SQL comments (-- to the end of the line, /* … */): blanked with the same length, so line numbers stay; a schedule in a comment is an example, not a schedule
+SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
+
+
+def _no_comments(text: str) -> str:
+    return SQL_COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+
+
+def _placeholder(name: str) -> bool:
+    return "<" in name or ">" in name
+
+
 def _pg_cron(rel: Path, text: str, out: list[dict[str, Any]], dropped: set[str]) -> None:
+    text = _no_comments(text)
     for m in PG_UNSCHEDULE.finditer(text): dropped.add(m.group(1))
     for m in PG_SCHEDULE.finditer(text):
         first, second = m.group(1), m.group(2)
         if first is None and second is None: continue
         name, every = (first, second) if second is not None else (None, first)
-        if name and _own(name): continue
+        if name and (_own(name) or _placeholder(name)): continue
         line = text.count("\n", 0, m.start()) + 1
         out.append({"source": "pg_cron", "name": name or f"{rel.as_posix()}:{line}", "every": every or "?", "evidence": {"path": rel.as_posix(), "line": line, "symbol": "cron.schedule"}})
 
