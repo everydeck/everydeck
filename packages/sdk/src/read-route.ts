@@ -88,6 +88,10 @@ export interface ReadRouteOptions {
 const unavailable = (error: string): ReadBridgeResponse => ({ status: 503, body: { error } });
 const ROLE_SQL = "SELECT current_user::text AS role, r.rolsuper AS superuser, r.rolbypassrls AS bypass_rls, current_setting('transaction_read_only') AS read_only FROM pg_roles r WHERE r.rolname = current_user";
 
+/** Longest wait of one pull (GET /v1/read-bridge/next?wait=…), like GitHub's runners (50 s, under the 60 s of common proxies); everydeck answers 204 when
+ *  nothing came. 0.5.6: 50 s (before 25 s); an older everydeck caps it at 25 s itself */
+export const PULL_WAIT_S = 50;
+
 export function everydeckReadBridge(o: ReadRouteOptions) {
   const keys = [o.key, ...(o.previousKey ? [o.previousKey] : [])].filter((k) => typeof k === 'string' && k.length > 0);
   const endpoint = (o.endpoint ?? '').replace(/\/+$/, '');
@@ -154,10 +158,10 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
    * one request or after `waitSeconds` without one; `pull` keeps doing this until `budgetMs` has passed or `signal` aborts.
    */
   const f = () => o.fetch ?? fetch;
-  async function pullOnce(waitSeconds = 25, signal?: AbortSignal): Promise<'answered' | 'idle' | 'refused' | 'unreachable'> {
+  async function pullOnce(waitSeconds = PULL_WAIT_S, signal?: AbortSignal): Promise<'answered' | 'idle' | 'refused' | 'unreachable'> {
     if (!endpoint || !keys.length) return 'refused';
     let res: Response;
-    try { res = await f()(`${endpoint}/v1/read-bridge/next?wait=${Math.max(0, Math.min(25, waitSeconds))}`, { headers: { authorization: `Bearer ${keys[0]}`, accept: 'application/json' }, ...(signal ? { signal } : {}) }); }
+    try { res = await f()(`${endpoint}/v1/read-bridge/next?wait=${Math.max(0, Math.min(PULL_WAIT_S, waitSeconds))}`, { headers: { authorization: `Bearer ${keys[0]}`, accept: 'application/json' }, ...(signal ? { signal } : {}) }); }
     catch { return 'unreachable'; }
     if (res.status === 204) { await res.body?.cancel(); return 'idle'; }
     if (res.status === 401 || res.status === 403 || res.status === 409) { await res.body?.cancel(); return 'refused'; }
@@ -169,13 +173,14 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
     catch { return 'unreachable'; }
     return 'answered';
   }
-  async function pull(opts: { budgetMs?: number; signal?: AbortSignal } = {}): Promise<void> {
-    const end = Date.now() + (opts.budgetMs ?? Infinity);
+  /** `waitSeconds`: longest wait of one pull (default and at most PULL_WAIT_S, 50 s), lower behind a proxy that cuts requests earlier */
+  async function pull(opts: { budgetMs?: number; signal?: AbortSignal; waitSeconds?: number } = {}): Promise<void> {
+    const end = Date.now() + (opts.budgetMs ?? Infinity); const most = Math.max(1, Math.min(PULL_WAIT_S, opts.waitSeconds ?? PULL_WAIT_S));
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     while (!opts.signal?.aborted) {
       const left = end - Date.now();
       if (left < 2_000) return;
-      const out = await pullOnce(Math.min(25, Math.floor((left - 1_000) / 1000)), opts.signal);
+      const out = await pullOnce(Math.min(most, Math.floor((left - 1_000) / 1000)), opts.signal);
       // not set up yet or everydeck away: wait, with jitter (like Buildkite's agents), and ask again
       if (out === 'refused') await sleep(Math.min(left, 30_000 + Math.random() * 5_000));
       else if (out === 'unreachable') await sleep(Math.min(left, 2_000 + Math.random() * 3_000));
@@ -185,10 +190,11 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
   const startPull = (): (() => void) => { const ac = new AbortController(); void pull({ signal: ac.signal }); return () => ac.abort(); };
   /**
    * Supabase Edge Function: the schedule calls it every minute; it answers at once and pulls in the background (EdgeRuntime.waitUntil) for `budgetMs`
-   * (default 125 s, under the 150 s wall clock of Supabase's free plan), so two calls overlap and one is always connected.
+   * (default 100 s, under the 150 s wall clock of Supabase's free plan), so two calls overlap and one is always connected. 0.5.6: two long polls of 50 s
+   * per call (before: five of 25 s in 125 s), so a quiet bridge asks everydeck about 120 times an hour instead of 300.
    */
   const pullHandler = (opts: { budgetMs?: number } = {}) => (_req: Request): Response => {
-    const work = pull({ budgetMs: opts.budgetMs ?? 125_000 });
+    const work = pull({ budgetMs: opts.budgetMs ?? 100_000 });
     const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
     if (rt?.waitUntil) rt.waitUntil(work); else void work;
     return new Response(JSON.stringify({ pulling: true }), { status: 202, headers: { 'content-type': 'application/json' } });

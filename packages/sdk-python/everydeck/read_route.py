@@ -260,7 +260,11 @@ def _default_http(method: str, url: str, headers: Mapping[str, str], body: bytes
         return e.code, ""
 
 
-def pull_once(bridge: "EverydeckReadBridge", wait: int = 25, http: Callable[..., tuple[int, str]] | None = None) -> str:
+# Longest wait of one pull, like GitHub's runners (50 s, under the 60 s of common proxies). 0.5.3: 50 s (before 25 s); an older everydeck caps it at 25 s itself
+PULL_WAIT_S = 50
+
+
+def pull_once(bridge: "EverydeckReadBridge", wait: int = PULL_WAIT_S, http: Callable[..., tuple[int, str]] | None = None) -> str:
     """Pull (outbound only, like a GitHub self-hosted runner): fetch the next request from everydeck with a long poll (GET /v1/read-bridge/next), answer it
     with this bridge and send the answer back (POST /v1/read-bridge/reply/<id>). Returns answered, idle (nothing within `wait` seconds), refused (key not
     valid or not set up yet) or unreachable. everydeck needs no address and no key of the app."""
@@ -269,7 +273,7 @@ def pull_once(bridge: "EverydeckReadBridge", wait: int = 25, http: Callable[...,
         return "refused"
     auth = {"authorization": f"Bearer {bridge.keys[0]}", "accept": "application/json"}
     try:
-        status, text = call("GET", f"{bridge.endpoint}/v1/read-bridge/next?wait={max(0, min(25, int(wait)))}", auth, None, wait + 10)
+        status, text = call("GET", f"{bridge.endpoint}/v1/read-bridge/next?wait={max(0, min(PULL_WAIT_S, int(wait)))}", auth, None, wait + 10)
     except Exception:
         return "unreachable"
     if status == 204:
@@ -308,7 +312,7 @@ def start_read_bridge(db: Any, *, http: Callable[..., tuple[int, str]] | None = 
             key = os.environ.get("EVERYDECK_READ_BRIDGE_TOKEN"); url = os.environ.get("EVERYDECK_URL")
             if bridge is None or (key and key not in bridge.keys) or bridge.endpoint != (url or "").rstrip("/"):
                 bridge = EverydeckReadBridge(url, key, db, **options)
-            out = pull_once(bridge, 25, http)
+            out = pull_once(bridge, PULL_WAIT_S, http)
             if out == "refused":
                 stop.wait(30 + random.random() * 5)
             elif out == "unreachable":

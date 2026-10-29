@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.6
+
+- **A quiet read bridge asks everydeck less often.** One pull waits up to 50 s (before 25 s, like GitHub's runners; `PULL_WAIT_S`), and the Supabase Edge Function pulls 100 s per call (before 125 s): two long polls per call instead of five, the schedule still starts one every minute, so one call is always connected. A bridge with nothing to do asks about 120 times an hour instead of 300. Requests still arrive at once (everydeck wakes the waiting pull). An older everydeck caps the wait at 25 s itself, nothing else to change.
+
 ## 0.5.5
 
 - **Signed out only with `reset()`** (like PostHog `reset()`). `setSubject(null)` now only says that nobody is known right now; it no longer forgets the person signed in on this device. Apps that start with no session and call `setSubject(null)` before Supabase restored the session (a reload) sent a sign-in on every reload; now a restored session of the same person is no sign-in. Call `everydeck.reset()` where the app signs the person out: the next person named is a sign-in again, also the same one. Without `reset()` a sign-out followed by a sign-in of the same person on the same device is not counted as a new sign-in; another person always is.
