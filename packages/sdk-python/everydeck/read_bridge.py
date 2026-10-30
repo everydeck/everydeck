@@ -10,7 +10,9 @@ the app's database through a dedicated reader role (SELECT only). `psycopg_rows(
     #               status, body = bridge.handle(request.method, request.url.path, dict(request.query_params), request.headers.get("authorization"))
     #               return JSONResponse(body, status_code=status)
 
-Contract: GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref}; own Bearer key;
+Contract: GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref}
+· GET /everydeck/read/etags?limit (like HTTP ETag / If-None-Match with 304: per type and for the people the fingerprint of what a full read delivers now, without
+the pages; a full page carries its own `etag` only when everydeck asks with etag=1, so an older everydeck never sees the field); own Bearer key;
 every write verb is rejected; pages ≤ 200; identifiers as text (several key columns joined with "|"); timestamps ISO-8601; object values
 as JSON text; no value longer than 256 characters. Relations are delivered like object types (type = relations[].id).
 """
@@ -22,6 +24,7 @@ import datetime as _dt
 import decimal
 import hashlib
 import hmac
+import time
 
 from .verify import verify_everydeck_request
 import json
@@ -29,6 +32,10 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 PAGE_MAX = 200
 VALUE_MAX = 256
+# Bounds of GET /everydeck/read/etags: the bridge reads the pages as for a full read. A type with more rows gets no fingerprint (everydeck reads it in full as
+# before), the types after it keep theirs; past the time of the whole request (serverless functions have time limits) the rest is left out and read in full
+ETAGS_BUDGET_SECONDS = 5
+ETAGS_MAX_ROWS = 50_000
 # rows(table, columns, keys, after, limit[, changed]); changed = {"column", "since"}: only changed rows, stable by (change column, keys); cursor is then [change time, …keys]
 Rows = Callable[..., Iterable[Mapping[str, Any]]]
 
@@ -77,6 +84,16 @@ def _unb64(cursor: str) -> list[str] | None:
         return v if isinstance(v, list) and all(isinstance(x, str) for x in v) else None
     except Exception:
         return None
+
+
+def page_etag(items: Sequence[Any], next_cursor: str | None) -> str:
+    """Fingerprint of a page as delivered: 32 hex digits of SHA-256 over the JSON of [items, next_cursor] (opaque to everydeck; same in read-bridge.ts)"""
+    return hashlib.sha256(json.dumps([list(items), next_cursor], separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:32]
+
+
+def fold_etag(acc: str, page: str) -> str:
+    """The pages of a type folded in order (read-bridge.schema.json `etags`): acc = '', then per page SHA-256(acc + ':' + page etag), 32 hex digits"""
+    return hashlib.sha256(f"{acc}:{page}".encode()).hexdigest()[:32]
 
 
 def _uniq(xs: Iterable[str]) -> list[str]:
@@ -190,6 +207,46 @@ class ReadBridge:
         after = _unb64(q["cursor"]) if q.get("cursor") else None
         return limit, after, bool(q.get("cursor")) and after is None
 
+    def _people_cols(self, p: Mapping[str, Any]) -> list[str]:
+        return _uniq([p["ref"], *p["fields"].values(), *[c for st in (p.get("name") or []) for c in st["columns"]], *([p["created"]] if p.get("created") else [])])
+
+    def _person(self, p: Mapping[str, Any], r: Mapping[str, Any]) -> dict[str, Any]:
+        steps = p.get("name") or []
+
+        def name_of() -> str | None:   # display name by the app's rule: first step with content, parts joined with the app's separator (as in read-bridge.ts)
+            for st in steps:
+                parts = [x for x in ("" if r.get(c) is None else _text(r[c]).strip() for c in st["columns"]) if x]
+                if parts:
+                    return st.get("separator", " ").join(parts)[:VALUE_MAX]
+            return None
+        return {"subject_ref": _text(r[p["ref"]])[:128], **{f: (None if r.get(c) is None else _text(r[c])[:VALUE_MAX]) for f, c in p["fields"].items()}, **({"display_name": name_of()} if steps and "display_name" in p["fields"] else {}), **({"created_at": _iso(r.get(p["created"]))} if p.get("created") else {})}
+
+    # one page of a full read (objects of a type, people) from the key values of the last row before it; the route and GET …/etags use the same pages
+    def _objects_page(self, x: Mapping[str, Any], limit: int, after: list[str] | None) -> tuple[list[dict[str, Any]], str | None, list[str] | None]:
+        rows = list(self.rows(x["table"], x["columns"], x["keys"], after, limit + 1))
+        kept = rows[:limit]; last = [_text(kept[-1][k]) for k in x["keys"]] if len(rows) > limit else None
+        return [self._item(x, r) for r in kept], (_b64(last) if last else None), last
+
+    def _people_page(self, p: Mapping[str, Any], limit: int, after: list[str] | None) -> tuple[list[dict[str, Any]], str | None, list[str] | None]:
+        rows = list(self.rows(p["table"], self._people_cols(p), [p["ref"]], after, limit + 1))
+        kept = rows[:limit]; last = [_text(kept[-1][p["ref"]])] if len(rows) > limit else None
+        return [self._person(p, r) for r in kept], (_b64(last) if last else None), last
+
+    def _type_etag(self, page: Callable[[list[str] | None], tuple[list[dict[str, Any]], str | None, list[str] | None]], until: float) -> dict[str, Any] | str:
+        """Fingerprint of a whole type: its pages in order, folded; "too_large" past ETAGS_MAX_ROWS rows of this type, "time" past the time of the whole request"""
+        acc = ""; after: list[str] | None = None; count = 0
+        while True:
+            if time.monotonic() > until:
+                return "time"
+            items, nxt, last = page(after)
+            count += len(items)
+            if count > ETAGS_MAX_ROWS:
+                return "too_large"
+            acc = fold_etag(acc, page_etag(items, nxt))
+            if not last:
+                return {"etag": acc, "count": count}
+            after = last
+
     def handle(self, method: str, path: str, query: Mapping[str, str] | None = None, authorization: str | None = None,
                headers: Mapping[str, str] | None = None, body: bytes | str | None = None, url: str | None = None) -> tuple[int, Any]:
         # headers/url/body: headers and path with query as the app sees them, for the signature check; FastAPI: request.headers, str(request.url), await request.body()
@@ -213,6 +270,21 @@ class ReadBridge:
         if path == "/everydeck/read/capabilities":
             return 200, self.capabilities()
         as_of = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        # A full page carries its fingerprint only when everydeck asks for it (etag=1); an older everydeck never asks and never sees the field
+        wants_etag = (query or {}).get("etag") == "1"
+        if path == "/everydeck/read/etags":   # per type and for the people the fingerprint of a full read with this page size, now (people first); a type over ETAGS_MAX_ROWS is left out and the next ones go on, past the time of the request the rest is left out
+            limit, _after, _bad = self._page(query)
+            until = time.monotonic() + ETAGS_BUDGET_SECONDS
+            pp = self.scope.get("people"); out: dict[str, Any] = {}
+            of_people = self._type_etag(lambda a: self._people_page(pp, limit, a), until) if pp else None
+            if of_people != "time":
+                for typ, x in self.types.items():
+                    e = self._type_etag(lambda a, x=x: self._objects_page(x, limit, a), until)
+                    if e == "time":
+                        break
+                    if isinstance(e, dict):
+                        out[typ] = e
+            return 200, {"as_of": as_of, "limit": limit, "objects": out, **({"people": of_people} if isinstance(of_people, dict) else {})}
         if path == "/everydeck/read/counts":   # per type of the scope the number of rows of its table, counted now
             if self.count is None:
                 return 404, {"error": "this bridge does not count"}
@@ -222,18 +294,7 @@ class ReadBridge:
             p = self.scope.get("people")
             if not p:
                 return 404, {"error": "no people in the read scope"}
-            steps = p.get("name") or []
-            cols = _uniq([p["ref"], *p["fields"].values(), *[c for st in steps for c in st["columns"]], *([p["created"]] if p.get("created") else [])])
-
-            def name_of(r):   # display name by the app's rule: first step with content, parts joined with the app's separator (as in read-bridge.ts)
-                for st in steps:
-                    parts = [x for x in ("" if r.get(c) is None else _text(r[c]).strip() for c in st["columns"]) if x]
-                    if parts:
-                        return st.get("separator", " ").join(parts)[:VALUE_MAX]
-                return None
-
-            def person_of(r):
-                return {"subject_ref": _text(r[p["ref"]])[:128], **{f: (None if r.get(c) is None else _text(r[c])[:VALUE_MAX]) for f, c in p["fields"].items()}, **({"display_name": name_of(r)} if steps and "display_name" in p["fields"] else {}), **({"created_at": _iso(r.get(p["created"]))} if p.get("created") else {})}
+            cols = self._people_cols(p)
             if one_person:   # one person: GET /everydeck/read/people/{subject_ref}, read right after an event names one everydeck does not know yet (a new sign-up)
                 if self.one is None:
                     return 404, {"error": "fetching one person is not supported by this bridge"}
@@ -245,13 +306,12 @@ class ReadBridge:
                     row = None
                 if row is None:
                     return 404, {"error": "not found", "subject_ref": one_person[:128]}
-                return 200, {"as_of": as_of, "item": person_of(row)}
+                return 200, {"as_of": as_of, "item": self._person(p, row)}
             limit, after, bad = self._page(query)
             if bad:
                 return 400, {"error": "bad cursor"}
-            rows = list(self.rows(p["table"], cols, [p["ref"]], after, limit + 1))
-            kept = rows[:limit]
-            return 200, {"as_of": as_of, "items": [person_of(r) for r in kept], "next_cursor": _b64([_text(kept[-1][p["ref"]])]) if len(rows) > limit else None}
+            items, nxt, _last = self._people_page(p, limit, after)
+            return 200, {"as_of": as_of, "items": items, "next_cursor": nxt, **({"etag": page_etag(items, nxt)} if wants_etag else {})}
         if path.startswith("/everydeck/read/messages/") and path[len("/everydeck/read/messages/"):].count("/") == 1:   # messages of one conversation, on demand only
             typ, ref = path[len("/everydeck/read/messages/"):].split("/", 1)
             if self.match is None:
@@ -316,9 +376,8 @@ class ReadBridge:
                 return 200, body
             if after is not None and len(after) != len(x["keys"]):
                 return 400, {"error": "bad cursor"}
-            rows = list(self.rows(x["table"], x["columns"], x["keys"], after, limit + 1))
-            kept = rows[:limit]
-            return 200, {"type": typ, "as_of": as_of, "items": [self._item(x, r) for r in kept], "next_cursor": _b64([_text(kept[-1][k]) for k in x["keys"]]) if len(rows) > limit else None}
+            items, nxt, _last = self._objects_page(x, limit, after)
+            return 200, {"type": typ, "as_of": as_of, "items": items, "next_cursor": nxt, **({"etag": page_etag(items, nxt)} if wants_etag else {})}
         return 404, {"error": "not found"}
 
     def _item(self, x: Mapping[str, Any], r: Mapping[str, Any]) -> dict[str, Any]:

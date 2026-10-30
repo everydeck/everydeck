@@ -16,6 +16,8 @@
  *  - It reports its rights as checked: the connection's role, whether it is a superuser, whether it bypasses the app's row security (rolbypassrls), whether the
  *    transaction really is read-only (current_setting('transaction_read_only')) and on which tables the role itself could write.
  *  - It counts the rows of each table of the scope on request (GET /everydeck/read/counts, count(*) in a read-only transaction) for everydeck's data loss watch.
+ *  - It says whether anything changed (GET /everydeck/read/etags): per type the fingerprint of what a full read delivers now, read like a full read but not sent,
+ *    so a quiet app answers each read with a few hundred bytes instead of every page.
  *  - Calls from everydeck are signed (verify.ts); it rejects unsigned calls and write verbs.
  * Runs in Node >= 22, Deno (Supabase Edge Functions) and any fetch runtime: Web Crypto only, no `node:` module.
  */

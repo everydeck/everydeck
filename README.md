@@ -4,17 +4,17 @@ The packages an app uses to connect to [everydeck](https://everydeck.ai). Licens
 
 | Package | Registry | Folder | Install |
 |---|---|---|---|
-| `@everydeck/sdk` 0.5.7 | npm | `packages/sdk` | `npm install @everydeck/sdk` |
+| `@everydeck/sdk` 0.5.8 | npm | `packages/sdk` | `npm install @everydeck/sdk` |
 | `@everydeck/check` 0.3.11 (program `everydeck-scaffold`) | npm | `packages/check` | `npx @everydeck/check@0.3.11 . --out everydeck/app-map.json` |
-| `everydeck` 0.5.4 | PyPI | `packages/sdk-python` | `pip install everydeck` |
+| `everydeck` 0.5.5 | PyPI | `packages/sdk-python` | `pip install everydeck` |
 | `everydeck-check` 0.3.11 | PyPI | `packages/everydeck-check` | `pip install everydeck-check` |
 
 The GitHub Action that keeps everydeck working after every push lives in [everydeck/check](https://github.com/everydeck/check) (`uses: everydeck/check@v1`).
 
 ## Releases
 
-Each package is published on its own, by publishing a GitHub release whose tag names the package and its version: `sdk-v<version>`, `check-v<version>`, `py-v<version>` or `py-check-v<version>` (for example `sdk-v0.5.7`). The release runs `.github/workflows/release.yml`: it stops when the tag and the version in the package differ or when the version is already published, runs the public guard on the package folder and on the built files, installs and uses the built package, and publishes it with Trusted Publishing (OIDC, no tokens): npm with provenance, PyPI with attestations. "Run workflow" in the Actions tab does the same as a trial and publishes nothing.
+Each package is published on its own, by publishing a GitHub release whose tag names the package and its version: `sdk-v<version>`, `check-v<version>`, `py-v<version>` or `py-check-v<version>` (for example `sdk-v0.5.8`). The release runs `.github/workflows/release.yml`: it stops when the tag and the version in the package differ or when the version is already published, runs the public guard on the package folder and on the built files, installs and uses the built package, and publishes it with Trusted Publishing (OIDC, no tokens): npm with provenance, PyPI with attestations. "Run workflow" in the Actions tab does the same as a trial and publishes nothing.
 
 ## Where the code comes from
 
-This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit f0fcd7f3274c). Change the code there, run the script, commit the result here.
+This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit a5981110b5b3). Change the code there, run the script, commit the result here.

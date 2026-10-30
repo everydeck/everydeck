@@ -24,6 +24,8 @@ when the first call arrives. Other frameworks call the bridge themselves:
   The rights are checked: role, superuser, rolbypassrls, current_setting('transaction_read_only').
 - SupabaseReadOnly: the app's Supabase client (PostgREST). The route only calls select(), so only GET requests; PostgREST runs GET requests
   in a read-only transaction. Only tables in schemas exposed by the Supabase API are reachable.
+- It says whether anything changed (GET /everydeck/read/etags): per type the fingerprint of what a full read delivers now, read like a full read
+  but not sent, so a quiet app answers each read with a few hundred bytes instead of every page.
 No dependencies beyond the standard library; the app brings psycopg or supabase itself.
 """
 from __future__ import annotations

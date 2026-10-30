@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.8
+
+- **A quiet read bridge sends almost nothing.** everydeck asks once per read (every 10 minutes) whether anything changed, like HTTP `ETag` / `If-None-Match` with `304 Not Modified`: the bridge answers `GET /everydeck/read/etags?limit=<page size>` with one fingerprint per type and for the people (the pages a full read would deliver now, folded in order, with their count), and everydeck fetches only the types whose fingerprint differs from its last full read. Before, every read sent every page through everydeck, even when nothing had changed. A page carries its own `etag` only when everydeck asks for it (`etag=1`), so an older everydeck sees exactly the pages and capabilities it knows; the capabilities are unchanged. The bridge still reads the rows to form the fingerprints (same queries as a full read, read-only); a type with more than 50,000 rows gets no fingerprint and is read in full as before, the types after it keep theirs; past 5 s for the whole request the rest is read in full. Deploy everydeck first, then redeploy the Edge Function with this version; with 0.5.7 and older everydeck reads every page as before.
+
 ## 0.5.7
 
 - **A new person is in everydeck within seconds.** The read bridge answers `GET /everydeck/read/people/{subject_ref}` with exactly this person (the same fields and name rule as the list, 404 when the app does not know the identifier, also one its key column cannot hold) and names `people.fetch_one: true` in its capabilities. everydeck asks for a person right after an event names someone it does not know yet (a new sign-up), instead of waiting for the next read every 10 minutes, at most 20 asks per environment and minute. With 0.5.6 and older, everydeck reads the first pages of the people list instead. Nothing to change in the app; redeploy the Edge Function with this version.

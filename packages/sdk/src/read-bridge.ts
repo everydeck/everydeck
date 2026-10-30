@@ -11,6 +11,8 @@
  * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref}
  * · GET /everydeck/read/messages/{type}/{ref}?cursor&limit (messages of a conversation, on demand only, with `match`)
  * · GET /everydeck/read/counts (with `count`: per type the number of records a full read would deliver, so everydeck's data loss watch need not wait for a full read);
+ * · GET /everydeck/read/etags?limit (like HTTP ETag / If-None-Match with 304: per type and for the people the fingerprint of what a full read delivers now,
+ * without the pages; a full page carries its own `etag` only when everydeck asks with `etag=1`, so an older everydeck never sees the field);
  * incremental (like Fivetran): with `changed_since` only changed rows, stable by (change column, key), plus `deleted` where the app knows deletions; single fetch after a signal; the capabilities name `changed_since` and `fetch_one` per object type;
  * own Bearer key (compared in constant time); every write verb is rejected; pages <= 200; identifiers as text (several key columns
  * joined with "|"); timestamps as ISO-8601; object values as JSON text; no value longer than 256 characters. Relations (link tables)
@@ -92,6 +94,13 @@ export interface QueryClient { query: (text: string, values?: unknown[]) => Prom
 
 const PAGE_MAX = 200; const VALUE_MAX = 256;
 const enc = new TextEncoder(); const dec = new TextDecoder();
+/** Bounds of GET /everydeck/read/etags: the bridge reads the pages as for a full read. A type with more rows gets no fingerprint (everydeck reads it in full as
+ *  before), the types after it keep theirs; past the time of the whole request (serverless functions have time limits) the rest is left out and read in full */
+export const ETAGS_BUDGET_SECONDS = 5; export const ETAGS_MAX_ROWS = 50_000;
+const sha256Hex = async (s: string): Promise<string> => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(s))), (x) => x.toString(16).padStart(2, '0')).join('');
+/** Fingerprint of a page as delivered (32 hex digits of SHA-256 over the JSON of [items, next_cursor]) and the fold of the pages of a type in order (read-bridge.schema.json `etags`) */
+export const pageEtag = async (items: unknown[], next: string | null): Promise<string> => (await sha256Hex(JSON.stringify([items, next]))).slice(0, 32);
+export const foldEtag = async (acc: string, page: string): Promise<string> => (await sha256Hex(`${acc}:${page}`)).slice(0, 32);
 const b64 = (v: string[]) => { const bytes = enc.encode(JSON.stringify(v)); let bin = ''; for (const b of bytes) bin += String.fromCharCode(b); return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
 const unb64 = (c: string): string[] | null => { try { const bin = atob(c.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (c.length % 4)) % 4)); const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0)); const v = JSON.parse(dec.decode(bytes)); return Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : null; } catch { return null; } };
 /** Key comparison in constant time (no early return per character) */
@@ -127,12 +136,41 @@ export function createReadBridge(o: ReadBridgeOptions) {
   const refOf = (row: Record<string, unknown>, keys: string[]) => keys.map((k) => text(row[k])).join('|');
   // a timestamp as Postgres writes it as text ("2026-10-25 23:59:16.774+00", offset without minutes) is read too
   const isoOf = (v: unknown): string | null => { if (v === null || v === undefined) return null; const d = v instanceof Date ? v : new Date(text(v).replace(/([+-]\d{2})$/, '$1:00')); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
+  const people = o.scope.people;
+  const peopleCols = people ? uniq([people.ref, ...Object.values(people.fields), ...(people.name ?? []).flatMap((st) => st.columns), ...(people.created ? [people.created] : [])]) : [];
+  // the display name by the app's rule: the first stage with content; per stage the non-empty parts joined with the app's separator
+  const nameOf = (p: ReadScopePeople, r: Record<string, unknown>): string | null => { for (const st of p.name ?? []) { const parts = st.columns.map((c) => (r[c] === null || r[c] === undefined ? '' : text(r[c]).trim())).filter(Boolean); if (parts.length) return parts.join(st.separator ?? ' ').slice(0, VALUE_MAX); } return null; };
+  const personOf = (p: ReadScopePeople, r: Record<string, unknown>) => ({ subject_ref: text(r[p.ref]).slice(0, 128), ...Object.fromEntries(Object.entries(p.fields).map(([f, c]) => [f, r[c] === null || r[c] === undefined ? null : text(r[c]).slice(0, VALUE_MAX)])), ...(p.name?.length && 'display_name' in p.fields ? { display_name: nameOf(p, r) } : {}), ...(p.created ? { created_at: isoOf(r[p.created]) } : {}) });
   const itemOf = (x: NonNullable<ReturnType<typeof objects.get>>, r: Record<string, unknown>) => ({ ref: refOf(r, x.keys).slice(0, 128), ...(x.title && r[x.title] !== null && r[x.title] !== undefined ? { title: text(r[x.title]).slice(0, 200) } : {}),
     status: x.status ? (r[x.status] === null || r[x.status] === undefined ? { value: 'none', reason: `no value in ${x.status}` } : { value: text(r[x.status]).slice(0, 64) }) : { value: 'present' },
     ...(x.owner ? { owner_ref: r[x.owner] === null || r[x.owner] === undefined ? null : text(r[x.owner]).slice(0, 128) } : {}),
     ...(x.changed ? { updated_at: isoOf(r[x.changed]) } : {}),
     ...(x.created ? { created_at: isoOf(r[x.created]) } : {}),
     fields: Object.fromEntries(x.fields.map((f) => [f.name, value(r[f.column])])) });
+  /** one page of a full read (objects of a type, people), from the key values of the last row before it; the route and GET …/etags use the same pages */
+  type FullPage = { items: unknown[]; next_cursor: string | null; after: string[] | null };
+  const objectsPage = async (x: NonNullable<ReturnType<typeof objects.get>>, limit: number, after: string[] | null): Promise<FullPage> => {
+    const rows = await o.rows({ table: x.table, columns: x.columns, keys: x.keys, after, limit: limit + 1 });
+    const kept = rows.slice(0, limit); const last = rows.length > limit ? x.keys.map((k) => text(kept[kept.length - 1]![k])) : null;
+    return { items: kept.map((r) => itemOf(x, r)), next_cursor: last ? b64(last) : null, after: last };
+  };
+  const peoplePage = async (p: ReadScopePeople, limit: number, after: string[] | null): Promise<FullPage> => {
+    const rows = await o.rows({ table: p.table, columns: peopleCols, keys: [p.ref], after, limit: limit + 1 });
+    const kept = rows.slice(0, limit); const last = rows.length > limit ? [text(kept[kept.length - 1]![p.ref])] : null;
+    return { items: kept.map((r) => personOf(p, r)), next_cursor: last ? b64(last) : null, after: last };
+  };
+  /** Fingerprint of a whole type: its pages in order, folded; 'too_large' past ETAGS_MAX_ROWS rows of this type, 'time' past the time of the whole request */
+  const typeEtag = async (next: (after: string[] | null) => Promise<FullPage>, until: number): Promise<{ etag: string; count: number } | 'too_large' | 'time'> => {
+    let acc = ''; let after: string[] | null = null; let count = 0;
+    for (;;) {
+      if (Date.now() > until) return 'time';
+      const pg = await next(after); count += pg.items.length;
+      if (count > ETAGS_MAX_ROWS) return 'too_large';
+      acc = await foldEtag(acc, await pageEtag(pg.items, pg.next_cursor));
+      if (!pg.after) return { etag: acc, count };
+      after = pg.after;
+    }
+  };
 
   async function handle(req: ReadBridgeRequest): Promise<ReadBridgeResponse> {
     const path = req.path.split('?')[0]!;
@@ -148,6 +186,18 @@ export function createReadBridge(o: ReadBridgeOptions) {
     if (req.method.toUpperCase() !== 'GET') return { status: 405, body: { error: 'read only' } };
     if (path === '/everydeck/read/capabilities') return { status: 200, body: await capabilities() };
     const asOf = new Date().toISOString();
+    // A full page carries its fingerprint only when everydeck asks for it (etag=1); an older everydeck never asks and never sees the field
+    const wantsEtag = req.query?.['etag'] === '1';
+    const withEtag = async (body: Record<string, unknown>, pg: FullPage) => (wantsEtag ? { ...body, etag: await pageEtag(pg.items, pg.next_cursor) } : body);
+    // GET /everydeck/read/etags: per type and for the people the fingerprint of what a full read with this page size delivers now (the people first, as
+    // everydeck reads them first); a type over ETAGS_MAX_ROWS is left out and the next ones go on, past the time of the request the rest is left out
+    if (path === '/everydeck/read/etags') {
+      const { limit } = page(req.query); const until = Date.now() + ETAGS_BUDGET_SECONDS * 1000;
+      const out: Record<string, { etag: string; count: number }> = {};
+      const ofPeople = people ? await typeEtag((after) => peoplePage(people, limit, after), until) : null;
+      if (ofPeople !== 'time') for (const [type, x] of objects) { const e = await typeEtag((after) => objectsPage(x, limit, after), until); if (e === 'time') break; if (e !== 'too_large') out[type] = e; }
+      return { status: 200, body: { as_of: asOf, limit, objects: out, ...(ofPeople && typeof ofPeople === 'object' ? { people: ofPeople } : {}) } };
+    }
     // GET /everydeck/read/counts: per type of the scope the number of rows of its table, counted now
     if (path === '/everydeck/read/counts') {
       if (!o.count) return { status: 404, body: { error: 'this bridge does not count' } };
@@ -157,24 +207,19 @@ export function createReadBridge(o: ReadBridgeOptions) {
     }
     const pm = /^\/everydeck\/read\/people(?:\/([^/]+))?$/.exec(path);
     if (pm) {
-      const p = o.scope.people; if (!p) return { status: 404, body: { error: 'no people in the read scope' } };
-      const cols = uniq([p.ref, ...Object.values(p.fields), ...(p.name ?? []).flatMap((st) => st.columns), ...(p.created ? [p.created] : [])]);
-      // the display name by the app's rule: the first stage with content; per stage the non-empty parts joined with the app's separator
-      const nameOf = (r: Record<string, unknown>): string | null => { for (const st of p.name ?? []) { const parts = st.columns.map((c) => (r[c] === null || r[c] === undefined ? '' : text(r[c]).trim())).filter(Boolean); if (parts.length) return parts.join(st.separator ?? ' ').slice(0, VALUE_MAX); } return null; };
-      const personOf = (r: Record<string, unknown>) => ({ subject_ref: text(r[p.ref]).slice(0, 128), ...Object.fromEntries(Object.entries(p.fields).map(([f, c]) => [f, r[c] === null || r[c] === undefined ? null : text(r[c]).slice(0, VALUE_MAX)])), ...(p.name?.length && 'display_name' in p.fields ? { display_name: nameOf(r) } : {}), ...(p.created ? { created_at: isoOf(r[p.created]) } : {}) });
+      const p = people; if (!p) return { status: 404, body: { error: 'no people in the read scope' } };
       // single person GET /everydeck/read/people/{subject_ref}: everydeck reads a person right after an event names one it does not know yet (a new sign-up)
       if (pm[1] !== undefined) {
         if (!o.one) return { status: 404, body: { error: 'fetching one person is not supported by this bridge' } };
         const ref = decodeURIComponent(pm[1]);
         // an identifier the key column cannot hold (not a uuid for a uuid column: SQLSTATE 22P02) is a person the app does not know, not a failure
-        const r = await o.one({ table: p.table, columns: cols, keys: [p.ref], ref: [ref] }).catch((e: unknown) => { if ((e as { code?: string } | null)?.code === '22P02') return null; throw e; });
+        const r = await o.one({ table: p.table, columns: peopleCols, keys: [p.ref], ref: [ref] }).catch((e: unknown) => { if ((e as { code?: string } | null)?.code === '22P02') return null; throw e; });
         if (!r) return { status: 404, body: { error: 'not found', subject_ref: ref.slice(0, 128) } };
-        return { status: 200, body: { as_of: asOf, item: personOf(r) } };
+        return { status: 200, body: { as_of: asOf, item: personOf(p, r) } };
       }
       const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
-      const rows = await o.rows({ table: p.table, columns: cols, keys: [p.ref], after, limit: limit + 1 });
-      const kept = rows.slice(0, limit);
-      return { status: 200, body: { as_of: asOf, items: kept.map(personOf), next_cursor: rows.length > limit ? b64([text(kept[kept.length - 1]![p.ref])]) : null } };
+      const pg = await peoplePage(p, limit, after);
+      return { status: 200, body: await withEtag({ as_of: asOf, items: pg.items, next_cursor: pg.next_cursor }, pg) };
     }
     // GET /everydeck/read/messages/{type}/{ref}: the messages of a conversation, ascending by time; on demand only, everydeck stores nothing
     const mm = /^\/everydeck\/read\/messages\/([^/]+)\/([^/]+)$/.exec(path);
@@ -224,9 +269,8 @@ export function createReadBridge(o: ReadBridgeOptions) {
         return { status: 200, body: { type, as_of: asOf, changed_since: since, items: kept.map((r) => itemOf(x, r)), ...(deleted ? { deleted } : {}), next_cursor: rows.length > limit && last ? b64([isoOf(last[x.changed]) ?? '', ...x.keys.map((k) => text(last[k]))]) : null } };
       }
       if (after && after.length !== x.keys.length) return { status: 400, body: { error: 'bad cursor' } };
-      const rows = await o.rows({ table: x.table, columns: x.columns, keys: x.keys, after, limit: limit + 1 });
-      const kept = rows.slice(0, limit);
-      return { status: 200, body: { type, as_of: asOf, items: kept.map((r) => itemOf(x, r)), next_cursor: rows.length > limit ? b64(x.keys.map((k) => text(kept[kept.length - 1]![k]))) : null } };
+      const pg = await objectsPage(x, limit, after);
+      return { status: 200, body: await withEtag({ type, as_of: asOf, items: pg.items, next_cursor: pg.next_cursor }, pg) };
     }
     return { status: 404, body: { error: 'not found' } };
   }
