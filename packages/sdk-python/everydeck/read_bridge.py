@@ -10,12 +10,13 @@ the app's database through a dedicated reader role (SELECT only). `psycopg_rows(
     #               status, body = bridge.handle(request.method, request.url.path, dict(request.query_params), request.headers.get("authorization"))
     #               return JSONResponse(body, status_code=status)
 
-Contract: GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit · GET /everydeck/read/people?cursor&limit; own Bearer key;
+Contract: GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref}; own Bearer key;
 every write verb is rejected; pages ≤ 200; identifiers as text (several key columns joined with "|"); timestamps ISO-8601; object values
 as JSON text; no value longer than 256 characters. Relations are delivered like object types (type = relations[].id).
 """
 from __future__ import annotations
 
+from urllib.parse import unquote
 import base64
 import datetime as _dt
 import decimal
@@ -178,7 +179,7 @@ class ReadBridge:
         objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False, **counted} for r in self.scope.get("relations", [])]
         people = self.scope.get("people")
         convs = self.scope.get("conversations") or []
-        return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys())}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), **({"messages_grant": True} if self.match is not None else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
+        return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys()), "fetch_one": self.one is not None}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), **({"messages_grant": True} if self.match is not None else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
 
     def _page(self, query: Mapping[str, str] | None) -> tuple[int, list[str] | None, bool]:
         q = query or {}
@@ -216,17 +217,13 @@ class ReadBridge:
             if self.count is None:
                 return 404, {"error": "this bridge does not count"}
             return 200, {"as_of": as_of, "counts": {typ: max(0, int(self.count(x["table"], x["keys"]) or 0)) for typ, x in self.types.items()}}
-        if path == "/everydeck/read/people":
+        one_person = unquote(path[len("/everydeck/read/people/"):]) if path.startswith("/everydeck/read/people/") and path.count("/") == 4 else None
+        if path == "/everydeck/read/people" or one_person:
             p = self.scope.get("people")
             if not p:
                 return 404, {"error": "no people in the read scope"}
-            limit, after, bad = self._page(query)
-            if bad:
-                return 400, {"error": "bad cursor"}
             steps = p.get("name") or []
             cols = _uniq([p["ref"], *p["fields"].values(), *[c for st in steps for c in st["columns"]], *([p["created"]] if p.get("created") else [])])
-            rows = list(self.rows(p["table"], cols, [p["ref"]], after, limit + 1))
-            kept = rows[:limit]
 
             def name_of(r):   # display name by the app's rule: first step with content, parts joined with the app's separator (as in read-bridge.ts)
                 for st in steps:
@@ -234,8 +231,27 @@ class ReadBridge:
                     if parts:
                         return st.get("separator", " ").join(parts)[:VALUE_MAX]
                 return None
-            items = [{"subject_ref": _text(r[p["ref"]])[:128], **{f: (None if r.get(c) is None else _text(r[c])[:VALUE_MAX]) for f, c in p["fields"].items()}, **({"display_name": name_of(r)} if steps and "display_name" in p["fields"] else {}), **({"created_at": _iso(r.get(p["created"]))} if p.get("created") else {})} for r in kept]
-            return 200, {"as_of": as_of, "items": items, "next_cursor": _b64([_text(kept[-1][p["ref"]])]) if len(rows) > limit else None}
+
+            def person_of(r):
+                return {"subject_ref": _text(r[p["ref"]])[:128], **{f: (None if r.get(c) is None else _text(r[c])[:VALUE_MAX]) for f, c in p["fields"].items()}, **({"display_name": name_of(r)} if steps and "display_name" in p["fields"] else {}), **({"created_at": _iso(r.get(p["created"]))} if p.get("created") else {})}
+            if one_person:   # one person: GET /everydeck/read/people/{subject_ref}, read right after an event names one everydeck does not know yet (a new sign-up)
+                if self.one is None:
+                    return 404, {"error": "fetching one person is not supported by this bridge"}
+                try:
+                    row = self.one(p["table"], cols, [p["ref"]], [one_person])
+                except Exception as e:   # an identifier the key column cannot hold (not a uuid for a uuid column, SQLSTATE 22P02: psycopg `sqlstate`, supabase-py `code`) is a person the app does not know
+                    if "22P02" not in (getattr(e, "sqlstate", None), getattr(e, "code", None)):
+                        raise
+                    row = None
+                if row is None:
+                    return 404, {"error": "not found", "subject_ref": one_person[:128]}
+                return 200, {"as_of": as_of, "item": person_of(row)}
+            limit, after, bad = self._page(query)
+            if bad:
+                return 400, {"error": "bad cursor"}
+            rows = list(self.rows(p["table"], cols, [p["ref"]], after, limit + 1))
+            kept = rows[:limit]
+            return 200, {"as_of": as_of, "items": [person_of(r) for r in kept], "next_cursor": _b64([_text(kept[-1][p["ref"]])]) if len(rows) > limit else None}
         if path.startswith("/everydeck/read/messages/") and path[len("/everydeck/read/messages/"):].count("/") == 1:   # messages of one conversation, on demand only
             typ, ref = path[len("/everydeck/read/messages/"):].split("/", 1)
             if self.match is None:

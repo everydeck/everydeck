@@ -8,7 +8,7 @@
  * Runs in Node >= 22, Deno (Supabase Edge Functions) and any fetch runtime: no `Buffer`, no `node:` module. `handle()` is the pure
  * function, `fetch()` the adapter for Request/Response (Deno.serve), `node()` the one for node:http.
  *
- * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit
+ * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref}
  * · GET /everydeck/read/messages/{type}/{ref}?cursor&limit (messages of a conversation, on demand only, with `match`)
  * · GET /everydeck/read/counts (with `count`: per type the number of records a full read would deliver, so everydeck's data loss watch need not wait for a full read);
  * incremental (like Fivetran): with `changed_since` only changed rows, stable by (change column, key), plus `deleted` where the app knows deletions; single fetch after a signal; the capabilities name `changed_since` and `fetch_one` per object type;
@@ -122,7 +122,7 @@ export function createReadBridge(o: ReadBridgeOptions) {
   // the capabilities say per object type whether `changed_since` works (change column in the scope) and whether the single fetch works
   const capabilities = async () => ({ version: '1' as const, ...(o.app ? { app: o.app } : {}), identity: 'subject_ref' as const,
     objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!x.changed, ...(o.count ? { count: true } : {}) })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false, ...(o.count ? { count: true } : {}) }))],
-    ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields) } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
+    ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields), fetch_one: !!o.one } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
   const page = (q: Record<string, string | undefined> | undefined) => { const limit = Math.min(limitMax, Math.max(1, Number(q?.['limit'] ?? limitMax) || limitMax)); const after = q?.['cursor'] ? unb64(q['cursor']) : null; return { limit, after, bad: !!q?.['cursor'] && !after }; };
   const refOf = (row: Record<string, unknown>, keys: string[]) => keys.map((k) => text(row[k])).join('|');
   // a timestamp as Postgres writes it as text ("2026-10-25 23:59:16.774+00", offset without minutes) is read too
@@ -155,16 +155,26 @@ export function createReadBridge(o: ReadBridgeOptions) {
       for (const [type, x] of objects) counts[type] = Math.max(0, Math.floor(Number(await o.count({ table: x.table, keys: x.keys })) || 0));
       return { status: 200, body: { as_of: asOf, counts } };
     }
-    if (path === '/everydeck/read/people') {
+    const pm = /^\/everydeck\/read\/people(?:\/([^/]+))?$/.exec(path);
+    if (pm) {
       const p = o.scope.people; if (!p) return { status: 404, body: { error: 'no people in the read scope' } };
-      const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
       const cols = uniq([p.ref, ...Object.values(p.fields), ...(p.name ?? []).flatMap((st) => st.columns), ...(p.created ? [p.created] : [])]);
-      const rows = await o.rows({ table: p.table, columns: cols, keys: [p.ref], after, limit: limit + 1 });
-      const kept = rows.slice(0, limit);
       // the display name by the app's rule: the first stage with content; per stage the non-empty parts joined with the app's separator
       const nameOf = (r: Record<string, unknown>): string | null => { for (const st of p.name ?? []) { const parts = st.columns.map((c) => (r[c] === null || r[c] === undefined ? '' : text(r[c]).trim())).filter(Boolean); if (parts.length) return parts.join(st.separator ?? ' ').slice(0, VALUE_MAX); } return null; };
-      const items = kept.map((r) => ({ subject_ref: text(r[p.ref]).slice(0, 128), ...Object.fromEntries(Object.entries(p.fields).map(([f, c]) => [f, r[c] === null || r[c] === undefined ? null : text(r[c]).slice(0, VALUE_MAX)])), ...(p.name?.length && 'display_name' in p.fields ? { display_name: nameOf(r) } : {}), ...(p.created ? { created_at: isoOf(r[p.created]) } : {}) }));
-      return { status: 200, body: { as_of: asOf, items, next_cursor: rows.length > limit ? b64([text(kept[kept.length - 1]![p.ref])]) : null } };
+      const personOf = (r: Record<string, unknown>) => ({ subject_ref: text(r[p.ref]).slice(0, 128), ...Object.fromEntries(Object.entries(p.fields).map(([f, c]) => [f, r[c] === null || r[c] === undefined ? null : text(r[c]).slice(0, VALUE_MAX)])), ...(p.name?.length && 'display_name' in p.fields ? { display_name: nameOf(r) } : {}), ...(p.created ? { created_at: isoOf(r[p.created]) } : {}) });
+      // single person GET /everydeck/read/people/{subject_ref}: everydeck reads a person right after an event names one it does not know yet (a new sign-up)
+      if (pm[1] !== undefined) {
+        if (!o.one) return { status: 404, body: { error: 'fetching one person is not supported by this bridge' } };
+        const ref = decodeURIComponent(pm[1]);
+        // an identifier the key column cannot hold (not a uuid for a uuid column: SQLSTATE 22P02) is a person the app does not know, not a failure
+        const r = await o.one({ table: p.table, columns: cols, keys: [p.ref], ref: [ref] }).catch((e: unknown) => { if ((e as { code?: string } | null)?.code === '22P02') return null; throw e; });
+        if (!r) return { status: 404, body: { error: 'not found', subject_ref: ref.slice(0, 128) } };
+        return { status: 200, body: { as_of: asOf, item: personOf(r) } };
+      }
+      const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
+      const rows = await o.rows({ table: p.table, columns: cols, keys: [p.ref], after, limit: limit + 1 });
+      const kept = rows.slice(0, limit);
+      return { status: 200, body: { as_of: asOf, items: kept.map(personOf), next_cursor: rows.length > limit ? b64([text(kept[kept.length - 1]![p.ref])]) : null } };
     }
     // GET /everydeck/read/messages/{type}/{ref}: the messages of a conversation, ascending by time; on demand only, everydeck stores nothing
     const mm = /^\/everydeck\/read\/messages\/([^/]+)\/([^/]+)$/.exec(path);

@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.7
+
+- **A new person is in everydeck within seconds.** The read bridge answers `GET /everydeck/read/people/{subject_ref}` with exactly this person (the same fields and name rule as the list, 404 when the app does not know the identifier, also one its key column cannot hold) and names `people.fetch_one: true` in its capabilities. everydeck asks for a person right after an event names someone it does not know yet (a new sign-up), instead of waiting for the next read every 10 minutes, at most 20 asks per environment and minute. With 0.5.6 and older, everydeck reads the first pages of the people list instead. Nothing to change in the app; redeploy the Edge Function with this version.
+
 ## 0.5.6
 
 - **A quiet read bridge asks everydeck less often.** One pull waits up to 50 s (before 25 s, like GitHub's runners; `PULL_WAIT_S`), and the Supabase Edge Function pulls 100 s per call (before 125 s): two long polls per call instead of five, the schedule still starts one every minute, so one call is always connected. A bridge with nothing to do asks about 120 times an hour instead of 300. Requests still arrive at once (everydeck wakes the waiting pull). An older everydeck caps the wait at 25 s itself, nothing else to change.
