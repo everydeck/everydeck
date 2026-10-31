@@ -3,9 +3,14 @@
 -- wall clock limit of Edge Functions), so two starts overlap and one is always connected. everydeck needs no address of the app and no key from it.
 -- Copy as a migration. Supabase only (needs the pg_cron and pg_net extensions). 1 440 starts a day, about 43 200 a month, on the project's quota.
 --
--- The function keeps Supabase's JWT check (no verify_jwt setting): the call carries the app's public key as `apikey`; a legacy anon key is a JWT and also
--- goes as `Authorization: Bearer`. Where everydeck deploys the function itself (a hosted project the owner connected), it runs without the JWT check and
--- there is no public key: the call goes without `apikey`.
+-- The function runs without Supabase's JWT check, as Supabase documents for a function that a schedule calls (Scheduling Edge Functions: verify_jwt
+-- off); the bridge answers only requests signed by everydeck. supabase/config.toml keeps it off for supabase functions deploy:
+--   [functions.everydeck-read-bridge]
+--   verify_jwt = false
+-- (or --no-verify-jwt; with the Supabase MCP server deploy_edge_function with verify_jwt: false). everydeck deploys it the same way in a hosted project
+-- the owner connected; there is no public key in the Vault then and the call goes without `apikey`. Where the Vault has the app's public key
+-- (everydeck_outbox_gateway_key, shared with the outbox), the call still carries it as `apikey` (a legacy anon key, a JWT, also as `Authorization:
+-- Bearer`), so a function deployed with the check before @everydeck/sdk 0.5.9 keeps working where that key is there.
 --
 -- No key or URL is written here. They come from Supabase Vault:
 --   select vault.create_secret('https://<project>.supabase.co/functions/v1/everydeck-read-bridge', 'everydeck_read_bridge_url');

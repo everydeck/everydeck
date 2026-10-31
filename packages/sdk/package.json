@@ -1,6 +1,6 @@
 {
   "name": "@everydeck/sdk",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "everydeck SDK for TypeScript: server (Node ≥ 22, Deno / Supabase Edge) and browser adapters, transport contract 1.1-r0",
   "license": "MIT",
   "homepage": "https://everydeck.ai",

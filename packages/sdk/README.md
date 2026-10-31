@@ -58,6 +58,17 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.9
+
+- **The read bridge on Supabase runs without Supabase's JWT check, everywhere the same way.** Supabase documents this for a function that a schedule calls (Scheduling Edge Functions: pg_cron and pg_net, verify_jwt off); a call carries nothing and only starts the fetching, and the bridge answers only requests signed by everydeck. Before, the head of `supabase/functions/everydeck-read-bridge/index.ts` said to keep the check while everydeck deployed it without; a deploy with the check on turned the schedule's call away (no key in the Vault of a hosted project), and the bridge stopped reading. Keep it off in `supabase/config.toml`, which `supabase functions deploy` reads:
+
+```toml
+[functions.everydeck-read-bridge]
+verify_jwt = false
+```
+
+  or deploy with `--no-verify-jwt`; with the Supabase MCP server, `deploy_edge_function` with `verify_jwt: false`. The schedule is unchanged and still sends the app's public key where the Vault has it, so a function deployed with the check before 0.5.9 keeps working there. If the bridge stops fetching, everydeck says so under Needs you and by e-mail, names the JWT check when Supabase shows it, and deploys the function again with one click where the owner connected the Supabase project.
+
 ## 0.5.8
 
 - **A quiet read bridge sends almost nothing.** everydeck asks once per read (every 10 minutes) whether anything changed, like HTTP `ETag` / `If-None-Match` with `304 Not Modified`: the bridge answers `GET /everydeck/read/etags?limit=<page size>` with one fingerprint per type and for the people (the pages a full read would deliver now, folded in order, with their count), and everydeck fetches only the types whose fingerprint differs from its last full read. Before, every read sent every page through everydeck, even when nothing had changed. A page carries its own `etag` only when everydeck asks for it (`etag=1`), so an older everydeck sees exactly the pages and capabilities it knows; the capabilities are unchanged. The bridge still reads the rows to form the fingerprints (same queries as a full read, read-only); a type with more than 50,000 rows gets no fingerprint and is read in full as before, the types after it keep theirs; past 5 s for the whole request the rest is read in full. Deploy everydeck first, then redeploy the Edge Function with this version; with 0.5.7 and older everydeck reads every page as before.
