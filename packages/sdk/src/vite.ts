@@ -11,16 +11,21 @@
  *
  *   everydeckSourceMaps({ url: 'https://everydeck.example' })
  *
- * The key only from `EVERYDECK_SOURCEMAPS_KEY`, in the build's environment or the app's env files the way Vite reads them (envDir, mode); never
- * with a public prefix: when it stands under `VITE_` (or the config's envPrefix, `NEXT_PUBLIC_`, `PUBLIC_`, `EXPO_PUBLIC_`, `REACT_APP_`), nothing is
- * uploaded. The address: `url`, else `EVERYDECK_URL`.
+ *   everydeckSourceMaps({ url: 'https://everydeck.example', browserKey: '<the public browser key>' })
+ *
+ * On Vercel (OIDC federation on) and in GitHub Actions (`permissions: id-token: write`) the build signs in with its own OIDC token and the public browser
+ * key: nothing to add anywhere. Elsewhere the key only from `EVERYDECK_SOURCEMAPS_KEY`, in the build's environment or the app's env files the way Vite
+ * reads them (envDir, mode); never with a public prefix: when it stands under `VITE_` (or the config's envPrefix, `NEXT_PUBLIC_`, `PUBLIC_`,
+ * `EXPO_PUBLIC_`, `REACT_APP_`), nothing is uploaded. The address: `url`, else `EVERYDECK_URL`.
  */
 import { resolve } from 'node:path';
-import { injectDebugIds, removeSourceMaps, uploadSourceMaps, uploadTarget, type UploadResult, type UploadTarget } from './sourcemaps.js';
+import { injectDebugIds, removeSourceMaps, resolveUploadTarget, uploadSourceMaps, type UploadResult, type UploadTarget } from './sourcemaps.js';
 
 export interface EverydeckSourceMapsOptions {
   /** the everydeck address (public); default `EVERYDECK_URL` */
   url?: string;
+  /** the public browser key of the app (as in the code that starts the browser SDK): a Vercel or GitHub Actions build then uploads with its OIDC token */
+  browserKey?: string;
   /** address and key given directly (tests); default: `url` and `EVERYDECK_SOURCEMAPS_KEY` */
   target?: UploadTarget | null;
   /** passed to the upload (tests) */
@@ -51,7 +56,7 @@ export function everydeckSourceMaps(o: EverydeckSourceMapsOptions = {}) {
       if (!outDir) return;
       try {
         const inj = injectDebugIds(outDir);
-        const target = o.target !== undefined ? o.target : uploadTarget(process.env, { url: o.url, cwd: envAt.cwd, mode: envAt.mode, publicPrefixes: envAt.prefixes });
+        const target = o.target !== undefined ? o.target : await resolveUploadTarget(process.env, { url: o.url, browserKey: o.browserKey, cwd: envAt.cwd, mode: envAt.mode, publicPrefixes: envAt.prefixes, ...(o.fetch ? { fetch: o.fetch } : {}) });
         const r = await uploadSourceMaps(outDir, target, o.fetch ? { fetch: o.fetch } : {});
         report({ ...r, injected: inj.injected.length });
       } catch (e) {

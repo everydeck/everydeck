@@ -234,6 +234,20 @@ export function httpField(h: HttpContext | undefined): Record<string, unknown> |
   return compact({ method: h.method, route: clip(h.route, 240), status: h.status, duration_ms: Math.max(0, Math.min(86_400_000, Math.round(h.durationMs))), cross_origin: h.crossOrigin === true ? true : undefined, host: h.host && /^[a-z0-9.-]+(?::[0-9]{1,5})?$/.test(h.host) ? h.host.slice(0, 260) : undefined, pattern: h.pattern === true ? true : undefined });
 }
 
+/**
+ * The public address of this server as its host sets it (no address to configure): Render `RENDER_EXTERNAL_URL` (web services), Railway
+ * `RAILWAY_PUBLIC_DOMAIN`, Heroku `HEROKU_APP_DEFAULT_DOMAIN_NAME` (with dyno metadata). Null in the browser, in Deno or on any other host.
+ */
+export function hostPublicUrl(env: Record<string, string | undefined> | undefined = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env): { url: string; from: string } | null {
+  if (!env) return null;
+  const host = (v: string | undefined) => (v && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(v) ? `https://${v}` : null);
+  const render = env['RENDER_EXTERNAL_URL'];
+  if (render && /^https:\/\/[a-z0-9.-]+$/i.test(render)) return { url: render, from: 'RENDER_EXTERNAL_URL' };
+  const railway = host(env['RAILWAY_PUBLIC_DOMAIN']); if (railway) return { url: railway, from: 'RAILWAY_PUBLIC_DOMAIN' };
+  const heroku = host(env['HEROKU_APP_DEFAULT_DOMAIN_NAME']); if (heroku) return { url: heroku, from: 'HEROKU_APP_DEFAULT_DOMAIN_NAME' };
+  return null;
+}
+
 export class EverydeckClient {
   readonly opts: Required<Pick<EverydeckOptions, 'endpoint' | 'credential' | 'releaseKey' | 'manifestDigest' | 'enabled' | 'maxBuffer' | 'flushIntervalMs' | 'httpTimeoutMs' | 'maxBackoffMs' | 'authPauseMs' | 'keepalive' | 'compress'>> & { fetch: typeof fetch; onWarning: (m: string) => void; instanceId: string; usageConsent: 'anonymous' | 'consented' };
   readonly stats: EverydeckStats = { enqueued: 0, accepted: 0, retries: 0, dropped_overflow: 0, dropped_rejected: 0, dropped_oversize: 0, batches_accepted: 0, batches_retried: 0, batches_rejected: 0, send_errors: 0, unreported_loss: 0, last_error: null, batches_compressed: 0, bytes_raw: 0, bytes_sent: 0, retry_after_waits: 0 };
@@ -383,7 +397,9 @@ export class EverydeckClient {
    */
   heartbeat(intervalSeconds: number = DEFAULT_HEARTBEAT_SECONDS, opts: { job?: string } = {}): void {
     if (opts.job !== undefined && !/^[a-z][a-z0-9_.-]{0,63}$/.test(opts.job)) { this.opts.onWarning(`heartbeat job id rejected: ${opts.job}`); return; }
-    this.enqueue({ event_id: uuid(), kind: 'signal', name: 'everydeck.sdk.heartbeat', occurred_at: now(), operation_id: opts.job ? `everydeck.job:${opts.job}` : `everydeck.sdk:${this.opts.instanceId}`, fields: { instance_id: this.opts.instanceId, interval_seconds: intervalSeconds, ...(opts.job ? { job: opts.job } : {}) } });
+    // the public address the host gives this server (Render, Railway, Heroku): everydeck sets up its reachability check from it, no address to enter
+    const pub = opts.job ? null : hostPublicUrl();
+    this.enqueue({ event_id: uuid(), kind: 'signal', name: 'everydeck.sdk.heartbeat', occurred_at: now(), operation_id: opts.job ? `everydeck.job:${opts.job}` : `everydeck.sdk:${this.opts.instanceId}`, fields: { instance_id: this.opts.instanceId, interval_seconds: intervalSeconds, ...(opts.job ? { job: opts.job } : {}), ...(pub ? { public_url: pub.url, public_url_from: pub.from } : {}) } });
   }
 
   /** Events not yet accepted (for saving when a mobile app is closed) */

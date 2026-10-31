@@ -35,6 +35,16 @@ export async function published(registry, name, version, fetchImpl = fetch) {
   throw new Error(`could not ask ${registry} whether ${name} ${version} exists (HTTP ${res.status}); try again later`);
 }
 
+/** The newest Python the PyPI packages are tested with, next to the oldest one from requires-python (like sentry-python: every supported version) */
+export const PYTHON_NEWEST = '3.14';
+/** Python versions to test a PyPI package with before it is published: the oldest from `requires-python` (">=3.11") and PYTHON_NEWEST */
+export function pythonsOf(root, dir) {
+  const toml = readFileSync(join(root, dir, 'pyproject.toml'), 'utf8');
+  const min = /^requires-python\s*=\s*">=\s*(\d+\.\d+)"/m.exec(toml)?.[1];
+  if (!min) throw new Error(`${dir}/pyproject.toml names no requires-python like ">=3.11"; the release tests the package with the oldest Python it supports.`);
+  return [...new Set([min, PYTHON_NEWEST])];
+}
+
 /** The whole check: { key, dir, registry, name, version, npmTag } or throws with a sentence that says what to do */
 export async function prepare(tag, { root = process.cwd(), fetchImpl = fetch } = {}) {
   const m = TAG.exec(String(tag ?? '').trim());
@@ -45,13 +55,13 @@ export async function prepare(tag, { root = process.cwd(), fetchImpl = fetch } =
   if (!name || !version) throw new Error(`${dir} has no package name or version.`);
   if (version !== tagVersion) throw new Error(`The tag says ${tagVersion}, but ${dir} is ${name} ${version}. Nothing was published. Use the tag ${key}-v${version}, or bring this repository to ${tagVersion} first.`);
   if (await published(registry, name, version, fetchImpl)) throw new Error(`${name} ${version} is already on ${registry === 'npm' ? 'npm' : 'PyPI'}. Nothing was published. A new release needs a new version.`);
-  return { key, dir, registry, name, version, npmTag: version.includes('-') ? 'next' : 'latest' };
+  return { key, dir, registry, name, version, npmTag: version.includes('-') ? 'next' : 'latest', pythons: registry === 'pypi' ? pythonsOf(root, dir) : [] };
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const r = await prepare(process.argv[2]);
-    const out = { package: r.key, dir: r.dir, registry: r.registry, name: r.name, version: r.version, npm_tag: r.npmTag };
+    const out = { package: r.key, dir: r.dir, registry: r.registry, name: r.name, version: r.version, npm_tag: r.npmTag, pythons: JSON.stringify(r.pythons) };
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(out).map(([k, v]) => `${k}=${v}\n`).join(''));
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${r.name} ${r.version}\n\nFolder \`${r.dir}\`, registry ${r.registry}. Tag and version match; this version is not published yet.\n`);
     console.log(JSON.stringify(out));

@@ -39,7 +39,9 @@ export interface BrowserOptions extends EverydeckOptions { /** keep where the pe
   /** measure the load time of every page view (Core Web Vitals: LCP, INP, CLS, FCP, TTFB, with Google's web-vitals) and send it once when the page is hidden; the page only as its pattern, never counted towards the month. On by default in browsers, never in native apps */
   captureVitals?: boolean;
   /** a visit per page: one event `everydeck.sdk.page` on every change of the address (and every `screen()` in native apps) with the page only as its pattern (`screens`), the session of this page life and the person of `setSubject`; one event `everydeck.sdk.sign_in` when `setSubject` names a person who was not signed in on this device. Like PostHog `$pageview` and `$identify`. everydeck never counts them towards the month. On by default */
-  capturePageViews?: boolean }
+  capturePageViews?: boolean;
+  /** also send page views and sign-ins from automated browsers and bots (`navigator.webdriver`, headless Chrome, crawlers, the screenshot of a deploy); off by default, like PostHog's user agent filter */
+  captureBots?: boolean }
 /**
  * A write from the app map (`flows[].result.write`): flow, table, kind. Since 0.5.5, as everydeck hands them out: `object` (the object type of the table)
  * with `key` (its key column) names the record of an update or delete from the request's filter (`?id=eq.<ref>`, a reference like the outbox sends), and
@@ -356,6 +358,28 @@ export function foreignRoute(path: string): string {
 interface XhrLike { status: number; responseType?: string; responseText?: string; response?: unknown; getResponseHeader?(name: string): string | null; addEventListener(type: string, fn: () => void): void; [XHR_INFO]?: { method: string; url: string } }
 
 
+/**
+ * Parts of a user agent (or of a brand in `userAgentData`) of bots and automated browsers, a subset of PostHog's `DEFAULT_BLOCKED_UA_STRS`
+ * (posthog-js `blocked-uas.ts`): crawlers, link previews, the screenshot a hoster takes of every deploy (`vercel-screenshot`), headless Chrome.
+ */
+export const BOT_AGENTS = ['headlesschrome', 'phantomjs', 'cypress', 'lighthouse', 'chrome-lighthouse', 'pagespeed', 'gtmetrix', 'vercel-screenshot', 'vercelbot', 'netlify',
+  'prerender', 'bot/', '(bot;', 'bot.htm', 'bot.php', 'crawler', 'spider', 'googlebot', 'adsbot-google', 'google-inspectiontool', 'mediapartners-google', 'google web preview', 'bingbot',
+  'yandexbot', 'baiduspider', 'duckduckbot', 'applebot', 'facebookexternal', 'facebookcatalog', 'meta-externalagent', 'twitterbot', 'linkedinbot', 'slackbot', 'discordbot',
+  'telegrambot', 'whatsapp', 'pinterest', 'embedly', 'ahrefsbot', 'semrushbot', 'mj12bot', 'petalbot', 'bytespider', 'gptbot', 'chatgpt-user', 'claudebot', 'anthropic-ai',
+  'perplexitybot', 'uptimerobot', 'pingdom', 'statuscake', 'datadog synthetic', 'checkly', 'screaming frog', 'sitebulb', 'ia_archiver'] as const;
+/**
+ * A bot or an automated browser rather than a person: a user agent from BOT_AGENTS, or `navigator.webdriver` (Playwright, Puppeteer, Selenium; also the
+ * headless browser of a coding agent's verification run), like PostHog's `isLikelyBot`. Such a page life sends no page views and no sign-ins.
+ */
+export function isLikelyBot(navigator: unknown): boolean {
+  if (!navigator || typeof navigator !== 'object') return false;
+  const nav = navigator as { userAgent?: unknown; webdriver?: unknown; userAgentData?: { brands?: unknown } };
+  const hit = (s: unknown) => typeof s === 'string' && BOT_AGENTS.some((b) => s.toLowerCase().includes(b));
+  if (hit(nav.userAgent)) return true;
+  try { const brands = nav.userAgentData?.brands; if (Array.isArray(brands) && brands.some((b) => hit((b as { brand?: unknown } | null)?.brand))) return true; } catch { /* no brands */ }
+  return nav.webdriver === true;
+}
+
 /** A page view: the page as its pattern, never the address (like PostHog `$pageview`, Plausible `pageview`); sent in the normal batches */
 export const PAGE_EVENT = 'everydeck.sdk.page';
 /** A person signs in on this device: `setSubject` names a person after none or another one (like PostHog `$identify`) */
@@ -420,7 +444,7 @@ export class EverydeckBrowser {
     return null;
   }
   constructor(o: BrowserOptions) {
-    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, ...core } = o;
+    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, captureBots, ...core } = o;
     // valid entries only (flow like a signal name, known kind)
     this.writes = (writes ?? []).filter((w) => w && SAFE.test(String(w.flow)) && typeof w.table === 'string' && w.table.length > 0 && WRITE_KINDS.has(w.kind)).slice(0, 200)
       .map((w) => ({ flow: w.flow, table: w.table, kind: w.kind, ...(w.object && OBJECT_TYPE.test(w.object) && w.key && COLUMN.test(w.key) ? { object: w.object, key: w.key } : {}), ...(w.status && COLUMN.test(w.status) ? { status: w.status } : {}) }));
@@ -437,7 +461,8 @@ export class EverydeckBrowser {
     this.screens = (screens ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 300);
     this.routeName = routeName ?? ((u: URL) => screenOf(pathOf(u), this.screens));
     this.sessionId = sessionId ?? uuid();
-    this.pageViewsOn = capturePageViews !== false && this.client.opts.enabled;
+    // a bot or an automated browser (the screenshot after a deploy, a headless verification run) is no visitor
+    this.pageViewsOn = capturePageViews !== false && this.client.opts.enabled && (captureBots === true || !isLikelyBot((globalThis as unknown as G).navigator));
     // the person signed in on this device (until reset()) carries the page views until the app names someone, like PostHog's stored distinct_id after a
     // reload; otherwise the first page view after every reload would stay anonymous (a restored session sends no sign-in that could claim it)
     if (this.pageViewsOn) { try { const v = this.storage()?.getItem(SIGNED_IN_KEY); if (typeof v === 'string' && v) this.restored = v; } catch { /* storage blocked */ } }
@@ -704,10 +729,14 @@ export class EverydeckBrowser {
   /**
    * Known person/organization of this session (a claim; it only becomes authoritative through the server's identity source). `null` only says that nobody
    * is known right now, for example while the app still restores its session after a reload; it is no sign-out (like PostHog `identify`). Call `reset()`
-   * where the person signs out.
+   * where the person signs out. `accountRef`: the person's organization where the app knows it, the same id its server sends as `account_ref` (like PostHog
+   * `group`); it stays while later calls name the same person without it.
    */
   setSubject(subjectRef: string | null, accountRef?: string | null): void {
-    this.subject = { ...(subjectRef ? { subjectRef } : {}), ...(accountRef ? { accountRef } : {}) };
+    // the organization stays with the same person when a later call names only the person (a refreshed session in onAuthStateChange), like a
+    // PostHog group that stays set until reset(); `null` removes it, another person starts without it
+    const account = accountRef === undefined && subjectRef && subjectRef === this.subject.subjectRef ? this.subject.accountRef : accountRef;
+    this.subject = { ...(subjectRef ? { subjectRef } : {}), ...(account ? { accountRef: account } : {}) };
     if (subjectRef) void this.sendOrigin(subjectRef);
     if (subjectRef) this.restored = null;
     if (this.pageViewsOn && subjectRef) void this.noteSignIn(subjectRef);

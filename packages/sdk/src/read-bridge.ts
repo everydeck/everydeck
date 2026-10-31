@@ -121,6 +121,20 @@ const value = (v: unknown): string | number | boolean | null => {
 };
 const uniq = (xs: string[]) => [...new Set(xs)];
 
+/**
+ * A table or column of the read scope that the database does not have (Postgres 42P01 undefined_table, 42703 undefined_column; node-pg and postgres.js
+ * both set `code`): the app map names it, the app's schema does not (an older copy, a renamed or dropped table). Like Fivetran and Airbyte with a
+ * missing table, the bridge reports this type as a state of its own (409 with `missing`) and every other type is read as before; everydeck keeps what it
+ * read of this type and says so. Never an empty page: an empty page would say the type has no rows.
+ */
+export interface ReadMissing { table: string; column?: string; code: '42P01' | '42703' }
+export const missingOf = (e: unknown, table: string): ReadMissing | null => {
+  const code = (e as { code?: unknown } | null)?.code; if (code !== '42P01' && code !== '42703') return null;
+  const col = code === '42703' ? /column "?([^"\s]+?)"? does not exist/.exec(String((e as { message?: unknown }).message ?? ''))?.[1]?.split('.').pop() : undefined;
+  return { table: table.slice(0, 128), ...(col ? { column: col.slice(0, 128) } : {}), code };
+};
+const missingReply = (type: string, m: ReadMissing): ReadBridgeResponse => ({ status: 409, body: { error: `${type}: ${m.column ? `column ${m.column} of table ${m.table}` : `table ${m.table}`} is not in the database`, type, missing: m } });
+
 export function createReadBridge(o: ReadBridgeOptions) {
   const limitMax = Math.min(PAGE_MAX, Math.max(1, o.pageLimit ?? 100));
   let rightsCache: ReadRights | null = typeof o.rights === 'function' ? null : (o.rights ?? { role: 'unknown', select_only: false });
@@ -172,7 +186,13 @@ export function createReadBridge(o: ReadBridgeOptions) {
     }
   };
 
+  /** Every answer, never a thrown error: a failed query is a 500 with its SQLSTATE (a Node server would otherwise stop at an unhandled rejection, the pull
+   *  loop of an Edge Function would end); a missing table or column of one type is that type's state (409), the other types are read */
   async function handle(req: ReadBridgeRequest): Promise<ReadBridgeResponse> {
+    try { return await answer(req); }
+    catch (e) { const code = (e as { code?: unknown } | null)?.code; return { status: 500, body: { error: `the read bridge could not read the database${typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? ` (SQLSTATE ${code})` : ''}` } }; }
+  }
+  async function answer(req: ReadBridgeRequest): Promise<ReadBridgeResponse> {
     const path = req.path.split('?')[0]!;
     if (!path.startsWith('/everydeck/read/')) return { status: 404, body: { error: 'not found' } };
     // signed call (time window 5 min, request_id used once) counts instead of the Bearer; without a signature it depends on the setting
@@ -194,16 +214,24 @@ export function createReadBridge(o: ReadBridgeOptions) {
     if (path === '/everydeck/read/etags') {
       const { limit } = page(req.query); const until = Date.now() + ETAGS_BUDGET_SECONDS * 1000;
       const out: Record<string, { etag: string; count: number }> = {};
-      const ofPeople = people ? await typeEtag((after) => peoplePage(people, limit, after), until) : null;
-      if (ofPeople !== 'time') for (const [type, x] of objects) { const e = await typeEtag((after) => objectsPage(x, limit, after), until); if (e === 'time') break; if (e !== 'too_large') out[type] = e; }
-      return { status: 200, body: { as_of: asOf, limit, objects: out, ...(ofPeople && typeof ofPeople === 'object' ? { people: ofPeople } : {}) } };
+      const missing: Record<string, ReadMissing> = {};
+      const ofPeople = people ? await typeEtag((after) => peoplePage(people, limit, after), until).catch((e: unknown) => { const m = missingOf(e, people.table); if (!m) throw e; missing['people'] = m; return null; }) : null;
+      if (ofPeople !== 'time') for (const [type, x] of objects) {
+        const e = await typeEtag((after) => objectsPage(x, limit, after), until).catch((err: unknown) => { const m = missingOf(err, x.table); if (!m) throw err; missing[type] = m; return null; });
+        if (e === 'time') break; if (e && e !== 'too_large') out[type] = e;
+      }
+      return { status: 200, body: { as_of: asOf, limit, objects: out, ...(ofPeople && typeof ofPeople === 'object' ? { people: ofPeople } : {}), ...(Object.keys(missing).length ? { missing } : {}) } };
     }
     // GET /everydeck/read/counts: per type of the scope the number of rows of its table, counted now
     if (path === '/everydeck/read/counts') {
       if (!o.count) return { status: 404, body: { error: 'this bridge does not count' } };
       const counts: Record<string, number> = {};
-      for (const [type, x] of objects) counts[type] = Math.max(0, Math.floor(Number(await o.count({ table: x.table, keys: x.keys })) || 0));
-      return { status: 200, body: { as_of: asOf, counts } };
+      const missing: Record<string, ReadMissing> = {};
+      for (const [type, x] of objects) {
+        try { counts[type] = Math.max(0, Math.floor(Number(await o.count({ table: x.table, keys: x.keys })) || 0)); }
+        catch (e) { const m = missingOf(e, x.table); if (!m) throw e; missing[type] = m; }
+      }
+      return { status: 200, body: { as_of: asOf, counts, ...(Object.keys(missing).length ? { missing } : {}) } };
     }
     const pm = /^\/everydeck\/read\/people(?:\/([^/]+))?$/.exec(path);
     if (pm) {
@@ -213,12 +241,15 @@ export function createReadBridge(o: ReadBridgeOptions) {
         if (!o.one) return { status: 404, body: { error: 'fetching one person is not supported by this bridge' } };
         const ref = decodeURIComponent(pm[1]);
         // an identifier the key column cannot hold (not a uuid for a uuid column: SQLSTATE 22P02) is a person the app does not know, not a failure
-        const r = await o.one({ table: p.table, columns: peopleCols, keys: [p.ref], ref: [ref] }).catch((e: unknown) => { if ((e as { code?: string } | null)?.code === '22P02') return null; throw e; });
+        let gone: ReadMissing | null = null;
+        const r = await o.one({ table: p.table, columns: peopleCols, keys: [p.ref], ref: [ref] }).catch((e: unknown) => { if ((e as { code?: string } | null)?.code === '22P02') return null; gone = missingOf(e, p.table); if (gone) return null; throw e; });
+        if (gone) return missingReply('people', gone);
         if (!r) return { status: 404, body: { error: 'not found', subject_ref: ref.slice(0, 128) } };
         return { status: 200, body: { as_of: asOf, item: personOf(p, r) } };
       }
       const { limit, after, bad } = page(req.query); if (bad) return { status: 400, body: { error: 'bad cursor' } };
-      const pg = await peoplePage(p, limit, after);
+      let pg: FullPage;
+      try { pg = await peoplePage(p, limit, after); } catch (e) { const m = missingOf(e, p.table); if (m) return missingReply('people', m); throw e; }
       return { status: 200, body: await withEtag({ as_of: asOf, items: pg.items, next_cursor: pg.next_cursor }, pg) };
     }
     // GET /everydeck/read/messages/{type}/{ref}: the messages of a conversation, ascending by time; on demand only, everydeck stores nothing
@@ -249,7 +280,9 @@ export function createReadBridge(o: ReadBridgeOptions) {
       const type = decodeURIComponent(m1[1]!); const x = objects.get(type); if (!x) return { status: 404, body: { error: `unknown type ${type}` } };
       if (!o.one) return { status: 404, body: { error: 'fetching one object is not supported by this bridge' } };
       const ref = decodeURIComponent(m1[2]!).split('|'); if (ref.length !== x.keys.length) return { status: 400, body: { error: 'bad ref' } };
-      const r = await o.one({ table: x.table, columns: x.columns, keys: x.keys, ref });
+      let gone: ReadMissing | null = null;
+      const r = await o.one({ table: x.table, columns: x.columns, keys: x.keys, ref }).catch((e: unknown) => { gone = missingOf(e, x.table); if (gone) return null; throw e; });
+      if (gone) return missingReply(type, gone);
       if (!r) return { status: 404, body: { error: 'not found', type, ref: ref.join('|') } };
       return { status: 200, body: { type, as_of: asOf, item: itemOf(x, r) } };
     }
@@ -263,13 +296,16 @@ export function createReadBridge(o: ReadBridgeOptions) {
         if (!x.changed) return { status: 400, body: { error: `changed_since is not supported for ${type}: no column the database sets on every change` } };
         const since = isoOf(sinceRaw); if (!since) return { status: 400, body: { error: 'bad changed_since (ISO-8601 expected)' } };
         if (after && after.length !== x.keys.length + 1) return { status: 400, body: { error: 'bad cursor' } };
-        const rows = await o.rows({ table: x.table, columns: x.columns, keys: x.keys, after, limit: limit + 1, changed: { column: x.changed, since } });
+        let rows: Record<string, unknown>[];
+        try { rows = await o.rows({ table: x.table, columns: x.columns, keys: x.keys, after, limit: limit + 1, changed: { column: x.changed, since } }); }
+        catch (e) { const m = missingOf(e, x.table); if (m) return missingReply(type, m); throw e; }
         const kept = rows.slice(0, limit); const last = kept[kept.length - 1];
         const deleted = o.deleted && !after ? (await o.deleted({ table: x.table, keys: x.keys, since, limit: PAGE_MAX })).slice(0, PAGE_MAX).map((d) => ({ ref: d.ref.slice(0, 128), deleted_at: isoOf(d.deleted_at) ?? asOf })) : undefined;
         return { status: 200, body: { type, as_of: asOf, changed_since: since, items: kept.map((r) => itemOf(x, r)), ...(deleted ? { deleted } : {}), next_cursor: rows.length > limit && last ? b64([isoOf(last[x.changed]) ?? '', ...x.keys.map((k) => text(last[k]))]) : null } };
       }
       if (after && after.length !== x.keys.length) return { status: 400, body: { error: 'bad cursor' } };
-      const pg = await objectsPage(x, limit, after);
+      let pg: FullPage;
+      try { pg = await objectsPage(x, limit, after); } catch (e) { const m = missingOf(e, x.table); if (m) return missingReply(type, m); throw e; }
       return { status: 200, body: await withEtag({ type, as_of: asOf, items: pg.items, next_cursor: pg.next_cursor }, pg) };
     }
     return { status: 404, body: { error: 'not found' } };

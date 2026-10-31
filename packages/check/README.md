@@ -23,6 +23,13 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.12
+
+- The app map in one form, as everydeck-check writes it: one line per entry of each list, one line per other field (a few hundred lines in a pull request instead of 20 000). The content is unchanged; a second run writes the same bytes. A file with another indentation is brought into this form once.
+- `--merge` keeps what the coding agent described about a table that only the database knows (`defined: database`): its `works_with` entry, the entries that are part of it, and `core_object` stay as long as the table is in the merged app map. Without a database (the GitHub Action) the skeleton does not find such a table itself; before, it kept the table but dropped its description, and the object type left everydeck's sidebar.
+- `--merge` keeps the agent's `identity.name_rule` when the skeleton finds no rule itself (and the table of people still has its columns); a rule the skeleton finds with its places replaces it. A column keeps the agent's `not_contact`, and, without a database, the foreign key, allowed values and default the agent read with `--db` when the migrations do not say them. With `--db` the database decides.
+- The open part `people:visits` asks for the organization as the second value of `everydeck.setSubject(<user id>, <organization id>)`, the same id the app's server sends as `account_ref` (shared rules with `everydeck-check` 0.3.12).
+
 ### 0.3.11
 
 - The bundled rules skip schedules whose name is a placeholder (`<job>`) or everydeck's own, and count a flow whose result the browser writes straight into the database as built in (the browser SDK records it through `writes`). The bundled rules ask for `everydeck.reset()` where the app signs the person out, never `setSubject(null)` (browser SDK 0.5.5).

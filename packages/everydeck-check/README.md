@@ -17,11 +17,17 @@ Commands:
 - `footprint --base <commit before the setup> [--fix-lock]`: the files the setup added and changed, a lockfile rewritten beyond the new packages (`--fix-lock` restores it with only the new packages) leftovers such as `.playwright-mcp/` or screenshots, and every AI client of the app map (`ai_calls`) that is not wrapped with the everydeck SDK.
 - `local-db --repo .`: the app's local database for `--db`, from `supabase/config.toml` or from a local Supabase stack or PostgreSQL the app's env files point to. It reads the env files itself (like Prisma reads `.env`) and prints no value of them, only the file, the variable name and the port; the url only with the fixed password of a local Supabase stack.
 - `validate --db` takes a database url, or for a hosted database the structure address everydeck gives (or a JSON file with that catalog); every table of it must be in the app map.
+- `runtime --repo .`: the Python and Node versions the app uses, against this session, and how to check with the app's.
 - `publish <app_map> --url <everydeck> --project <id>` and `change`: send the facts to everydeck.
 
 everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rules.mjs`) and run with `node` (18 or newer). Python 3.11 or newer. License: MIT.
 
 ## Changes
+
+### 0.3.12
+
+- Same version as the scaffold `@everydeck/check` 0.3.12 (the two are a pair) and the same rules: the open part `people:visits` asks for the organization as the second value of `everydeck.setSubject(<user id>, <organization id>)`, the same id the app's server sends as `account_ref`.
+- `runtime --repo .`: the Python and Node versions the app really uses (the image of a Dockerfile, `.python-version`, `runtime.txt`, `requires-python` in pyproject.toml, `python_version` in Pipfile, `.nvmrc`, `.node-version`, `engines.node`), each with its place, against the versions of this session, and how to run a check with the app's version without changing the machine (`uv run --python <version> …`, the image with docker, `npx -y node@<version>`). Without any of these it says "not tested with Python <version>". A check that imports the server with the session's Python proves nothing for an app on python:3.11.
 
 ### 0.3.11
 

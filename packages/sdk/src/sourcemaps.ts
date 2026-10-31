@@ -6,9 +6,11 @@
  * `debugId` in its map name it. The snippet goes into the first line (after a "use strict" directive), so no line moves; the map is shifted by the
  * snippet's length on that line. The id comes from the file and its map: building the same code again gives the same id.
  *
- * `uploadSourceMaps(dir, target)` sends each map with a debug id to everydeck (`POST <everydeck>/api/agent/sourcemaps`, only with the key that can
- * only upload source maps, `EVERYDECK_SOURCEMAPS_KEY`) and then removes every source map from the folder, uploaded or not, together with its `//# sourceMappingURL` comment, so the maps
- * are never public. Before a map leaves the machine, the code of libraries (`node_modules`) is dropped from `sourcesContent` and every other line is
+ * `uploadSourceMaps(dir, target)` sends each map with a debug id to everydeck (`POST <everydeck>/api/agent/sourcemaps`) and then removes every source map
+ * from the folder, uploaded or not, together with its `//# sourceMappingURL` comment, so the maps are never public. It signs in without a key that
+ * someone must add, like Vercel and GitHub let a build sign in to a cloud: on Vercel with the build's OIDC token (`VERCEL_OIDC_TOKEN`, when OIDC
+ * federation is on in the project), in GitHub Actions with the run's OIDC token (`permissions: id-token: write`), each together with the public browser
+ * key that names the app and environment. Elsewhere (Netlify, other CI) with the key that can only upload source maps, `EVERYDECK_SOURCEMAPS_KEY`. Before a map leaves the machine, the code of libraries (`node_modules`) is dropped from `sourcesContent` and every other line is
  * scrubbed like error messages (secrets, bearer tokens, e-mail addresses); everydeck scrubs again.
  *
  * The same code runs in `everydeck-agent sourcemaps inject|upload <folder>` (any bundler) and in the Vite plugin (`@everydeck/sdk/vite`).
@@ -35,7 +37,8 @@ export const SOURCE_MAP_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface InjectedFile { file: string; map: string; debug_id: string; already?: true }
 export interface InjectResult { injected: InjectedFile[]; skipped: { file: string; reason: string }[] }
-export interface UploadTarget { url: string; key: string }
+/** `key`: the upload key, or an OIDC token of the build together with the public `browserKey` (`via` says whose) */
+export interface UploadTarget { url: string; key: string; browserKey?: string; via?: 'vercel' | 'github_actions' }
 export interface UploadResult { ok: boolean; build: string; uploaded: { file: string; debug_id: string; bytes: number }[]; failed: { file: string; status: number | null; error: string }[]; removed: string[]; reason?: string }
 
 /** Debug id of a built file: a UUID from the SHA-256 of the file and its map (version 4 and variant bits set, like Sentry's content-based ids) */
@@ -152,7 +155,7 @@ export function removeSourceMaps(dir: string): string[] {
  * Uploads every map below `dir` that has a debug id (one request per map), then removes all JavaScript source maps from the folder, also when an upload
  * failed: a map is never left public. Errors are returned, never thrown.
  */
-export async function uploadSourceMaps(dir: string, target: UploadTarget | { refused: string } | null, o: { build?: string; fetch?: typeof fetch } = {}): Promise<UploadResult> {
+export async function uploadSourceMaps(dir: string, target: UploadTarget | { refused: string } | Missing | null, o: { build?: string; fetch?: typeof fetch } = {}): Promise<UploadResult> {
   const root = resolve(dir);
   const found: { file: string; map: Record<string, unknown>; debug_id: string }[] = [];
   for (const file of walk(root, (p) => JS.test(p))) {
@@ -165,14 +168,14 @@ export async function uploadSourceMaps(dir: string, target: UploadTarget | { ref
   const res: UploadResult = { ok: false, build, uploaded: [], failed: [], removed: [] };
   if (!found.length) res.reason = 'no source map with a debug id (run inject first)';
   else if (target && 'refused' in target) res.reason = `${target.refused}; the maps were removed without upload`;
-  else if (!target) res.reason = `no key: set ${SOURCEMAPS_KEY_ENV} (and the everydeck address) where the app is built; the maps were removed without upload`;
+  else if (!target || 'missing' in target) res.reason = `${target && 'missing' in target ? MISSING_SENTENCE[target.missing] : `no key: set ${SOURCEMAPS_KEY_ENV} (and the everydeck address) where the app is built`}; the maps were removed without upload`;
   else {
     const doFetch = o.fetch ?? globalThis.fetch;
     for (const f of found) {
       const body = JSON.stringify({ build, debug_id: f.debug_id, file: f.file, map: mapForUpload(f.map) });
       if (Buffer.byteLength(body, 'utf8') > SOURCE_MAP_MAX_BYTES + 4096) { res.failed.push({ file: f.file, status: null, error: `larger than ${SOURCE_MAP_MAX_BYTES} bytes` }); continue; }
       try {
-        const r = await doFetch(`${target.url.replace(/\/$/, '')}/api/agent/sourcemaps`, { method: 'POST', headers: { authorization: `Bearer ${target.key}`, 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(60_000) });
+        const r = await doFetch(`${target.url.replace(/\/$/, '')}/api/agent/sourcemaps`, { method: 'POST', headers: { authorization: `Bearer ${target.key}`, 'content-type': 'application/json', ...(target.browserKey ? { 'x-everydeck-browser-key': target.browserKey } : {}) }, body, signal: AbortSignal.timeout(60_000) });
         const text = await r.text();
         if (r.status === 201) res.uploaded.push({ file: f.file, debug_id: f.debug_id, bytes: Buffer.byteLength(body, 'utf8') });
         else { let error = text.slice(0, 300); try { const j = JSON.parse(text) as { error?: { message?: string } | string; message?: string }; error = typeof j.error === 'string' ? j.error : j.error?.message ?? j.message ?? error; } catch { /* keep the text */ } res.failed.push({ file: f.file, status: r.status, error }); }
@@ -181,6 +184,10 @@ export async function uploadSourceMaps(dir: string, target: UploadTarget | { ref
     res.ok = res.uploaded.length === found.length;
   }
   res.removed = removeSourceMaps(root);
+  // A build that could sign in but cannot (OIDC off at Vercel) says so once per build, with the public browser key: everydeck shows the owner the switch
+  if (target && 'missing' in target && target.browserKey && target.url && found.length) {
+    try { await (o.fetch ?? globalThis.fetch)(`${target.url.replace(/\/$/, '')}/api/agent/sourcemaps/missing`, { method: 'POST', headers: { authorization: `Bearer ${target.browserKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ host: target.host, reason: target.missing }), signal: AbortSignal.timeout(10_000) }); } catch { /* the build never fails because of everydeck */ }
+  }
   return res;
 }
 
@@ -208,17 +215,50 @@ export function publicKeyNames(env: Record<string, string | undefined>, prefixes
   return Object.entries(env).filter(([k, v]) => prefixes.some((p) => p && k.startsWith(p)) && (k.endsWith(SOURCEMAPS_KEY_ENV) || SOURCEMAPS_KEY.test(v ?? ''))).map(([k]) => k).sort();
 }
 
-export interface TargetOptions { /** the everydeck address (public, may be written into the build config); default EVERYDECK_URL or EVERYDECK_ENDPOINT */ url?: string | undefined; /** folder with the app's env files (default: the current folder) */ cwd?: string | undefined; /** which .env.<mode> files (default production) */ mode?: string | undefined; /** more public prefixes (Vite `envPrefix`) */ publicPrefixes?: readonly string[] | undefined }
+/** The build runs where it could sign in by itself, but nothing lets it (the setting is off, the permission is missing) */
+export interface Missing { missing: 'oidc_off' | 'id_token_permission'; host: 'vercel' | 'github_actions'; url: string | null; browserKey: string | null }
+const MISSING_SENTENCE: Record<Missing['missing'], string> = {
+  oidc_off: 'this Vercel build has no OIDC token: turn on "Secure backend access with OIDC federation" in the project settings of Vercel (Security) and deploy again',
+  id_token_permission: 'this GitHub Actions run has no OIDC token: give the job that builds the app `permissions: id-token: write`',
+};
+
+export interface TargetOptions { /** the everydeck address (public, may be written into the build config); default EVERYDECK_URL or EVERYDECK_ENDPOINT */ url?: string | undefined;
+  /** The public browser key of the app (the one in the code that starts the browser SDK); with it a Vercel or GitHub Actions build uploads with its OIDC token */ browserKey?: string | undefined; /** folder with the app's env files (default: the current folder) */ cwd?: string | undefined; /** which .env.<mode> files (default production) */ mode?: string | undefined; /** more public prefixes (Vite `envPrefix`) */ publicPrefixes?: readonly string[] | undefined }
 
 /**
- * Where to upload: the key only from EVERYDECK_SOURCEMAPS_KEY, in the build's environment (e.g. Vercel, Netlify, GitHub Actions) or in the
- * app's env files (the git-ignored .env.local on this machine); the build's environment wins, like in the bundlers. The address from the option, else
- * EVERYDECK_URL or EVERYDECK_ENDPOINT. When the key also stands under a public name, nothing is uploaded: `{ refused }` names it (never the value).
+ * Where to upload: the key only from EVERYDECK_SOURCEMAPS_KEY, in the build's environment (e.g. Netlify) or in the app's env files; the build's
+ * environment wins, like in the bundlers. Without a key, on Vercel the build's OIDC token with the public browser key (`browserKey`); a Vercel build
+ * without that token gives `{ missing }`. The address from the option, else EVERYDECK_URL or EVERYDECK_ENDPOINT. When the key also stands under a public
+ * name, nothing is uploaded: `{ refused }` names it (never the value).
  */
-export function uploadTarget(env: Record<string, string | undefined> = process.env, o: TargetOptions = {}): UploadTarget | { refused: string } | null {
+export function uploadTarget(env: Record<string, string | undefined> = process.env, o: TargetOptions = {}): UploadTarget | { refused: string } | Missing | null {
   const all = { ...envFilesOf(o.cwd ?? process.cwd(), o.mode), ...Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined && v !== '')) } as Record<string, string | undefined>;
   const exposed = publicKeyNames(all, [...PUBLIC_ENV_PREFIXES, ...(o.publicPrefixes ?? [])]);
   if (exposed.length) return { refused: `the source map upload key stands under ${exposed.join(', ')}: a public name the bundler puts into the public code. Nothing was uploaded. Revoke that key under Technical in everydeck, remove ${exposed.join(', ')}, and set a new key only as ${SOURCEMAPS_KEY_ENV}` };
   const url = o.url || all['EVERYDECK_URL'] || all['EVERYDECK_ENDPOINT']; const key = all[SOURCEMAPS_KEY_ENV];
-  return url && key ? { url, key } : null;
+  if (url && key) return { url, key };
+  // Without a key, the build's own OIDC token (Vercel), with the public browser key that names the app
+  const browserKey = o.browserKey || null;
+  if (url && browserKey && env['VERCEL_OIDC_TOKEN']) return { url, key: env['VERCEL_OIDC_TOKEN'], browserKey, via: 'vercel' };
+  if (env['VERCEL'] === '1' && !env['VERCEL_OIDC_TOKEN']) return { missing: 'oidc_off', host: 'vercel', url: url ?? null, browserKey };
+  return null;
+}
+
+/**
+ * Like `uploadTarget`, and in GitHub Actions without a key the run's OIDC token for the everydeck address (the job needs `permissions: id-token: write`,
+ * like the guard of everydeck/check).
+ */
+export async function resolveUploadTarget(env: Record<string, string | undefined> = process.env, o: TargetOptions & { fetch?: typeof fetch } = {}): Promise<UploadTarget | { refused: string } | Missing | null> {
+  const t = uploadTarget(env, o);
+  if (t || env['GITHUB_ACTIONS'] !== 'true' || !o.browserKey) return t;
+  const url = o.url || env['EVERYDECK_URL'] || env['EVERYDECK_ENDPOINT'];
+  if (!url) return null;
+  const at = env['ACTIONS_ID_TOKEN_REQUEST_URL']; const tok = env['ACTIONS_ID_TOKEN_REQUEST_TOKEN'];
+  if (!at || !tok) return { missing: 'id_token_permission', host: 'github_actions', url, browserKey: o.browserKey };
+  try {
+    const u = new URL(at); u.searchParams.set('audience', url.replace(/\/$/, ''));
+    const r = await (o.fetch ?? globalThis.fetch)(u, { headers: { authorization: `bearer ${tok}` }, signal: AbortSignal.timeout(10_000) });
+    const v = r.ok ? ((await r.json()) as { value?: unknown }).value : null;
+    return typeof v === 'string' && v ? { url, key: v, browserKey: o.browserKey, via: 'github_actions' } : { refused: `GitHub gave no OIDC token (HTTP ${r.status})` };
+  } catch (e) { return { refused: `GitHub gave no OIDC token: ${(e as Error).message}` }; }
 }

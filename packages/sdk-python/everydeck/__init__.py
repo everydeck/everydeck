@@ -48,9 +48,9 @@ import urllib.error
 import urllib.request
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
-__all__ = ["Everydeck", "AfterCommit", "SCHEMA_VERSION", "BATCH_MAX", "DEFAULT_HEARTBEAT_INTERVAL", "error_class_of", "scrub_text", "scrub_clip", "clip_for_scrub", "SCRUB_INPUT_MAX", "answer_of", "server_config_from_supabase", "PAYMENT_EVENTS", "looks_like_card", "AI_EVENT"]
+__all__ = ["Everydeck", "AfterCommit", "SCHEMA_VERSION", "BATCH_MAX", "DEFAULT_HEARTBEAT_INTERVAL", "error_class_of", "scrub_text", "scrub_clip", "clip_for_scrub", "SCRUB_INPUT_MAX", "answer_of", "server_config_from_supabase", "PAYMENT_EVENTS", "looks_like_card", "AI_EVENT", "host_public_url"]
 
 SCHEMA_VERSION = "1.5-r0"
 # origin of every event: a server key always reports the platform `server`
@@ -159,6 +159,20 @@ def parse_retry_after(value: str | None, now: float | None = None) -> float | No
             return None
     return max(0.0, min(3600.0, secs))
 
+
+
+def host_public_url(env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
+    """The public address of this server as its host sets it (nothing to configure): Render RENDER_EXTERNAL_URL (web services), Railway
+    RAILWAY_PUBLIC_DOMAIN, Heroku HEROKU_APP_DEFAULT_DOMAIN_NAME (with dyno metadata). everydeck sets up its reachability check from it."""
+    e = os.environ if env is None else env
+    render = e.get("RENDER_EXTERNAL_URL") or ""
+    if re.fullmatch(r"https://[A-Za-z0-9.-]+", render):
+        return render, "RENDER_EXTERNAL_URL"
+    for name in ("RAILWAY_PUBLIC_DOMAIN", "HEROKU_APP_DEFAULT_DOMAIN_NAME"):
+        v = e.get(name) or ""
+        if re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", v):
+            return f"https://{v}", name
+    return None
 
 class Everydeck:
     def __init__(
@@ -380,6 +394,10 @@ class Everydeck:
         fields: dict[str, Any] = {"instance_id": self.instance_id, "interval_seconds": float(interval_seconds)}
         if job is not None:
             fields["job"] = job
+        else:
+            pub = host_public_url()
+            if pub:
+                fields["public_url"], fields["public_url_from"] = pub
         return self._enq({"kind": "signal", "name": "everydeck.sdk.heartbeat", "operation_id": f"everydeck.job:{job}" if job else f"everydeck.sdk:{self.instance_id}", "fields": fields})
 
     def error(self, name: str, error_class: str, *, message: str | None = None, operation_id: str | None = None,
@@ -551,8 +569,11 @@ class Everydeck:
             return
         self._next_heartbeat = now + self.heartbeat_interval
         self.stats["heartbeats"] += 1
-        self._enq({"kind": "signal", "name": "everydeck.sdk.heartbeat", "operation_id": f"everydeck.sdk:{self.instance_id}",
-                   "fields": {"instance_id": self.instance_id, "interval_seconds": float(self.heartbeat_interval), "pid": float(os.getpid())}})
+        fields: dict[str, Any] = {"instance_id": self.instance_id, "interval_seconds": float(self.heartbeat_interval), "pid": float(os.getpid())}
+        pub = host_public_url()
+        if pub:
+            fields["public_url"], fields["public_url_from"] = pub
+        self._enq({"kind": "signal", "name": "everydeck.sdk.heartbeat", "operation_id": f"everydeck.sdk:{self.instance_id}", "fields": fields})
 
     def _take_batch(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

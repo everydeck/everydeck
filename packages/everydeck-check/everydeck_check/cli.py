@@ -43,14 +43,24 @@ def _load(p: str) -> dict:
 PLACE_MOVED = re.compile(r"is not inside |does not mention |holds no request path |lines, evidence names line ")
 
 
+def app_map_text(doc: dict) -> str:
+    """The app map in one form, whoever writes it (validate, reanchor and the scaffold): one line per entry of each list, one line per other field. A reviewer
+    skims a few hundred lines in the pull request instead of 20 000 (almost the whole pull request before), a change shows as the
+    entries it changes, and the next run writes the same bytes."""
+    one = lambda x: json.dumps(x, ensure_ascii=False, separators=(",", ":"))   # the same bytes as JSON.stringify in the scaffold
+    rows = []
+    for k, v in doc.items():
+        if isinstance(v, list) and v:
+            rows.append(f" {one(k)}: [\n" + ",\n".join("  " + one(x) for x in v) + "\n ]")
+        else:
+            rows.append(f" {one(k)}: {one(v)}")
+    return "{\n" + ",\n".join(rows) + "\n}\n"
+
+
 def _write_like(source: str, target: str, doc: dict) -> None:
-    """Write the app map with the indentation of the file it was read from (validate, reanchor and the scaffold's --merge
-    each wrote their own before, so every run rewrote every line); a file without one gets the scaffold's (one space)."""
-    try: head = Path(source).read_text(encoding="utf-8")[:200]
-    except OSError: head = ""
-    m = re.match(r"\{\r?\n([ \t]+)\"", head)
-    indent: int | str = (m.group(1) if "\t" in m.group(1) else len(m.group(1))) if m else 1
-    Path(target).write_text(json.dumps(doc, indent=indent, ensure_ascii=False) + "\n", encoding="utf-8")
+    """Write the app map in its one form (app_map_text); validate, reanchor and the scaffold's --merge wrote their own indentation before, so every run
+    rewrote every line. `source` stays for the callers."""
+    Path(target).write_text(app_map_text(doc), encoding="utf-8")
 
 
 def _load_manifest(p: str) -> tuple[dict, dict | None, str]:
@@ -332,6 +342,14 @@ def cmd_local_db(a: argparse.Namespace) -> int:
     return 0 if out["status"] == "found" else 2
 
 
+def cmd_runtime(a: argparse.Namespace) -> int:
+    """The Python and Node versions the app really uses (Dockerfile, .python-version, runtime.txt, pyproject, .nvmrc, engines), what this session has, how to check with the app's."""
+    from .runtime import runtime_report
+    out = runtime_report(Path(a.repo))
+    print(json.dumps(out, indent=1))
+    return 0 if out["status"] == "ok" else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="everydeck-check")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -350,12 +368,14 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--repo", default="."); rs.add_argument("--timeout", type=int, default=STACK_RESTART_TIMEOUT, help=f"seconds per command (default {STACK_RESTART_TIMEOUT})"); rs.set_defaults(fn=cmd_restart_stack)
     ld = sub.add_parser("local-db", help="the app's local database for --db: supabase/config.toml, or a local Supabase stack or PostgreSQL the app's env files name (no value is printed)")
     ld.add_argument("--repo", default="."); ld.set_defaults(fn=cmd_local_db)
+    rt = sub.add_parser("runtime", help="the Python and Node versions the app uses (Dockerfile, .python-version, runtime.txt, pyproject, .nvmrc, engines) against this session; run checks with the app's")
+    rt.add_argument("--repo", default="."); rt.set_defaults(fn=cmd_runtime)
     ch = sub.add_parser("change", help="check everydeck-change.json against manifest, repo and HEAD; optionally publish it")
     ch.add_argument("change"); ch.add_argument("--manifest", required=True); ch.add_argument("--repo", default="."); ch.add_argument("--sha", default=None)
     ch.add_argument("--url"); ch.add_argument("--project"); ch.add_argument("--token"); ch.set_defaults(fn=cmd_change)
     a = p.parse_args(argv)
     a.file_note = None
-    if a.cmd not in ("change", "footprint", "keys", "restart-stack", "local-db"):
+    if a.cmd not in ("change", "footprint", "keys", "restart-stack", "local-db", "runtime"):
         for attr in ("manifest", "app_map"):
             if hasattr(a, attr):
                 path, a.file_note = map_path(getattr(a, attr)); setattr(a, attr, path)

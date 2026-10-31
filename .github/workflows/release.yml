@@ -36,6 +36,7 @@ jobs:
       name: ${{ steps.prepare.outputs.name }}
       version: ${{ steps.prepare.outputs.version }}
       npm_tag: ${{ steps.prepare.outputs.npm_tag }}
+      pythons: ${{ steps.prepare.outputs.pythons }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -74,6 +75,33 @@ jobs:
           name: package
           path: dist/
           if-no-files-found: error
+  python:
+    # every Python the package supports, before anything is published: the oldest from requires-python and the newest (like sentry-python's matrix);
+    # the build above uses 3.12, under which a 3.12-only expression would pass
+    name: test ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} on Python ${{ matrix.python }}
+    needs: build
+    if: needs.build.outputs.registry == 'pypi'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.build.outputs.pythons) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: dist/
+      - name: package test
+        run: |
+          python3 -c "import platform; print('Python', platform.python_version())"
+          node .github/release/smoke.mjs "${{ needs.build.outputs.package }}" dist
   npm:
     name: publish ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} to npm
     needs: build
@@ -107,7 +135,7 @@ jobs:
           fi
   pypi:
     name: publish ${{ needs.build.outputs.name }} ${{ needs.build.outputs.version }} to PyPI
-    needs: build
+    needs: [build, python]
     if: needs.build.outputs.registry == 'pypi'
     runs-on: ubuntu-latest
     environment: pypi
