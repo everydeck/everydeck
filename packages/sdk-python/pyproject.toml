@@ -1,6 +1,6 @@
 [project]
 name = "everydeck"
-version = "0.5.5"
+version = "0.5.6"
 description = "everydeck Python SDK: bounded buffer, background sender, flush on shutdown, reported data gaps"
 readme = "README.md"
 license = "MIT"

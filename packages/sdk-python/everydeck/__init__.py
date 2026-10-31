@@ -77,7 +77,10 @@ def payment_key(short: str, pid: str, sub: str | None = None) -> str:
     """The business key of a payment event: one per event of an order, with the refund or attempt id; too long, a hash of both ids (as in the TS SDK)."""
     if not sub: return f"everydeck.pay:{short}:{pid}"
     key = f"everydeck.pay:{short}:{pid}:{sub}"
-    return key if len(key) <= _KEY_MAX else f"everydeck.pay:{short}:h:{hashlib.sha256(f'{pid}\n{sub}'.encode()).hexdigest()}"
+    if len(key) <= _KEY_MAX: return key
+    # the hash outside the f-string: a backslash inside an f-string expression needs Python 3.12 (PEP 701), and we support 3.11
+    digest = hashlib.sha256(f"{pid}\n{sub}".encode()).hexdigest()
+    return f"everydeck.pay:{short}:h:{digest}"
 
 
 _AUTH = {401, 403}
