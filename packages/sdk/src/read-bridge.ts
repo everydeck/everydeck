@@ -190,7 +190,10 @@ export function createReadBridge(o: ReadBridgeOptions) {
    *  loop of an Edge Function would end); a missing table or column of one type is that type's state (409), the other types are read */
   async function handle(req: ReadBridgeRequest): Promise<ReadBridgeResponse> {
     try { return await answer(req); }
-    catch (e) { const code = (e as { code?: unknown } | null)?.code; return { status: 500, body: { error: `the read bridge could not read the database${typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? ` (SQLSTATE ${code})` : ''}` } }; }
+    catch (e) { const code = (e as { code?: unknown } | null)?.code; const known = typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code);
+      // a lock held by another session (55P03, lock_timeout) and a query over its time (57014, statement_timeout) in words: everydeck shows them to the owner
+      const why = code === '55P03' ? ': another session holds a lock on the table' : code === '57014' ? ': the query took longer than the bridge allows' : '';
+      return { status: 500, body: { error: `the read bridge could not read the database${why}${known ? ` (SQLSTATE ${code})` : ''}` } }; }
   }
   async function answer(req: ReadBridgeRequest): Promise<ReadBridgeResponse> {
     const path = req.path.split('?')[0]!;

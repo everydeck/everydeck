@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.12
+
+- **The read bridge says why instead of leaving everydeck waiting.** Each query of the bridge runs at most 20 s (`statement_timeout`) and waits at most 5 s for a lock (`lock_timeout`, like `pg_dump --lock-wait-timeout`), set in its own read-only transaction; everydeck waits 30 s for an answer. A table locked by another session (for example a migration left in an open transaction) answers `500` with "another session holds a lock on the table (SQLSTATE 55P03)", a query over its time with SQLSTATE 57014. Before, the query waited and everydeck only saw "timeout", every run at the same page. In pull mode an answer everydeck refuses (larger than it takes, 413) is now reported as `502` with its size, and an error while answering becomes a `500` answer instead of ending the pull loop. everydeck reads such a type with smaller pages from where it stopped; every other type is read as before.
+
 ## 0.5.11
 
 - **Source maps without a key at Vercel and in GitHub Actions.** Give the plugin the public browser key: `everydeckSourceMaps({ url, browserKey })` (or `everydeck-sourcemaps upload <folder> --url <address> --browser-key <key>`). A build at Vercel then signs in with the OIDC token Vercel gives each build (`VERCEL_OIDC_TOKEN`, when "Secure backend access with OIDC federation" is on in the project), a run in GitHub Actions with its own OIDC token (the job needs `permissions: id-token: write`), the way they sign in to a cloud. Nobody adds `EVERYDECK_SOURCEMAPS_KEY` there; elsewhere (Netlify, other CI) the key works as before and goes first. A Vercel build without the token uploads nothing, says why in the build log and tells everydeck once, so the owner sees the one switch to turn on.

@@ -73,6 +73,21 @@ def verify_scope_signature(keys: Iterable[str], payload: str, signature: str | N
     return False
 
 
+# How long one query of the bridge may run and how long it may wait for a lock, set in each of its read-only transactions (SET LOCAL, like pg_dump's
+# --lock-wait-timeout). everydeck waits 30 s for an answer; below that the bridge answers with the reason (SQLSTATE 57014, 55P03) instead of never.
+READ_STATEMENT_TIMEOUT_MS = 20_000
+READ_LOCK_TIMEOUT_MS = 5_000
+TIMEOUTS_SQL = f"SELECT set_config('statement_timeout', '{READ_STATEMENT_TIMEOUT_MS}', true), set_config('lock_timeout', '{READ_LOCK_TIMEOUT_MS}', true)"
+
+
+def failed_answer(e: BaseException) -> tuple[int, dict[str, str]]:
+    """A failed query as an answer (500 with its SQLSTATE), never a thrown error: a lock held by another session and a query over its time in words"""
+    code = getattr(e, "sqlstate", None) or getattr(e, "pgcode", None) or getattr(e, "code", None)
+    known = isinstance(code, str) and len(code) == 5 and code.isalnum()
+    why = ": another session holds a lock on the table" if code == "55P03" else ": the query took longer than the bridge allows" if code == "57014" else ""
+    return 500, {"error": f"the read bridge could not read the database{why}{f' (SQLSTATE {code})' if known else ''}"}
+
+
 class PsycopgReadOnly:
     """The app's connection via psycopg 3: `PsycopgReadOnly(conninfo)` or `PsycopgReadOnly(connect=lambda: …)`; every query in BEGIN READ ONLY … COMMIT."""
 
@@ -91,6 +106,7 @@ class PsycopgReadOnly:
             cur = conn.cursor()
             cur.execute("BEGIN READ ONLY")
             try:
+                cur.execute(TIMEOUTS_SQL)
                 out = fn(conn)
                 conn.cursor().execute("COMMIT")
                 return out
@@ -289,11 +305,22 @@ def pull_once(bridge: "EverydeckReadBridge", wait: int = PULL_WAIT_S, http: Call
     parts = urllib.parse.urlsplit(path)
     query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
     body = job.get("body")
-    code, out = bridge.handle(str(job.get("method", "GET")), parts.path, query, None, headers=dict(job.get("headers") or {}),
-                              body=body.encode() if isinstance(body, str) else None, url=path)
+    # every request gets an answer: a thrown error would leave everydeck waiting until its time limit ("timeout")
     try:
-        call("POST", f"{bridge.endpoint}/v1/read-bridge/reply/{urllib.parse.quote(str(job.get('id', '')))}", {**auth, "content-type": "application/json"},
-             json.dumps({"status": code, "body": json.dumps(out)}).encode(), 30)
+        code, out = bridge.handle(str(job.get("method", "GET")), parts.path, query, None, headers=dict(job.get("headers") or {}),
+                                  body=body.encode() if isinstance(body, str) else None, url=path)
+    except Exception as e:
+        code, out = failed_answer(e)
+
+    def send(status: int, answer: Any) -> tuple[int, int]:
+        data = json.dumps({"status": status, "body": json.dumps(answer)}).encode()
+        got, _ = call("POST", f"{bridge.endpoint}/v1/read-bridge/reply/{urllib.parse.quote(str(job.get('id', '')))}", {**auth, "content-type": "application/json"}, data, 30)
+        return got, len(data)
+    try:
+        got, size = send(code, out)
+        # everydeck takes an answer up to its size limit and refuses a bigger one (413, 400): say so instead of leaving everydeck waiting
+        if got in (413, 400):
+            send(502, {"error": f"the answer was larger than everydeck takes ({size} bytes)"})
     except Exception:
         return "unreachable"
     return "answered"

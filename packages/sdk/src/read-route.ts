@@ -11,7 +11,8 @@
  *  - It fetches the read scope from everydeck (GET <endpoint>/v1/read-scope, bridge key as Bearer). everydeck signs it with the same key
  *    (HMAC-SHA256 over "EVERYDECK-SCOPE-V1\n" + payload); without a valid signature the route reads nothing (503). It keeps it for at most `scopeTtlSeconds`.
  *  - Every query runs in its own read-only transaction on the app's connection (postgres.js: sql.begin('read only'), pg Pool: BEGIN READ ONLY):
- *    the database itself rejects every write inside it (SQLSTATE 25006). Only tables and columns from the signed scope are read.
+ *    the database itself rejects every write inside it (SQLSTATE 25006). Only tables and columns from the signed scope are read. A query runs at most
+ *    READ_STATEMENT_TIMEOUT_MS and waits at most READ_LOCK_TIMEOUT_MS for a lock; then the bridge answers with the reason instead of leaving everydeck waiting.
  *  - A `date` leaves as its calendar day at midnight UTC in every time zone of the app server (pg: per query, never a global parser; postgres.js reads it so itself).
  *  - It reports its rights as checked: the connection's role, whether it is a superuser, whether it bypasses the app's row security (rolbypassrls), whether the
  *    transaction really is read-only (current_setting('transaction_read_only')) and on which tables the role itself could write.
@@ -39,19 +40,25 @@ interface PostgresJsLike { begin: (options: string, fn: (tx: { unsafe: (text: st
 interface PgPoolLike { connect: () => Promise<{ query: (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>; release: (err?: Error | boolean) => void }> }
 export type AppDb = ReadOnlyDb | PostgresJsLike | PgPoolLike;
 
+/** How long one query of the bridge may run and how long it may wait for a lock, set in each of its read-only transactions (SET LOCAL, like pg_dump's
+ *  --lock-wait-timeout). everydeck waits 30 s for an answer; below that the bridge answers with the reason (SQLSTATE 57014, 55P03) instead of never. */
+export const READ_STATEMENT_TIMEOUT_MS = 20_000;
+export const READ_LOCK_TIMEOUT_MS = 5_000;
+const TIMEOUTS_SQL = `SELECT set_config('statement_timeout', '${READ_STATEMENT_TIMEOUT_MS}', true), set_config('lock_timeout', '${READ_LOCK_TIMEOUT_MS}', true)`;
+
 const hasFn = (x: unknown, name: string): boolean => (typeof x === 'object' || typeof x === 'function') && x !== null && typeof (x as Record<string, unknown>)[name] === 'function';
 /** The app's connection as a read-only database: postgres.js, a pg Pool or something with readOnly() */
 export function readOnlyDb(db: AppDb): ReadOnlyDb {
   if (hasFn(db, 'readOnly')) return db as ReadOnlyDb;
   if (hasFn(db, 'begin')) {
     const sql = db as PostgresJsLike;
-    return { readOnly: async <T>(fn: (q: QueryClient) => Promise<T>) => (await sql.begin('read only', (tx) => fn({ query: async (text, values = []) => ({ rows: (await tx.unsafe(text, values)) as Record<string, unknown>[] }) }))) as T };
+    return { readOnly: async <T>(fn: (q: QueryClient) => Promise<T>) => (await sql.begin('read only', async (tx) => { await tx.unsafe(TIMEOUTS_SQL); return fn({ query: async (text, values = []) => ({ rows: (await tx.unsafe(text, values)) as Record<string, unknown>[] }) }); })) as T };
   }
   if (hasFn(db, 'connect')) {
     const pool = db as PgPoolLike;
     return { readOnly: async <T>(fn: (q: QueryClient) => Promise<T>) => {
       const c = await pool.connect(); let failed: unknown = null;
-      try { await c.query('BEGIN READ ONLY'); const out = await fn({ query: (text, values) => readQuery(c, text, values ?? []) }); await c.query('COMMIT'); return out; }
+      try { await c.query('BEGIN READ ONLY'); await c.query(TIMEOUTS_SQL); const out = await fn({ query: (text, values) => readQuery(c, text, values ?? []) }); await c.query('COMMIT'); return out; }
       catch (e) { failed = e; try { await c.query('ROLLBACK'); } catch { /* connection broken: the pool discards it */ } throw e; }
       finally { c.release(failed instanceof Error && !(failed as { code?: string }).code ? failed : undefined); } } };
   }
@@ -170,9 +177,17 @@ export function everydeckReadBridge(o: ReadRouteOptions) {
     if (res.status !== 200) { await res.body?.cancel(); return 'unreachable'; }
     const job = await res.json() as { id: string; method: string; path: string; headers?: Record<string, string>; body?: string };
     const u = new URL(job.path, 'http://bridge');
-    const r = await handle({ method: job.method, path: u.pathname, query: Object.fromEntries(u.searchParams), headers: new Headers(job.headers ?? {}), url: job.path, body: job.body ? enc.encode(job.body) : null });
-    try { const a = await f()(`${endpoint}/v1/read-bridge/reply/${encodeURIComponent(job.id)}`, { method: 'POST', headers: { authorization: `Bearer ${keys[0]}`, 'content-type': 'application/json' }, body: JSON.stringify({ status: r.status, body: JSON.stringify(r.body) }) }); await a.body?.cancel(); }
-    catch { return 'unreachable'; }
+    // every request gets an answer: a thrown error would end the pull loop and leave everydeck waiting until its time limit ("timeout")
+    let r: ReadBridgeResponse;
+    try { r = await handle({ method: job.method, path: u.pathname, query: Object.fromEntries(u.searchParams), headers: new Headers(job.headers ?? {}), url: job.path, body: job.body ? enc.encode(job.body) : null }); }
+    catch { r = { status: 500, body: { error: 'the read bridge failed while answering' } }; }
+    const send = async (x: ReadBridgeResponse) => { const body = JSON.stringify({ status: x.status, body: JSON.stringify(x.body) });
+      const a = await f()(`${endpoint}/v1/read-bridge/reply/${encodeURIComponent(job.id)}`, { method: 'POST', headers: { authorization: `Bearer ${keys[0]}`, 'content-type': 'application/json' }, body }); await a.body?.cancel(); return { status: a.status, bytes: enc.encode(body).length }; };
+    try {
+      const a = await send(r);
+      // everydeck takes an answer up to its size limit and refuses a bigger one (413, 400): say so instead of leaving everydeck waiting
+      if (a.status === 413 || a.status === 400) await send({ status: 502, body: { error: `the answer was larger than everydeck takes (${a.bytes} bytes)` } });
+    } catch { return 'unreachable'; }
     return 'answered';
   }
   /** `waitSeconds`: longest wait of one pull (default and at most PULL_WAIT_S, 50 s), lower behind a proxy that cuts requests earlier */
