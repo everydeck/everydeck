@@ -24,6 +24,12 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.13
+
+- Same version as the scaffold `@everydeck/check` 0.3.13 (the two are a pair). `not_in_database`: tables the code creates that the database does not have (found by the scaffold with `--db`). `validate` refuses them in `tables` and answers anything that names them with the reason ("is in the code but not in the database"); the inventory leaves them out (no table, no candidate).
+- `validate --db` accepts a trigger that the scaffold read from the database (`flow_candidates[]` with `source: trigger` and the place `database`): it checks the table, as for every trigger from the catalog. Before, it looked for the trigger's name among the tables and refused the scaffold's own entry.
+- With the scaffold's `--merge`, flow candidates that everydeck-check found and the scaffold does not stay in the app map.
+
 ### 0.3.12
 
 - Same version as the scaffold `@everydeck/check` 0.3.12 (the two are a pair) and the same rules: the open part `people:visits` asks for the organization as the second value of `everydeck.setSubject(<user id>, <organization id>)`, the same id the app's server sends as `account_ref`.

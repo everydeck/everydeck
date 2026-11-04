@@ -63,6 +63,10 @@ RESULT_SIGNAL_NOW = ("Write it now, before any key exists: the SDK you add in th
                      "Choose the place yourself from the app map; do not ask the owner.")
 
 
+NOT_IN_DATABASE_NOTE = ("is in the code but not in the database (not_in_database, found by the scaffold with --db): it is no part of the app; "
+                        "leave it out of tables, the checklist and every other list")
+
+
 def _provider_hint(b: dict[str, Any], provider: str) -> str:
     """identity.provider (supabase_auth) is no component id; its component is the one at the same place (the package of @supabase/supabase-js)."""
     idn = b.get("identity") or {}
@@ -208,7 +212,10 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         if w.get("part_of") == w["table"]: errs.append(f"{at}: part_of names the table itself")
     if not any((s.get("step") == "result") for f in b.get("flows", []) for s in (f.get("signals") or [])):
         errs.append("flows: at least one flow needs a result signal (the code that reports the result to everydeck, with evidence). " + RESULT_SIGNAL_NOW)
-    return errs
+    # a table only in the code (not_in_database) is no part of the app; whoever names it gets that reason instead of "not in the app map"
+    code_only = {x["table"] for x in b.get("not_in_database") or []}
+    errs += [f"tables: {t['name']} {NOT_IN_DATABASE_NOTE}" for t in b.get("tables", []) if t["name"] in code_only]
+    return [re.sub(r"table (\S+) is not in the app map(?:; .*)?$", lambda m: f"table {m.group(1)} {NOT_IN_DATABASE_NOTE}" if m.group(1) in code_only else m.group(0), e) for e in errs]
 
 
 # ── places: file, line, symbol ──
@@ -431,7 +438,10 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
     for i, o in enumerate(b.get("outcomes", []) or []):
         if o.get("not_applicable"): _check_evidence(files, o["not_applicable"]["evidence"], f"outcomes[{i}] {o['id']}.not_applicable", sym(o["not_applicable"]["evidence"]), errs)
     for i, c in enumerate(b.get("flow_candidates", []) or []):
-        _check_evidence(files, c["evidence"], f"flow_candidates[{i}] {c['id']}", [c["evidence"]["symbol"]] if c["evidence"].get("symbol") else [], errs)
+        ev = c["evidence"]
+        # a trigger the scaffold read from the database carries its bare name; it is a trigger, not a table (the table is checked above)
+        if c.get("source") == "trigger" and ev.get("path") == "database" and ev.get("symbol") and not str(ev["symbol"]).startswith("trigger "): ev = {**ev, "symbol": f"trigger {ev['symbol']}"}
+        _check_evidence(files, ev, f"flow_candidates[{i}] {c['id']}", [ev["symbol"]] if ev.get("symbol") else [], errs)
         if c.get("handler"): _check_evidence(files, c["handler"], f"flow_candidates[{i}] {c['id']}.handler", [], errs)
     ident = b.get("identity")
     if ident:

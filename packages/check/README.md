@@ -23,6 +23,13 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.13
+
+- A table the migrations create that the database does not have is no part of the app: with `--db` the scaffold leaves it out of `tables` and lists it in the new `not_in_database` (table and place); a run without a database (the GitHub Action after the merge, `--merge`) keeps it out from there instead of bringing it back from the migrations. `validate` says why such a table may stand nowhere else (shared rules with `everydeck-check` 0.3.13).
+- `--merge` pairs each AI call with its own entry of the last run (the calls of one file with the same symbol in their order) and moves a model only with its own call. Before, a call whose model the code does not name (`model=get_model()`) took the model of the nearest other call in the same file, and `everydeck-check validate` refused it.
+- `--merge` keeps the coding agent's sentence for a mention in `not_shown` where this run finds the mention again (same file, within three lines); before, every rerun put the generic sentence back.
+- `--merge` keeps a flow candidate of the merged app map that this scan does not find itself (everydeck-check found it, or the agent read it with `--db`), as long as its file is in the repository. Before, the GitHub Action dropped it after the merge, and everydeck counted a part it already knew as new and open.
+
 ### 0.3.12
 
 - The app map in one form, as everydeck-check writes it: one line per entry of each list, one line per other field (a few hundred lines in a pull request instead of 20 000). The content is unchanged; a second run writes the same bytes. A file with another indentation is brought into this form once.

@@ -188,6 +188,10 @@ for (const f of files.filter((p) => p.endsWith('.rules'))) { const src = text(f)
 //    from the catalog; tables and columns that do not exist there are dropped. Places in the migrations stay where they exist.
 const dbUrl = opt('--db') ?? process.env.EVERYDECK_SCHEMA_DB_URL ?? null;
 let catalog = null;
+// A table the migrations create that the database does not have is no part of the app (it would reach the approval and the read bridge). With --db
+// the skeleton leaves it out and says so in not_in_database; a run without a database (the GitHub Action after the merge) keeps it out from there, instead of
+// bringing it back from the migrations onto the approval and to the read bridge
+const notInDb = new Map();
 if (dbUrl) {
   const { readCatalog, checkValues } = await import('./scaffold-db.mjs');
   catalog = await readCatalog(dbUrl, repo, files);
@@ -196,7 +200,7 @@ if (dbUrl) {
   const fromDb = new Set(catalog.tables.map((t) => key(t.schema, t.name)));
   const known = [...tables.values()].filter((t) => fromDb.has(key(t.schema ?? 'public', t.name)));
   if (tables.size && !known.length) throw new Error(`the ${/^https?:\/\//i.test(dbUrl) ? 'structure at --db' : 'database at --db'} has none of the ${tables.size} tables of the migrations; is it the database of this app?`);
-  for (const [name, t] of [...tables]) if (t.kind === 'table' && !fromDb.has(key(t.schema ?? 'public', t.name))) tables.delete(name);   // in the repo, not in the database: it does not exist
+  for (const [name, t] of [...tables]) if (t.kind === 'table' && !fromDb.has(key(t.schema ?? 'public', t.name))) { notInDb.set(name, { table: name, defined: t.defined }); tables.delete(name); }   // in the repo, not in the database: it does not exist
   for (const dt of catalog.tables) {
     let t = tables.get(dt.name);
     if (t && (t.schema ?? 'public') !== dt.schema) continue;   // same name in another schema: the repo's table stays authoritative
@@ -323,6 +327,8 @@ const BLOCKS = ['login', 'people_roles', 'organizations', 'content_status', 'mod
 const OLD_NAME = 'everydeck-befund.json';
 const mergeFile = (() => { const m = opt('--merge'); if (!m) return null; if (existsSync(m)) return m; const old = join(m, '..', OLD_NAME); return /(^|[\\/])app-map\.json$/.test(m) && existsSync(old) ? old : null; })();
 const merge = mergeFile ? JSON.parse(readFileSync(mergeFile, 'utf8')) : null;
+// without a database what an earlier run with --db found stays true, as long as the code still creates the table
+if (!catalog) for (const x of merge?.not_in_database ?? []) { const t = tables.get(x.table); if (t?.kind === 'table') { notInDb.set(x.table, { table: x.table, defined: t.defined }); tables.delete(x.table); } }
 // ── Display places: every data access in the frontend, through the syntax tree (scaffold-reads.mjs) ──
 // Direct (supabase.from('x' as never), Firestore, ORM, SQL), through .rpc('fn') → tables of the SQL function, functions.invoke('n') → tables of the Edge
 // Function, Realtime postgres_changes, views → base tables, API calls (`${API_BASE}/persons/${id}` → /persons/:p) → tables that the route
@@ -397,8 +403,12 @@ for (const m of reads.not_shown) { const t = tables.get(m.table); if (!t) contin
 // Without a database (the GitHub Action) the skeleton sees only the migrations; what the agent read from the database with --db and the migrations do
 // not say (a foreign key, the allowed values, a default) stays on the column. With --db the database decides. The skeleton replaces a fact only with its own.
 const dbFactsOf = (oc, c) => ({ ...(oc.fk && !c.fk ? { fk: oc.fk } : {}), ...(oc.enum?.length && !c.enum?.length ? { enum: oc.enum } : {}), ...(oc.default !== undefined && c.default === undefined ? { default: oc.default } : {}) });
-const keptOld = (merge?.tables ?? []).filter((x) => !tables.has(x.name) && (!catalog || catalog.tables.some((d) => d.name === x.name)));
-const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.tables?.find((x) => x.name === t.name); if (!old) return t; const keep = (old.shown ?? []).filter((x) => x.element !== 'data'); const { not_shown: _dropped, shown: _old, copy_of: _copy, ...rest } = old; return { ...rest, defined: t.defined, ...(t.copy_of ? { copy_of: t.copy_of } : {}), ...(keep.length || t.shown ? { shown: [...keep, ...(t.shown ?? [])].slice(0, 60) } : {}), ...(t.not_shown ? { not_shown: t.not_shown } : {}), columns: [...t.columns.map((c) => { const oc = old.columns.find((x) => x.name === c.name); if (!oc) return c; const keepShown = (oc.shown ?? []).filter((x) => x.element !== 'data' && !(c.shown ?? []).some((y) => y.element === x.element && y.path === x.path && y.line === x.line));   /* what the skeleton finds again itself (money), not twice */ const shownAll = [...keepShown, ...(c.shown ?? [])].slice(0, 12); return { ...c, ...(oc.external_id && !c.external_id ? { external_id: oc.external_id } : {}), ...(oc.contact && !c.contact ? { contact: oc.contact } : {}), ...(oc.not_contact && !c.contact && !c.not_contact ? { not_contact: oc.not_contact } : {}), ...(!catalog ? dbFactsOf(oc, c) : {}), ...(shownAll.length ? { shown: shownAll } : {}) };   /* the agent's contact and not_contact facts stay */ }), ...old.columns.filter((x) => !t.columns.some((c) => c.name === x.name) && !(catalog && t.kind === 'table'))] }; }), ...keptOld];   // the agent's column display places (heading, money …) stay, the skeleton renews data places; with --db only the database columns count   // skeleton parts (data display places, not_shown) are renewed; agent entries and columns added by the agent (e.g. Firestore) stay
+const keptOld = (merge?.tables ?? []).filter((x) => !tables.has(x.name) && !notInDb.has(x.name) && (!catalog || catalog.tables.some((d) => d.name === x.name)));
+// Where this run finds a mention again (same file, within 3 lines), the agent's sentence for it stays (like an override in a
+// lockfile); everything else of not_shown is renewed. Before, every --merge put the generic sentence back and the agent wrote its own again.
+const keptNotShown = (fresh, old) => fresh.map((n) => (old ?? []).find((o) => o.path === n.path && Math.abs(o.line - n.line) <= 3 && o.fact) ?? n)
+  .filter((n, i, all) => all.findIndex((x) => x.path === n.path && x.line === n.line) === i);
+const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.tables?.find((x) => x.name === t.name); if (!old) return t; const keep = (old.shown ?? []).filter((x) => x.element !== 'data'); const { not_shown: _dropped, shown: _old, copy_of: _copy, ...rest } = old; return { ...rest, defined: t.defined, ...(t.copy_of ? { copy_of: t.copy_of } : {}), ...(keep.length || t.shown ? { shown: [...keep, ...(t.shown ?? [])].slice(0, 60) } : {}), ...(t.not_shown ? { not_shown: keptNotShown(t.not_shown, old.not_shown) } : {}), columns: [...t.columns.map((c) => { const oc = old.columns.find((x) => x.name === c.name); if (!oc) return c; const keepShown = (oc.shown ?? []).filter((x) => x.element !== 'data' && !(c.shown ?? []).some((y) => y.element === x.element && y.path === x.path && y.line === x.line));   /* what the skeleton finds again itself (money), not twice */ const shownAll = [...keepShown, ...(c.shown ?? [])].slice(0, 12); return { ...c, ...(oc.external_id && !c.external_id ? { external_id: oc.external_id } : {}), ...(oc.contact && !c.contact ? { contact: oc.contact } : {}), ...(oc.not_contact && !c.contact && !c.not_contact ? { not_contact: oc.not_contact } : {}), ...(!catalog ? dbFactsOf(oc, c) : {}), ...(shownAll.length ? { shown: shownAll } : {}) };   /* the agent's contact and not_contact facts stay */ }), ...old.columns.filter((x) => !t.columns.some((c) => c.name === x.name) && !(catalog && t.kind === 'table'))] }; }), ...keptOld];   // the agent's column display places (heading, money …) stay, the skeleton renews data places; with --db only the database columns count   // skeleton parts (data display places, not_shown) are renewed; agent entries and columns added by the agent (e.g. Firestore) stay
 // ── Copies of contact data and messages. If an SQL function of the app writes a value marked as contact (also shortened
 //    or transformed, left(NEW.content, 140)) into another column, that column is the same fact: NEW./OLD. of a trigger's table, local variables
 //    from them, and INSERT … SELECT from the table itself. The place is where the function writes the column (the column is named there). Copies
@@ -571,9 +581,18 @@ const identityOut = detectPeople({ tables: mergedTables, components, money, ...(
 // An entry of the last run that this run finds again (same provider, kind, file and symbol) is renewed at its new line; a model the
 // agent named moves with it (by the same number of lines). Only entries this run does not find at all (an own wrapper the agent named) stay as they were.
 const sameAiCall = (a, o) => a.provider === o.provider && a.kind === o.kind && a.evidence?.path === o.evidence?.path && (a.evidence?.symbol ?? '') === (o.evidence?.symbol ?? '');
+// Each call of this run is paired with exactly one entry of the last run: the calls of one file with the same symbol in their
+// order (the n-th with the n-th, when both runs find as many), else each with the nearest entry not yet paired. A model moves only with its own call;
+// before, a call without a model in the code (model=get_analysis_model()) took the model of the nearest other call, and validate refused it.
+const aiPartner = new Map();
+for (const a of aiCalls) { if (aiPartner.has(a)) continue;
+  const now = aiCalls.filter((x) => sameAiCall(x, a)).sort((x, y) => x.evidence.line - y.evidence.line); const before = (merge?.ai_calls ?? []).filter((x) => sameAiCall(a, x)).sort((x, y) => x.evidence.line - y.evidence.line);
+  if (now.length === before.length) { now.forEach((x, i) => aiPartner.set(x, before[i])); continue; }
+  const pairs = now.flatMap((x) => before.map((y) => [x, y, Math.abs(x.evidence.line - y.evidence.line)])).sort((p, q) => p[2] - q[2]); const taken = new Set();
+  for (const [x, y] of pairs) if (!aiPartner.has(x) && !taken.has(y)) { aiPartner.set(x, y); taken.add(y); }
+  for (const x of now) if (!aiPartner.has(x)) aiPartner.set(x, null); }
 const aiOut = [...aiCalls.map((a) => { if (a.model) return a;
-  const o = (merge?.ai_calls ?? []).filter((x) => x.model && sameAiCall(a, x)).sort((x, y) => Math.abs(x.evidence.line - a.evidence.line) - Math.abs(y.evidence.line - a.evidence.line))[0];
-  if (!o) return a; const d = a.evidence.line - o.evidence.line;
+  const o = aiPartner.get(a); if (!o?.model) return a; const d = a.evidence.line - o.evidence.line;
   return { ...a, model: o.model.evidence.path === a.evidence.path ? { ...o.model, evidence: { ...o.model.evidence, line: o.model.evidence.line + d } } : o.model }; }),
   ...(merge?.ai_calls ?? []).filter((o) => !aiCalls.some((a) => keyOf(a) === keyOf(o) || sameAiCall(a, o)))].slice(0, 200);
 const authPlaces = [];
@@ -595,7 +614,10 @@ for (const td of [...trigDefs.values()].filter((t) => t.place).sort((a, b) => by
   if (td.when !== 'after' || /^everydeck/i.test(td.fn) || /^everydeck/i.test(td.name) || !mergedTables.some((t) => t.name === td.table) || (merge?.everydeck_tables ?? []).some((y) => y.table === td.table)) continue;
   addCand({ id: `trigger:${td.table}:${td.name}`, source: 'trigger', kind: td.event, table: td.table, evidence: { ...td.place, symbol: td.name } });
 }
-const flowCandidates = candidateWays(candidates).slice(0, 500).map((c) => { const old = (merge?.flow_candidates ?? []).find((x) => x.id === c.id); return old?.left_out ? { ...c, left_out: old.left_out } : c; });
+const foundWays = candidateWays(candidates).slice(0, 500).map((c) => { const old = (merge?.flow_candidates ?? []).find((x) => x.id === c.id); return old?.left_out ? { ...c, left_out: old.left_out } : c; });
+// A candidate of the merged app map that this scan does not find (everydeck-check found it, or the agent read it with --db) stays while its
+// file is in the repository; before, the GitHub Action dropped it after the merge and everydeck counted a found part as new and open
+const flowCandidates = [...foundWays, ...(merge?.flow_candidates ?? []).filter((x) => !foundWays.some((c) => c.id === x.id) && x.evidence?.path && existsSync(join(repo, x.evidence.path)))].slice(0, 500);
 // ── Page descriptions (screens[].described) from facts: the file behind the route (or the route file of the framework) and its own imports, two levels
 //    deep, without modules more than three pages share; the tables they show and the flows of the app map that start there. The agent's description stays.
 const pageFileOf = new Map((reads.page_files ?? []).map((x) => [`${x.path}:${x.line}`, x.file]));
@@ -633,6 +655,7 @@ const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git
   // tables of the everydeck installation named by the agent stay (as long as the table exists)
   ...(reads.reach.unreachable.length ? { unreachable: reads.reach.unreachable.slice(0, 500) } : {}),
   ...((reads.display_ends ?? []).filter((e) => !e.element.startsWith('contact_')).length ? { display_ends: reads.display_ends.filter((e) => !e.element.startsWith('contact_')) } : {}),   // a contact place without a column is not a display fact   // display places whose value cannot be traced to a column (fact, never guessed)   // files no entry point of the app reaches: no page, no display place
+  ...(notInDb.size ? { not_in_database: [...notInDb.values()].sort((a, b) => a.table.localeCompare(b.table)) } : {}),
   ...(merge?.everydeck_tables ? { everydeck_tables: merge.everydeck_tables.filter((y) => mergedTables.some((t) => t.name === y.table)) } : {}),
   // the agent's description stays; entries for tables that are not in the merged app map are dropped. Checked against the tables of the output, not
   // against the ones this run found itself: a table the agent read from the database (`defined: database`, kept from the app map) is not in the repository,

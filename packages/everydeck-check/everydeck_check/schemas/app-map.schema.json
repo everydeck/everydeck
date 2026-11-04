@@ -1505,6 +1505,27 @@
    },
    "description": "tables the everydeck installation added to the app (outbox, operator links, the request log of the app bridge) with the place that creates them: everydeck's own, never objects of the app; also tables in everydeck's schemas (everydeck_outbox, everydeck_read, everydeck_bridge) and tables defined in the file of an everydeck adapter"
   },
+  "not_in_database": {
+   "type": "array",
+   "maxItems": 200,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "table",
+     "defined"
+    ],
+    "properties": {
+     "table": {
+      "$ref": "#/$defs/name"
+     },
+     "defined": {
+      "$ref": "#/$defs/evidence"
+     }
+    }
+   },
+   "description": "tables the code defines (a migration) that the database does not have, found by the scaffold with --db: in the code, not in the database. They are no part of the app (not read, not on the approval, no error) and stay out of tables[]; a run without --db keeps them out"
+  },
   "display_ends": {
    "type": "array",
    "maxItems": 200,

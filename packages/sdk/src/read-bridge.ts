@@ -10,6 +10,7 @@
  *
  * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref}
  * · GET /everydeck/read/messages/{type}/{ref}?cursor&limit (messages of a conversation, on demand only, with `match`)
+ * · GET /everydeck/read/keys/{type}?cursor&limit (only the refs, up to KEYS_PAGE_MAX per page: everydeck's daily inventory finds deleted records with them, like Fivetran);
  * · GET /everydeck/read/counts (with `count`: per type the number of records a full read would deliver, so everydeck's data loss watch need not wait for a full read);
  * · GET /everydeck/read/etags?limit (like HTTP ETag / If-None-Match with 304: per type and for the people the fingerprint of what a full read delivers now,
  * without the pages; a full page carries its own `etag` only when everydeck asks with `etag=1`, so an older everydeck never sees the field);
@@ -60,7 +61,8 @@ async function grantOf(keys: string[], q: Record<string, string | undefined> | u
 }
 export interface ReadScopeField { name: string; column: string }
 export interface ReadScopeObject { type: string; table: string; ref: string[]; title?: string; status?: string; owner?: string; fields: ReadScopeField[]; statuses?: string[]; /** the column the database sets on every change (trigger/onupdate); allows `changed_since`; without it only full runs */ changed?: string;
-  /** the column the database sets to the current time when a record is created and nothing changes later; delivered as `created_at` (the app's history before everydeck) */ created?: string }
+  /** the column the database sets to the current time when a record is created and nothing changes later; delivered as `created_at` (the app's history before everydeck) */ created?: string;
+  /** records are only appended, never changed (with `created`): `changed_since` reads the records created since then, stable by (created, key), like an incremental append */ appended?: true }
 export interface ReadScopeRelation { id: string; table: string; ref: string[]; fields: ReadScopeField[] }
 /** name = the app's rule for the display name (stages in order; per stage the columns, joined with the app's separator) */
 export interface ReadScopePeople { table: string; ref: string; fields: Record<string, string>; name?: { columns: string[]; separator?: string }[]; /** when the person signed up; delivered as `created_at` */ created?: string }
@@ -74,7 +76,7 @@ export interface ReadRights { role: string; select_only: boolean; superuser?: bo
 
 /** Rows of a table, sorted by the key columns, from a cursor (key column values of the last row), at most `limit`.
  *  With `changed` only rows with changed.column >= since, sorted stably by (changed.column, key); the cursor is then [change time, ...key] */
-export type ReadRows = (q: { table: string; columns: string[]; keys: string[]; after: string[] | null; limit: number; changed?: { column: string; since: string } | undefined }) => Promise<Record<string, unknown>[]>;
+export type ReadRows = (q: { table: string; columns: string[]; keys: string[]; after: string[] | null; limit: number; changed?: { column: string; since: string } | undefined; /** only the refs (GET …/keys): pages up to KEYS_PAGE_MAX */ keysOnly?: true | undefined }) => Promise<Record<string, unknown>[]>;
 /** Exactly one row by its key values (single fetch after a signal) */
 export type ReadOne = (q: { table: string; columns: string[]; keys: string[]; ref: string[] }) => Promise<Record<string, unknown> | null>;
 /** Deletions the app knows (soft-delete column, deletion table): [{ ref, deleted_at }] since `since`; without an adapter, deleted rows show up through the inventory */
@@ -93,6 +95,9 @@ export interface ReadBridgeResponse { status: number; body: unknown }
 export interface QueryClient { query: (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }
 
 const PAGE_MAX = 200; const VALUE_MAX = 256;
+/** Refs per page of GET /everydeck/read/keys/{type}: everydeck's daily inventory compares only the refs to find deleted records (like Fivetran), so a
+ *  page carries ten times the rows of a full page at a fraction of the bytes (a ref is at most 128 characters) */
+export const KEYS_PAGE_MAX = 2000;
 const enc = new TextEncoder(); const dec = new TextDecoder();
 /** Bounds of GET /everydeck/read/etags: the bridge reads the pages as for a full read. A type with more rows gets no fingerprint (everydeck reads it in full as
  *  before), the types after it keep theirs; past the time of the whole request (serverless functions have time limits) the rest is left out and read in full */
@@ -139,12 +144,14 @@ export function createReadBridge(o: ReadBridgeOptions) {
   const limitMax = Math.min(PAGE_MAX, Math.max(1, o.pageLimit ?? 100));
   let rightsCache: ReadRights | null = typeof o.rights === 'function' ? null : (o.rights ?? { role: 'unknown', select_only: false });
   const rights = async (): Promise<ReadRights> => { if (!rightsCache) rightsCache = await (o.rights as () => Promise<ReadRights>)(); return rightsCache; };
-  const objects = new Map<string, { table: string; keys: string[]; columns: string[]; title?: string | undefined; status?: string | undefined; owner?: string | undefined; changed?: string | undefined; created?: string | undefined; fields: ReadScopeField[] }>();
-  for (const x of o.scope.objects) objects.set(x.type, { table: x.table, keys: x.ref, title: x.title, status: x.status, owner: x.owner, changed: x.changed, created: x.created, fields: x.fields, columns: uniq([...x.ref, ...(x.title ? [x.title] : []), ...(x.status ? [x.status] : []), ...(x.owner ? [x.owner] : []), ...(x.changed ? [x.changed] : []), ...(x.created ? [x.created] : []), ...x.fields.map((f) => f.column)]) });
+  /** the column `changed_since` reads by: the change column, or for a table that is only appended its creation time */
+  const incrementalColumn = (x: ReadScopeObject): string | undefined => x.changed ?? (x.appended && x.created ? x.created : undefined);
+  const objects = new Map<string, { table: string; keys: string[]; columns: string[]; title?: string | undefined; status?: string | undefined; owner?: string | undefined; changed?: string | undefined; created?: string | undefined; since?: string | undefined; fields: ReadScopeField[] }>();
+  for (const x of o.scope.objects) objects.set(x.type, { table: x.table, keys: x.ref, title: x.title, status: x.status, owner: x.owner, changed: x.changed, created: x.created, since: incrementalColumn(x), fields: x.fields, columns: uniq([...x.ref, ...(x.title ? [x.title] : []), ...(x.status ? [x.status] : []), ...(x.owner ? [x.owner] : []), ...(x.changed ? [x.changed] : []), ...(x.created ? [x.created] : []), ...x.fields.map((f) => f.column)]) });
   for (const r of o.scope.relations) objects.set(r.id, { table: r.table, keys: r.ref, fields: r.fields, columns: uniq([...r.ref, ...r.fields.map((f) => f.column)]) });
   // the capabilities say per object type whether `changed_since` works (change column in the scope) and whether the single fetch works
   const capabilities = async () => ({ version: '1' as const, ...(o.app ? { app: o.app } : {}), identity: 'subject_ref' as const,
-    objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!x.changed, ...(o.count ? { count: true } : {}) })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false, ...(o.count ? { count: true } : {}) }))],
+    objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!incrementalColumn(x), keys: true, ...(o.count ? { count: true } : {}) })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false, keys: true, ...(o.count ? { count: true } : {}) }))],
     ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields), fetch_one: !!o.one } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
   const page = (q: Record<string, string | undefined> | undefined) => { const limit = Math.min(limitMax, Math.max(1, Number(q?.['limit'] ?? limitMax) || limitMax)); const after = q?.['cursor'] ? unb64(q['cursor']) : null; return { limit, after, bad: !!q?.['cursor'] && !after }; };
   const refOf = (row: Record<string, unknown>, keys: string[]) => keys.map((k) => text(row[k])).join('|');
@@ -289,6 +296,18 @@ export function createReadBridge(o: ReadBridgeOptions) {
       if (!r) return { status: 404, body: { error: 'not found', type, ref: ref.join('|') } };
       return { status: 200, body: { type, as_of: asOf, item: itemOf(x, r) } };
     }
+    // GET /everydeck/read/keys/{type}?cursor&limit: only the refs, in the order of a full read (same cursor as a full page); the daily inventory compares
+    // them with what everydeck has, to find deleted records, while changes go on through changed_since
+    const mk = /^\/everydeck\/read\/keys\/([^/]+)$/.exec(path);
+    if (mk) {
+      const type = decodeURIComponent(mk[1]!); const x = objects.get(type); if (!x) return { status: 404, body: { error: `unknown type ${type}` } };
+      const limit = Math.min(KEYS_PAGE_MAX, Math.max(1, Number(req.query?.['limit'] ?? KEYS_PAGE_MAX) || KEYS_PAGE_MAX));
+      const after = req.query?.['cursor'] ? unb64(req.query['cursor']) : null; if ((req.query?.['cursor'] && !after) || (after && after.length !== x.keys.length)) return { status: 400, body: { error: 'bad cursor' } };
+      let rows: Record<string, unknown>[];
+      try { rows = await o.rows({ table: x.table, columns: x.keys, keys: x.keys, after, limit: limit + 1, keysOnly: true }); } catch (e) { const m = missingOf(e, x.table); if (m) return missingReply(type, m); throw e; }
+      const kept = rows.slice(0, limit); const last = rows.length > limit ? x.keys.map((k) => text(kept[kept.length - 1]![k])) : null;
+      return { status: 200, body: { type, as_of: asOf, refs: kept.map((r) => refOf(r, x.keys).slice(0, 128)), next_cursor: last ? b64(last) : null } };
+    }
     const m = /^\/everydeck\/read\/objects\/([^/]+)$/.exec(path);
     if (m) {
       const type = decodeURIComponent(m[1]!); const x = objects.get(type); if (!x) return { status: 404, body: { error: `unknown type ${type}` } };
@@ -296,15 +315,15 @@ export function createReadBridge(o: ReadBridgeOptions) {
       // ?changed_since=<ISO> returns only changed rows, stable by (change column, key); plus deleted rows where the app knows them
       const sinceRaw = req.query?.['changed_since'];
       if (sinceRaw !== undefined) {
-        if (!x.changed) return { status: 400, body: { error: `changed_since is not supported for ${type}: no column the database sets on every change` } };
+        if (!x.since) return { status: 400, body: { error: `changed_since is not supported for ${type}: no column the database sets on every change, and records are not only appended` } };
         const since = isoOf(sinceRaw); if (!since) return { status: 400, body: { error: 'bad changed_since (ISO-8601 expected)' } };
         if (after && after.length !== x.keys.length + 1) return { status: 400, body: { error: 'bad cursor' } };
         let rows: Record<string, unknown>[];
-        try { rows = await o.rows({ table: x.table, columns: x.columns, keys: x.keys, after, limit: limit + 1, changed: { column: x.changed, since } }); }
+        try { rows = await o.rows({ table: x.table, columns: x.columns, keys: x.keys, after, limit: limit + 1, changed: { column: x.since, since } }); }
         catch (e) { const m = missingOf(e, x.table); if (m) return missingReply(type, m); throw e; }
         const kept = rows.slice(0, limit); const last = kept[kept.length - 1];
         const deleted = o.deleted && !after ? (await o.deleted({ table: x.table, keys: x.keys, since, limit: PAGE_MAX })).slice(0, PAGE_MAX).map((d) => ({ ref: d.ref.slice(0, 128), deleted_at: isoOf(d.deleted_at) ?? asOf })) : undefined;
-        return { status: 200, body: { type, as_of: asOf, changed_since: since, items: kept.map((r) => itemOf(x, r)), ...(deleted ? { deleted } : {}), next_cursor: rows.length > limit && last ? b64([isoOf(last[x.changed]) ?? '', ...x.keys.map((k) => text(last[k]))]) : null } };
+        return { status: 200, body: { type, as_of: asOf, changed_since: since, items: kept.map((r) => itemOf(x, r)), ...(deleted ? { deleted } : {}), next_cursor: rows.length > limit && last ? b64([isoOf(last[x.since]) ?? '', ...x.keys.map((k) => text(last[k]))]) : null } };
       }
       if (after && after.length !== x.keys.length) return { status: 400, body: { error: 'bad cursor' } };
       let pg: FullPage;
@@ -358,9 +377,10 @@ export const readViewName = (table: string): string => (table.includes('.') ? ta
 /** `rows` for `pg`/`postgres` (any client with `query(text, values)`): keyset cursor over the key columns, only the named columns.
  *  `schema`: the reader role's views (e.g. everydeck_read) instead of the tables, so the app's row security does not apply to the reader */
 export function pgRows(client: QueryClient, o: { schema?: string } = {}): ReadRows {
-  return async ({ table, columns, keys, after, limit, changed }) => {
+  return async ({ table, columns, keys, after, limit, changed, keysOnly }) => {
     const from = o.schema ? `${ident(o.schema)}.${ident(readViewName(table))}` : ident(table);
-    const lim = `LIMIT ${Math.max(1, Math.min(PAGE_MAX + 1, limit))}`;
+    // only the refs (GET …/keys): up to KEYS_PAGE_MAX rows per page
+    const lim = `LIMIT ${Math.max(1, Math.min((keysOnly ? KEYS_PAGE_MAX : PAGE_MAX) + 1, limit))}`;
     if (changed) {   // only rows changed since `since`, stable by (change column, key); cursor = [change time, ...key]
       const order = [changed.column, ...keys]; const params: unknown[] = [changed.since];
       let where = ` WHERE ${ident(changed.column)} >= $1`;

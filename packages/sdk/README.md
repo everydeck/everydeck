@@ -58,6 +58,11 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.13
+
+- **The daily inventory compares only keys.** `GET /everydeck/read/keys/{type}?cursor&limit` returns only the refs of a type, in the order of a full read, up to 2000 per page (`KEYS_PAGE_MAX`); the capabilities say `keys: true`. everydeck finds deleted records with them once a day, like Fivetran, instead of reading every row again; changes go on through `changed_since` meanwhile.
+- **Tables that only grow are read incrementally.** A type in the read scope with `appended: true` and a `created` column (the app only adds records and never changes one) answers `changed_since` by its creation time, stable by (created, key), like an incremental append; the capabilities say `changed_since: true` for it. everydeck then reads only the records added since the last run and does a full inventory once a day. Older bridges ignore the field and read such a type in full, as before.
+
 ## 0.5.12
 
 - **The read bridge says why instead of leaving everydeck waiting.** Each query of the bridge runs at most 20 s (`statement_timeout`) and waits at most 5 s for a lock (`lock_timeout`, like `pg_dump --lock-wait-timeout`), set in its own read-only transaction; everydeck waits 30 s for an answer. A table locked by another session (for example a migration left in an open transaction) answers `500` with "another session holds a lock on the table (SQLSTATE 55P03)", a query over its time with SQLSTATE 57014. Before, the query waited and everydeck only saw "timeout", every run at the same page. In pull mode an answer everydeck refuses (larger than it takes, 413) is now reported as `502` with its size, and an error while answering becomes a `500` answer instead of ending the pull loop. everydeck reads such a type with smaller pages from where it stopped; every other type is read as before.

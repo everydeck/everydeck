@@ -19,6 +19,7 @@ as JSON text; no value longer than 256 characters. Relations are delivered like 
 from __future__ import annotations
 
 from urllib.parse import unquote
+import inspect
 import base64
 import datetime as _dt
 import decimal
@@ -31,6 +32,8 @@ import json
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 PAGE_MAX = 200
+# Refs per page of GET /everydeck/read/keys/{type}: everydeck's daily inventory compares only the refs to find deleted records (like Fivetran), as in read-bridge.ts
+KEYS_PAGE_MAX = 2000
 VALUE_MAX = 256
 # Bounds of GET /everydeck/read/etags: the bridge reads the pages as for a full read. A type with more rows gets no fingerprint (everydeck reads it in full as
 # before), the types after it keep theirs; past the time of the whole request (serverless functions have time limits) the rest is left out and read in full
@@ -94,6 +97,20 @@ def page_etag(items: Sequence[Any], next_cursor: str | None) -> str:
 def fold_etag(acc: str, page: str) -> str:
     """The pages of a type folded in order (read-bridge.schema.json `etags`): acc = '', then per page SHA-256(acc + ':' + page etag), 32 hex digits"""
     return hashlib.sha256(f"{acc}:{page}".encode()).hexdigest()[:32]
+
+
+
+def _incremental_column(o: Mapping[str, Any]) -> str | None:
+    """the column changed_since reads by: the change column, or for a table that is only appended its creation time"""
+    return o.get("changed") or (o.get("created") if o.get("appended") and o.get("created") else None)
+
+def _takes_keys_only(f: Callable[..., Any]) -> bool:
+    # GET …/keys asks `rows` for refs only (keys_only=True, pages up to KEYS_PAGE_MAX); a `rows` of the app's own without the parameter is called as before
+    try:
+        ps = inspect.signature(f).parameters
+    except (TypeError, ValueError):
+        return False
+    return "keys_only" in ps or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ps.values())
 
 
 def _uniq(xs: Iterable[str]) -> list[str]:
@@ -179,9 +196,9 @@ class ReadBridge:
             cols = _uniq([*o["ref"], *([o["title"]] if o.get("title") else []), *([o["status"]] if o.get("status") else []), *([o["owner"]] if o.get("owner") else []), *(f["column"] for f in o["fields"])])
             if o.get("changed") and o["changed"] not in cols: cols = [*cols, o["changed"]]
             if o.get("created") and o["created"] not in cols: cols = [*cols, o["created"]]   # when the app created the record: delivered as created_at
-            self.types[o["type"]] = {"table": o["table"], "keys": list(o["ref"]), "columns": cols, "title": o.get("title"), "status": o.get("status"), "owner": o.get("owner"), "changed": o.get("changed"), "created": o.get("created"), "fields": list(o["fields"])}
+            self.types[o["type"]] = {"table": o["table"], "keys": list(o["ref"]), "columns": cols, "title": o.get("title"), "status": o.get("status"), "owner": o.get("owner"), "changed": o.get("changed"), "created": o.get("created"), "since": _incremental_column(o), "fields": list(o["fields"])}
         for r in scope.get("relations", []):
-            self.types[r["id"]] = {"table": r["table"], "keys": list(r["ref"]), "columns": _uniq([*r["ref"], *(f["column"] for f in r["fields"])]), "title": None, "status": None, "owner": None, "changed": None, "fields": list(r["fields"])}
+            self.types[r["id"]] = {"table": r["table"], "keys": list(r["ref"]), "columns": _uniq([*r["ref"], *(f["column"] for f in r["fields"])]), "title": None, "status": None, "owner": None, "changed": None, "since": None, "fields": list(r["fields"])}
 
     def rights(self) -> dict[str, Any]:
         if self._rights_cache is None:
@@ -192,8 +209,8 @@ class ReadBridge:
     def capabilities(self) -> dict[str, Any]:
         # per object type whether changed_since works (change column in the scope), and whether fetching one object works
         counted = {"count": True} if self.count is not None else {}
-        objects = [{"type": o["type"], "fields": [f["name"] for f in o["fields"]], **({"statuses": list(o["statuses"])} if o.get("statuses") else {}), "changed_since": bool(o.get("changed")), **counted} for o in self.scope.get("objects", [])]
-        objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False, **counted} for r in self.scope.get("relations", [])]
+        objects = [{"type": o["type"], "fields": [f["name"] for f in o["fields"]], **({"statuses": list(o["statuses"])} if o.get("statuses") else {}), "changed_since": bool(_incremental_column(o)), "keys": True, **counted} for o in self.scope.get("objects", [])]
+        objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False, "keys": True, **counted} for r in self.scope.get("relations", [])]
         people = self.scope.get("people")
         convs = self.scope.get("conversations") or []
         return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys()), "fetch_one": self.one is not None}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), **({"messages_grant": True} if self.match is not None else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
@@ -335,6 +352,24 @@ class ReadBridge:
             items = [{"id": ids[i][:128], "sender_ref": "unknown" if r.get(m["sender"]) is None else _text(r[m["sender"]])[:128], "sent_at": _iso(r.get(m["time"])) or as_of,
                       "text": "\n".join(_text(r[c]) for c in m["text"] if r.get(c) is not None)[:4000], **({"attachments": att[ids[i]]} if att.get(ids[i]) else {})} for i, r in enumerate(kept)]
             return 200, {"type": typ, "ref": ref[:128], "as_of": as_of, "items": items, "next_cursor": _b64([_iso(kept[-1][m["time"]]) or "", *(_text(kept[-1][k]) for k in m["ref"])]) if len(rows) > limit else None}
+        if path.startswith("/everydeck/read/keys/") and "/" not in path[len("/everydeck/read/keys/"):]:
+            # only the refs, in the order of a full read (same cursor): the daily inventory finds deleted records with them while changes go on (changed_since)
+            typ = path[len("/everydeck/read/keys/"):]
+            x = self.types.get(typ)
+            if not x:
+                return 404, {"error": f"unknown type {typ}"}
+            q = query or {}
+            try:
+                limit = min(KEYS_PAGE_MAX, max(1, int(q.get("limit") or KEYS_PAGE_MAX)))
+            except ValueError:
+                limit = KEYS_PAGE_MAX
+            after = _unb64(q["cursor"]) if q.get("cursor") else None
+            if (q.get("cursor") and after is None) or (after is not None and len(after) != len(x["keys"])):
+                return 400, {"error": "bad cursor"}
+            rows = list(self.rows(x["table"], x["keys"], x["keys"], after, limit + 1, None, **({"keys_only": True} if _takes_keys_only(self.rows) else {})))
+            kept = rows[:limit]
+            return 200, {"type": typ, "as_of": as_of, "refs": ["|".join(_text(r[k]) for k in x["keys"])[:128] for r in kept],
+                         "next_cursor": _b64([_text(kept[-1][k]) for k in x["keys"]]) if len(rows) > limit else None}
         rest = path[len("/everydeck/read/objects/"):] if path.startswith("/everydeck/read/objects/") else None
         if rest is not None and rest.count("/") == 1:   # fetch one object: GET /everydeck/read/objects/{type}/{ref}
             typ, ref_raw = rest.split("/", 1)
@@ -360,17 +395,17 @@ class ReadBridge:
                 return 400, {"error": "bad cursor"}
             since_raw = (query or {}).get("changed_since")
             if since_raw is not None:   # only rows changed since `since`, stable by (change column, keys); plus deletions where the app knows them
-                if not x["changed"]:
-                    return 400, {"error": f"changed_since is not supported for {typ}: no column the database sets on every change"}
+                if not x["since"]:
+                    return 400, {"error": f"changed_since is not supported for {typ}: no column the database sets on every change, and records are not only appended"}
                 since = _iso(since_raw)
                 if since is None:
                     return 400, {"error": "bad changed_since (ISO-8601 expected)"}
                 if after is not None and len(after) != len(x["keys"]) + 1:
                     return 400, {"error": "bad cursor"}
-                rows = list(self.rows(x["table"], x["columns"], x["keys"], after, limit + 1, {"column": x["changed"], "since": since}))
+                rows = list(self.rows(x["table"], x["columns"], x["keys"], after, limit + 1, {"column": x["since"], "since": since}))
                 kept = rows[:limit]
                 body: dict[str, Any] = {"type": typ, "as_of": as_of, "changed_since": since, "items": [self._item(x, r) for r in kept],
-                                        "next_cursor": _b64([_iso(kept[-1][x["changed"]]) or "", *(_text(kept[-1][k]) for k in x["keys"])]) if len(rows) > limit else None}
+                                        "next_cursor": _b64([_iso(kept[-1][x["since"]]) or "", *(_text(kept[-1][k]) for k in x["keys"])]) if len(rows) > limit else None}
                 if self.deleted is not None and after is None:
                     body["deleted"] = [{"ref": _text(d["ref"])[:128], "deleted_at": _iso(d["deleted_at"]) or as_of} for d in list(self.deleted(x["table"], x["keys"], since, PAGE_MAX))[:PAGE_MAX]]
                 return 200, body
@@ -425,9 +460,9 @@ def read_view_name(table: str) -> str:
 def psycopg_rows(conn: Any, schema: str | None = None) -> Rows:
     """`rows` for psycopg 2/3: keyset cursor over the key columns, only the given columns; the connection belongs to the reader role.
     `schema`: the reader role's views (e.g. everydeck_read) instead of the tables, so the app's row-level policies do not apply to the reader."""
-    def rows(table: str, columns: Sequence[str], keys: Sequence[str], after: Sequence[str] | None, limit: int, changed: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    def rows(table: str, columns: Sequence[str], keys: Sequence[str], after: Sequence[str] | None, limit: int, changed: Mapping[str, str] | None = None, keys_only: bool = False) -> list[dict[str, Any]]:
         src = f"{_ident(schema)}.{_ident(read_view_name(table))}" if schema else _ident(table)
-        lim = f"LIMIT {max(1, min(PAGE_MAX + 1, int(limit)))}"
+        lim = f"LIMIT {max(1, min((KEYS_PAGE_MAX if keys_only else PAGE_MAX) + 1, int(limit)))}"   # only the refs (GET …/keys): up to KEYS_PAGE_MAX rows
         cur = conn.cursor()
         if changed:   # only rows changed since `since`, stable by (change column, keys); cursor = [change time, …keys]
             order = [changed["column"], *keys]; params: list[Any] = [changed["since"]]

@@ -81,7 +81,9 @@ def _scanned(repo: Path) -> dict[str, Any]:
 
 
 def build_inventory(repo: Path, app_map: dict[str, Any]) -> dict[str, Any]:
-    tables = detect_tables(repo)
+    # a table only in the code (not_in_database, the scaffold with --db) is no part of the app: no table, no candidate, no money use
+    code_only = {x["table"] for x in app_map.get("not_in_database") or []}
+    tables = {n: w for n, w in detect_tables(repo).items() if n not in code_only}
     known = set(tables) | {t["name"] for t in app_map.get("tables", [])}
     first = {c["id"]: c for c in candidate_ways(scan_candidates(repo, known))}   # each way of a kind, not only the first place
     providers = []
