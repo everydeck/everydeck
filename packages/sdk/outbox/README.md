@@ -45,12 +45,13 @@ Deno.serve(createRelayHandler({ query: (text: string, params: unknown[]) => sql.
    Declare the relay as a job (1.9-r0): `{ "id": "everydeck_outbox_relay", "label": "everydeck outbox relay", "every": "5m", "component": "<database component>", "evidence": [{ "path": "<schedule migration or worker>", "commit": "…" }] }`.
    Declare a step the browser sees when the write fails (for example "Submit failed") as a `failure` step with `browser_error` naming the browser action.
 3. **Supabase.** Function env: `EVERYDECK_ENDPOINT`, `EVERYDECK_RELEASE_KEY`, `EVERYDECK_MANIFEST_DIGEST` (not secret). Deploy with
-   `supabase functions deploy everydeck-outbox-relay` and leave its JWT check as it is (no `verify_jwt` setting): the schedule calls it with the
-   app's public key as `apikey`, the way Supabase schedules Edge Functions, and the function checks its own invoke token from Vault
-   (header `x-everydeck-invoke-token`). The **owner** creates four Vault secrets in the SQL editor (never in a migration, never in the
-   repository, never by you in production): `everydeck_outbox_relay_url`, `everydeck_outbox_gateway_key` (the app's public key: the publishable
-   or anon key its browser uses), `everydeck_outbox_invoke_token` (random, ≥ 32 characters), `everydeck_ingest_key` (the everydeck server key
-   of that environment). Locally (`supabase start`) you create them yourself with the **development** key and the local stack's public key.
+   `supabase functions deploy everydeck-outbox-relay --no-verify-jwt`, and keep it so in `supabase/config.toml` with the two lines
+   `[functions.everydeck-outbox-relay]` and `verify_jwt = false` (with the Supabase MCP server: `deploy_edge_function` with `verify_jwt: false`).
+   Supabase documents this for a function that a schedule calls (Scheduling Edge Functions); the read bridge runs the same way. The function's
+   own key is the invoke token from Vault (header `x-everydeck-invoke-token`): a call without it gets `401`, and nothing is read or sent.
+   The **owner** creates three Vault secrets in the SQL editor (never in a migration, never in the repository, never by you in production):
+   `everydeck_outbox_relay_url`, `everydeck_outbox_invoke_token` (random, ≥ 32 characters), `everydeck_ingest_key` (the everydeck server key
+   of that environment). Locally (`supabase start`) you create them yourself with the **development** key; the local stack reads `config.toml`.
 4. **Plain PostgreSQL.** Run `npx everydeck-outbox-relay` as a worker with `EVERYDECK_OUTBOX_DATABASE_URL`, `EVERYDECK_ENDPOINT`, `EVERYDECK_SERVER_KEY`,
    `EVERYDECK_RELEASE_KEY`, `EVERYDECK_MANIFEST_DIGEST` from the environment. The database role needs `USAGE` on schema `everydeck_outbox` and
    `SELECT, UPDATE, DELETE` on `everydeck_outbox.event`, nothing else.

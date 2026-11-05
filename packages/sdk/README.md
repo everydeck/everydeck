@@ -58,6 +58,17 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.14
+
+- **The outbox relay on Supabase runs without Supabase's JWT check, like the read bridge.** Its key is the invoke token from Vault (`everydeck_outbox_invoke_token`, header `x-everydeck-invoke-token`): a call without it, with a wrong or a short one, or with only the app's public key gets `401`, and the relay reads no row and sends nothing. Before, the head of `supabase/functions/everydeck-outbox-relay/index.ts` said to keep the check while everydeck deployed it without and put no public key into the Vault of a hosted project; a deploy with the check on turned the schedule's call away. Keep it off in `supabase/config.toml`:
+
+```toml
+[functions.everydeck-outbox-relay]
+verify_jwt = false
+```
+
+  or deploy with `--no-verify-jwt`; with the Supabase MCP server, `deploy_edge_function` with `verify_jwt: false`. Three Vault secrets are enough (`everydeck_outbox_relay_url`, `everydeck_outbox_invoke_token`, `everydeck_ingest_key`). The schedule is unchanged and still sends `everydeck_outbox_gateway_key` as `apikey` where the Vault has it, so a relay deployed with the check before 0.5.14 keeps working until it is deployed again.
+
 ## 0.5.13
 
 - **The daily inventory compares only keys.** `GET /everydeck/read/keys/{type}?cursor&limit` returns only the refs of a type, in the order of a full read, up to 2000 per page (`KEYS_PAGE_MAX`); the capabilities say `keys: true`. everydeck finds deleted records with them once a day, like Fivetran, instead of reading every row again; changes go on through `changed_since` meanwhile.

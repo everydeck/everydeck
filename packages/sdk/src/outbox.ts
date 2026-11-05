@@ -136,7 +136,7 @@ function sameToken(a: unknown, b: unknown): boolean {
 export interface RelayHandlerDeps { query: OutboxQuery; env: (name: string) => string | undefined; fetch?: typeof fetch }
 /**
  * HTTP handler for the scheduled call: checks its own invoke token from Vault (`everydeck_outbox_invoke_token`, header `x-everydeck-invoke-token`;
- * the function keeps Supabase's JWT check, the schedule passes it with the app's public key as apikey), fetches the everydeck server key
+ * the function runs without Supabase's JWT check, like the read bridge, and this token is its key: without it 401, nothing read, nothing sent), fetches the everydeck server key
  * from Vault (`everydeck_ingest_key`) and does one run. Non-secret settings come from the function's environment: EVERYDECK_ENDPOINT,
  * EVERYDECK_RELEASE_KEY, EVERYDECK_MANIFEST_DIGEST. The response only counts rows, never a secret.
  */
@@ -145,7 +145,7 @@ export function createRelayHandler(deps: RelayHandlerDeps): (req: Request) => Pr
     if (req.method !== 'POST') return Response.json({ error: 'method_not_allowed' }, { status: 405 });
     const r = rowsOf(await deps.query('SELECT name, decrypted_secret FROM vault.decrypted_secrets WHERE name = ANY($1::text[])', [SECRETS]));
     const secrets = Object.fromEntries(r.map((x) => [String(x['name']), x['decrypted_secret']]));
-    // the schedule sends the token in x-everydeck-invoke-token, because Authorization belongs to Supabase's JWT check of the function; schedules
+    // the schedule sends the token in x-everydeck-invoke-token (Authorization carries the public key for a relay still deployed with the JWT check); schedules
     // written for @everydeck/sdk 0.4.1 and earlier sent it as Authorization (with the JWT check switched off) and keep working
     const given = req.headers.get('x-everydeck-invoke-token') ?? (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '');
     if (!sameToken(given, secrets['everydeck_outbox_invoke_token'])) return Response.json({ error: 'unauthorized' }, { status: 401 });

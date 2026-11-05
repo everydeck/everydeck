@@ -2,15 +2,15 @@
 -- and every 5 seconds only while rows wait, without a heartbeat (a result reaches everydeck within seconds; an idle app costs no extra calls).
 -- Copy as a migration after everydeck_outbox.sql. Supabase only (needs the pg_cron and pg_net extensions).
 --
--- The function keeps Supabase's JWT check (no verify_jwt setting). The call carries the app's public key as `apikey`, the way Supabase schedules
--- Edge Functions; a legacy anon key is a JWT and also goes as `Authorization: Bearer`. The function's own check is the invoke token from Vault,
--- sent in the header `x-everydeck-invoke-token`. Where everydeck deploys the function itself (a hosted project the owner connected), it runs without
--- the JWT check and needs no public key: then there is no `everydeck_outbox_gateway_key` and the call goes without `apikey`.
+-- The function runs without Supabase's JWT check (supabase/config.toml: [functions.everydeck-outbox-relay] verify_jwt = false), as Supabase documents
+-- for a function that a schedule calls, and as everydeck deploys it in a hosted project the owner connected. Its own check is the invoke token from
+-- Vault, sent in the header `x-everydeck-invoke-token`: a call without it is turned away. `everydeck_outbox_gateway_key` is optional and only for a
+-- relay deployed with the JWT check before @everydeck/sdk 0.5.14: where the Vault has it, the call also carries the app's public key as `apikey`
+-- (a legacy anon key also as `Authorization: Bearer`), so such a relay keeps working until it is deployed again.
 --
 -- No key, token or URL is written here. They come from Supabase Vault and are created by the owner, in the SQL editor of the
 -- project, never in a migration, never in the repository:
 --   select vault.create_secret('https://<project>.supabase.co/functions/v1/everydeck-outbox-relay', 'everydeck_outbox_relay_url');
---   select vault.create_secret('<the app's public key: the publishable or anon key its browser uses>', 'everydeck_outbox_gateway_key');
 --   select vault.create_secret('<random token, at least 32 characters>', 'everydeck_outbox_invoke_token');
 --   select vault.create_secret('<everydeck server key of this environment>', 'everydeck_ingest_key');
 -- Without the URL the scheduled call does nothing and the job heartbeat stays away; everydeck reports
