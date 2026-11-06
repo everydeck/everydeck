@@ -2106,6 +2106,12 @@
         "$ref": "#/$defs/evidence"
        }
       }
+     },
+     "flow": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "the flow (an id of flows[]) that aiContext({ flow }) names around this call; then everydeck counts the flow from its AI calls"
      }
     }
    }

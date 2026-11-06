@@ -935,8 +935,10 @@ def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
     errs += flow_candidate_errors(b, repo)
     errs += money_ai_errors(b, repo)
     declared_tables = {t["name"] for t in b.get("tables", [])}
+    # a table only in the code (not_in_database) is no part of the app (as in the inventory and the references): not asked for here either
+    code_only = {x["table"] for x in b.get("not_in_database") or []}
     for name, where in detect_tables(repo).items():
-        if name not in declared_tables: errs.append(f"tables[]: {where} is not in the app map; add it with its columns, or it is lost silently")
+        if name not in declared_tables and name not in code_only: errs.append(f"tables[]: {where} is not in the app map; add it with its columns, or it is lost silently")
     # if the frontend reads a table, it needs a display location (shown on the table or a column); otherwise rejection
     shown = {t["name"] for t in b.get("tables", []) if t.get("shown") or any(c.get("shown") for c in t.get("columns", []))}
     for name, where in detect_frontend_reads(repo, declared_tables).items():

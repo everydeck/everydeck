@@ -23,6 +23,10 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.15
+
+- Every flow people use is counted (shared rules with `everydeck-check` 0.3.15): `ai_calls[].flow` in the app map names the flow an AI call belongs to (the flow `aiContext({ flow })` names at that call; only ids from `flows[]`, only on `kind: call`). A flow people use that sends no signal, has no AI call naming it and creates no record with an owner and a creation time is an open part `signal:<flow id>` (`not_applicable` with its place when nobody really does it). Optional; older app maps stay valid.
+
 ### 0.3.14
 
 - The app map knows what a person did and what they came for (shared rules with `everydeck-check` 0.3.14): `flows[].done` (what a person did in that flow, in the past tense, as the owner reads it in a timeline: Analyzed CV), `first_value` (the first result of a main flow that a new person came for, with its place), `roles[]` (the sides of an app that use it differently, each from a table of the app, with its own first value) and `screens[].label` (the name of the page as the app shows it). All four are optional; older app maps stay valid. `everydeck-check validate` lists every flow of a new app map without `done` as an open part.

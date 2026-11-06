@@ -24,6 +24,11 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.15
+
+- Same version as the scaffold `@everydeck/check` 0.3.15 (the two are a pair) and the same schema and rules: `ai_calls[].flow` in the app map (optional, older app maps stay valid; `validate` checks that it names a flow of `flows[]`), and every flow people use that everydeck neither gets reported nor sees itself is an open part `signal:<flow id>`.
+- `validate --repo` no longer asks for a table listed in `not_in_database` in `tables[]` (before, the same table got both "leave it out of tables" and "add it with its columns").
+
 ### 0.3.14
 
 - Same version as the scaffold `@everydeck/check` 0.3.14 (the two are a pair) and the same schema and rules: `flows[].done`, `first_value`, `roles[]` and `screens[].label` in the app map (all optional, older app maps stay valid). `validate` checks the places of `first_value` and of each role and its first value in the repository, and lists every flow of a new app map without `done` as an open part.
@@ -47,7 +52,7 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ### 0.3.10
 
-- `validate` asks for the built-in flows: sign-in, sign-up and creating the core object are never only planned. A sign-in flow needs a result signal unless `identity.browser_subject` names the place of `everydeck.setSubject` (the browser SDK reports every sign-in); a sign-up flow needs one unless the app uses Supabase Auth with `identity.auth_table` `auth.users` (everydeck reads each new account from `created_at`). The new `core_object` (`{ table, evidence }`, a table of `works_with`) names what the people of the app create most; the flow that inserts it needs a result signal, and an app map whose people create records without it is refused. The place of `core_object` is checked like every place. Every other flow may stay planned.
+- `validate` asks for the built-in flows: sign-in, sign-up and creating the core object are never only planned. A sign-in flow needs a result signal unless `identity.browser_subject` names the place of `everydeck.setSubject` (the browser SDK reports every sign-in); a sign-up flow needs one unless the app uses Supabase Auth with `identity.auth_table` `auth.users` (everydeck reads each new account from `created_at`). The new `core_object` (`{ table, evidence }`, a table of `works_with`) names what the people of the app create most; the flow that inserts it needs a result signal, and an app map whose people create records without it is refused. The place of `core_object` is checked like every place. Every other flow people use is counted as well: a result signal, its AI calls (`ai_calls[].flow`, the flow that `aiContext({ flow })` names at that call) or the new rows of its own table with an owner and a creation time; otherwise `validate` lists it under `open[]` as `signal:<flow id>`.
 - `drift` reports `subject_not_in_code` when an app with people who sign in uses the browser SDK but never calls `everydeck.setSubject(<user id>)`: without it every visit and every sign-in stays anonymous.
 
 ### 0.3.9
