@@ -358,30 +358,31 @@ class Everydeck:
                           **_opt(subject_ref=subject_ref, account_ref=account_ref, object_type=object_type, object_ref=object_ref), "fields": fields})
 
     # ── AI calls (server only), implemented in everydeck/ai.py ──
-    def wrap_openai(self, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None) -> Any:
+    def wrap_openai(self, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, object_type: str | None = None, object_ref: str | None = None) -> Any:
         """The same OpenAI client (also AsyncOpenAI), measured: one event per call with model, tokens, duration, flow, person and organization; never
         the prompt, the answer or the key. See everydeck/ai.py."""
         from .ai import wrap
-        return wrap(self, "openai", client, flow=flow, subject_ref=subject_ref, account_ref=account_ref)
+        return wrap(self, "openai", client, flow=flow, subject_ref=subject_ref, account_ref=account_ref, object_type=object_type, object_ref=object_ref)
 
-    def wrap_anthropic(self, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None) -> Any:
+    def wrap_anthropic(self, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, object_type: str | None = None, object_ref: str | None = None) -> Any:
         """The same Anthropic client (also AsyncAnthropic), measured like wrap_openai. See everydeck/ai.py."""
         from .ai import wrap
-        return wrap(self, "anthropic", client, flow=flow, subject_ref=subject_ref, account_ref=account_ref)
+        return wrap(self, "anthropic", client, flow=flow, subject_ref=subject_ref, account_ref=account_ref, object_type=object_type, object_ref=object_ref)
 
-    def ai_context(self, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None) -> Any:
+    def ai_context(self, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None, object_type: str | None = None, object_ref: str | None = None) -> Any:
         """`with everydeck.ai_context(flow="cv_analysis", account_ref=org_id):` makes all AI calls inside one run. See everydeck/ai.py."""
         from .ai import ai_context
-        return ai_context(flow=flow, subject_ref=subject_ref, account_ref=account_ref, run_id=run_id)
+        return ai_context(flow=flow, subject_ref=subject_ref, account_ref=account_ref, run_id=run_id, object_type=object_type, object_ref=object_ref)
 
     def ai_call(self, *, provider: str, request_model: str, operation: str = "chat", response_model: str | None = None, input_tokens: int | None = None,
                 output_tokens: int | None = None, cache_read_tokens: int | None = None, cache_write_tokens: int | None = None, duration_seconds: float | None = None,
-                error_type: str | None = None, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None) -> None:
+                error_type: str | None = None, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None,
+                object_type: str | None = None, object_ref: str | None = None) -> None:
         """An AI call the app measured itself (an AI API it calls over HTTP without a client). See everydeck/ai.py."""
         from .ai import ai_call
         ai_call(self, provider=provider, request_model=request_model, operation=operation, response_model=response_model, input_tokens=input_tokens, output_tokens=output_tokens,
                 cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens, duration_seconds=duration_seconds, error_type=error_type, flow=flow,
-                subject_ref=subject_ref, account_ref=account_ref, run_id=run_id)
+                subject_ref=subject_ref, account_ref=account_ref, run_id=run_id, object_type=object_type, object_ref=object_ref)
 
     def heartbeat(self, interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL, *, job: str | None = None) -> str | None:
         """Heartbeat on demand. With `job` (1.9-r0, `jobs[].id` in the manifest): this job has run; send it at the end of every successful run;

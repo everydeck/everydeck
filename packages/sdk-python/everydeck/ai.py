@@ -38,6 +38,18 @@ def _g(o: Any, k: str) -> Any:
     return o.get(k) if isinstance(o, dict) else getattr(o, k, None)
 
 
+_OBJECT_TYPE = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+
+
+def _object(object_type: Any, object_ref: Any) -> dict[str, str]:
+    """0.5.10: the record a call worked on, as its kind in the app map and its key, both or none (like object_type/object_ref of the event contract)"""
+    if object_type is None and object_ref is None: return {}
+    if isinstance(object_type, str) and _OBJECT_TYPE.fullmatch(object_type) and isinstance(object_ref, str) and 1 <= len(object_ref) <= 128:
+        return {"object_type": object_type, "object_ref": object_ref}
+    _log.warning("everydeck: AI record needs object_type (lowercase kind of the app map) and object_ref (its key, at most 128 characters) together (left out)")
+    return {}
+
+
 def _flow_ok(flow: Any) -> bool:
     return isinstance(flow, str) and _FLOW.fullmatch(flow) is not None
 
@@ -56,7 +68,8 @@ def error_type(e: BaseException) -> str:
 
 def ai_call(ed: Any, *, provider: str, request_model: str, operation: str = "chat", response_model: str | None = None, input_tokens: int | None = None,
             output_tokens: int | None = None, cache_read_tokens: int | None = None, cache_write_tokens: int | None = None, duration_seconds: float | None = None,
-            error_type: str | None = None, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None) -> None:
+            error_type: str | None = None, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None,
+            object_type: str | None = None, object_ref: str | None = None) -> None:
     try:
         ctx = _ctx.get() or {}
         if not isinstance(request_model, str) or not _MODEL.fullmatch(request_model):
@@ -75,17 +88,19 @@ def ai_call(ed: Any, *, provider: str, request_model: str, operation: str = "cha
         if error_type: fields["error.type"] = error_type if _ERROR.fullmatch(error_type) else "Error"
         if _flow_ok(f): fields["everydeck.flow"] = f
         run = run_id or ctx.get("run_id") or str(uuid.uuid4())
-        ed.signal(AI_EVENT, f"everydeck.sdk:ai:{run}", subject_ref=subject_ref or ctx.get("subject_ref"), account_ref=account_ref or ctx.get("account_ref"), fields=fields)
+        obj = _object(object_type, object_ref) or {k: ctx[k] for k in ("object_type", "object_ref") if k in ctx}
+        ed.signal(AI_EVENT, f"everydeck.sdk:ai:{run}", subject_ref=subject_ref or ctx.get("subject_ref"), account_ref=account_ref or ctx.get("account_ref"), fields=fields, **obj)
     except Exception:  # measuring never breaks the app
         pass
 
 
 @contextlib.contextmanager
-def ai_context(*, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None) -> Iterator[str]:
+def ai_context(*, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None, run_id: str | None = None,
+               object_type: str | None = None, object_ref: str | None = None) -> Iterator[str]:
     """All AI calls inside the block belong to one run of a flow, of a person and an organization. Yields the run id."""
     if flow is not None and not _flow_ok(flow): _warn_flow(flow)
     nxt = {**(_ctx.get() or {}), **({"flow": flow} if _flow_ok(flow) else {}), **({"subject_ref": subject_ref} if subject_ref else {}), **({"account_ref": account_ref} if account_ref else {}),
-           "run_id": run_id or str(uuid.uuid4())}
+           **_object(object_type, object_ref), "run_id": run_id or str(uuid.uuid4())}
     token = _ctx.set(nxt)
     try:
         yield nxt["run_id"]
@@ -296,7 +311,8 @@ class _Wrapper:
             w.send(op, model, started, _from_result(w.kind, res)); return res
         return smeasured
 
-def wrap(ed: Any, kind: str, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None) -> Any:
+def wrap(ed: Any, kind: str, client: Any, *, flow: str | None = None, subject_ref: str | None = None, account_ref: str | None = None,
+         object_type: str | None = None, object_ref: str | None = None) -> Any:
     try:
         ok = (callable(_g(_g(_g(client, "chat"), "completions"), "create")) or callable(_g(_g(client, "responses"), "create")) or callable(_g(_g(client, "embeddings"), "create"))) \
             if kind == "openai" else callable(_g(_g(client, "messages"), "create"))
@@ -306,5 +322,6 @@ def wrap(ed: Any, kind: str, client: Any, *, flow: str | None = None, subject_re
         _log.warning("everydeck: %s: this is not an %s client; returned unchanged and not measured", "wrap_openai" if kind == "openai" else "wrap_anthropic", "OpenAI" if kind == "openai" else "Anthropic")
         return client
     if flow is not None and not _flow_ok(flow): _warn_flow(flow)
-    defaults = {**({"flow": flow} if _flow_ok(flow) else {}), **({"subject_ref": subject_ref} if subject_ref else {}), **({"account_ref": account_ref} if account_ref else {})}
+    defaults = {**({"flow": flow} if _flow_ok(flow) else {}), **({"subject_ref": subject_ref} if subject_ref else {}), **({"account_ref": account_ref} if account_ref else {}),
+                **_object(object_type, object_ref)}
     return _View(client, (), _Wrapper(ed, kind, client, defaults))

@@ -6,7 +6,7 @@
  * `stream`, sends one event `everydeck.ai.generation` (PostHog `$ai_generation`) with field names after the
  * OpenTelemetry GenAI conventions: provider, operation, model asked for and model that answered, input tokens (counting cached ones), output tokens,
  * cached tokens read and written, duration in seconds, the error type of a failed call, the flow of the app. Never the prompt, the answer, a system text or
- * a key: the wrapper does not read them. The person, the organization and the flow come from `wrapOpenAI(client, { flow, subjectRef, accountRef })` or
+ * a key: the wrapper does not read them. The person, the organization, the record and the flow come from `wrapOpenAI(client, { flow, subjectRef, accountRef })` or
  * from `everydeck.aiContext({ … }, fn)`; all calls inside one `aiContext` belong to one run. `everydeck.aiCall({ … })` sends a call the app measured itself.
  * everydeck prices the tokens with its price list; the app never sends money.
  */
@@ -16,12 +16,22 @@ import { EverydeckClient } from './core.js';
 /** the event of one AI call (PostHog `$ai_generation`) */
 export const AI_EVENT = 'everydeck.ai.generation';
 export type AiOperation = 'chat' | 'text_completion' | 'embeddings' | 'generate_content' | 'image_generation' | 'audio_transcription' | 'audio_speech';
-/** who and what a call belongs to: the flow of the app (e.g. `cv_analysis`), the person, the organization */
-export interface AiOptions { flow?: string; subjectRef?: string; accountRef?: string }
+/**
+ * who and what a call belongs to: the flow of the app (e.g. `cv_analysis`), the person who started it, the organization, and (0.5.16) the record it worked on,
+ * as its kind in the app map and its key (`{ objectType: 'person', objectRef: cvId }`), so everydeck can name the record next to the cost of the call
+ */
+export interface AiOptions { flow?: string; subjectRef?: string; accountRef?: string; objectType?: string; objectRef?: string }
 /** a call the app measured itself (an AI API it calls over HTTP without a client) */
 export interface AiCall extends AiOptions { provider: string; operation?: AiOperation; requestModel: string; responseModel?: string; inputTokens?: number | undefined; outputTokens?: number | undefined; cacheReadTokens?: number | undefined; cacheWriteTokens?: number | undefined; durationSeconds?: number; errorType?: string; runId?: string }
 
 const FLOW = /^[a-z][a-z0-9_.-]{0,63}$/;
+/** kind and key of a record, as in the event contract (object_type, object_ref) */
+const OBJECT_TYPE = /^[a-z][a-z0-9_.-]{0,63}$/;
+const objectOf = (ed: EverydeckClient, o: AiOptions): Pick<AiOptions, 'objectType' | 'objectRef'> => {
+  if (o.objectType === undefined && o.objectRef === undefined) return {};
+  if (typeof o.objectType === 'string' && OBJECT_TYPE.test(o.objectType) && typeof o.objectRef === 'string' && o.objectRef.length >= 1 && o.objectRef.length <= 128) return { objectType: o.objectType, objectRef: o.objectRef };
+  ed.opts.onWarning('AI record needs objectType (lowercase kind of the app map) and objectRef (its key, at most 128 characters) together (left out)'); return {};
+};
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,99}$/;
 const PROVIDER = /^[a-z][a-z0-9_.-]{0,39}$/;
 const ERROR = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -57,7 +67,7 @@ declare module './core.js' {
 EverydeckClient.prototype.aiContext = function aiContext<R>(this: EverydeckClient, o: AiOptions & { runId?: string }, fn: () => R): R {
   if (o.flow !== undefined && !FLOW.test(o.flow)) this.opts.onWarning(`AI flow must be lowercase letters, digits and _ . - (at most 64): ${JSON.stringify(o.flow).slice(0, 80)} (left out)`);
   const outer = store.getStore();
-  const next: Ctx = { ...outer, ...(o.flow !== undefined && FLOW.test(o.flow) ? { flow: o.flow } : {}), ...(o.subjectRef ? { subjectRef: o.subjectRef } : {}), ...(o.accountRef ? { accountRef: o.accountRef } : {}), runId: o.runId ?? uuid() };
+  const next: Ctx = { ...outer, ...(o.flow !== undefined && FLOW.test(o.flow) ? { flow: o.flow } : {}), ...(o.subjectRef ? { subjectRef: o.subjectRef } : {}), ...(o.accountRef ? { accountRef: o.accountRef } : {}), ...objectOf(this, o), runId: o.runId ?? uuid() };
   return store.run(next, fn);
 };
 
@@ -76,7 +86,8 @@ EverydeckClient.prototype.aiCall = function aiCall(this: EverydeckClient, c: AiC
     if (c.errorType) fields['error.type'] = ERROR.test(c.errorType) ? c.errorType : 'Error';
     if (flow && FLOW.test(flow)) fields['everydeck.flow'] = flow;
     const subjectRef = c.subjectRef ?? ctx?.subjectRef; const accountRef = c.accountRef ?? ctx?.accountRef;
-    this.signal(AI_EVENT, `everydeck.sdk:ai:${c.runId ?? ctx?.runId ?? uuid()}`, { fields, ...(subjectRef ? { subjectRef } : {}), ...(accountRef ? { accountRef } : {}) });
+    const own = objectOf(this, c); const object = own.objectType ? own : ctx?.objectType && ctx.objectRef ? { objectType: ctx.objectType, objectRef: ctx.objectRef } : {};
+    this.signal(AI_EVENT, `everydeck.sdk:ai:${c.runId ?? ctx?.runId ?? uuid()}`, { fields, ...(subjectRef ? { subjectRef } : {}), ...(accountRef ? { accountRef } : {}), ...object });
   } catch { /* measuring never breaks the app */ }
 };
 
@@ -127,7 +138,7 @@ function wrap<T>(ed: EverydeckClient, kind: Kind, client: T, o: AiOptions = {}):
   const ok = kind === 'openai' ? typeof obj(obj(c?.['chat'])?.['completions'])?.['create'] === 'function' || typeof obj(c?.['responses'])?.['create'] === 'function' || typeof obj(c?.['embeddings'])?.['create'] === 'function' : typeof obj(c?.['messages'])?.['create'] === 'function';
   if (!ok) { ed.opts.onWarning(`${kind === 'openai' ? 'wrapOpenAI' : 'wrapAnthropic'}: this is not an ${kind === 'openai' ? 'OpenAI' : 'Anthropic'} client; returned unchanged and not measured`); return client; }
   if (o.flow !== undefined && !FLOW.test(o.flow)) ed.opts.onWarning(`AI flow must be lowercase letters, digits and _ . - (at most 64): ${JSON.stringify(o.flow).slice(0, 80)} (left out)`);
-  const defaults: AiOptions = { ...(o.flow !== undefined && FLOW.test(o.flow) ? { flow: o.flow } : {}), ...(o.subjectRef ? { subjectRef: o.subjectRef } : {}), ...(o.accountRef ? { accountRef: o.accountRef } : {}) };
+  const defaults: AiOptions = { ...(o.flow !== undefined && FLOW.test(o.flow) ? { flow: o.flow } : {}), ...(o.subjectRef ? { subjectRef: o.subjectRef } : {}), ...(o.accountRef ? { accountRef: o.accountRef } : {}), ...objectOf(ed, o) };
   const provider = providerOf(kind, client);
   const send = (op: AiOperation, model: unknown, started: number, u: Usage, err?: unknown) => {
     if (typeof model !== 'string') return;

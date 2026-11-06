@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.16
+
+- **An AI call names the record it worked on.** `everydeck.aiContext({ flow, subjectRef, accountRef, objectType, objectRef }, fn)`, `wrapOpenAI(client, { objectType, objectRef })` and `everydeck.aiCall({ …, objectType, objectRef })`: the kind of the record as the app map names it (`person`, `job`) and its key, both or none (else left out with a warning). everydeck then says "analyzed CV ‘Julia Hartmann’ · $0.046" on the person and the organization and lists every call with who, what and why under Money. Pass `subjectRef` too: without the person who started it, a call is counted for nobody. Only identifiers, never content; everydeck drops a kind its app map does not know. Python SDK 0.5.10: `ai_context(…, object_type=…, object_ref=…)` the same.
+
 ## 0.5.15
 
 - **A page view keeps the record the page shows.** `initEverydeckBrowser({ screens, screenObjects })`: `screenObjects` names which parameter of a page pattern is a record of the app (`{ jobId: 'job' }`, as `everydeck_get_dev_keys` returns it); a page view of `/jobs/3f2c…` then sends `object_type: 'job'` and `object_ref: '3f2c…'` next to the pattern `/jobs/:jobId`, and everydeck says "opened job ‘Head of Finance’". Only identifiers (letters, digits, `-_.:`, at most 128 characters), never another parameter, never a query; everydeck never names a person's parameter there and drops any kind its app map does not know. Without `screenObjects` nothing changes: the pattern only.
