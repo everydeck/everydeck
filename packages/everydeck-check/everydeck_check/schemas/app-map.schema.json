@@ -342,6 +342,32 @@
      "$ref": "#/$defs/evidence"
     }
    }
+  },
+  "first_value": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "flow",
+    "label",
+    "evidence"
+   ],
+   "properties": {
+    "flow": {
+     "$ref": "#/$defs/name",
+     "description": "the flow (flows[].id) whose first result is the first value"
+    },
+    "label": {
+     "type": "string",
+     "minLength": 2,
+     "maxLength": 60,
+     "description": "how the owner reads it, starting with First: First CV analyzed, First post live, First message sent"
+    },
+    "evidence": {
+     "$ref": "#/$defs/evidence",
+     "description": "where the app does it (the start or result of that flow)"
+    }
+   },
+   "description": "The first value of the app: the moment a new person gets what they came for, the first result of one of the app's main flows (core_object or its main flow), never sign-up or sign-in. everydeck shows on Growth how many new people reach it and how long it takes; the owner confirms it on the approval page and can change it under Settings. Leave it out when no flow is it; everydeck then says Not set."
   }
  },
  "properties": {
@@ -605,6 +631,12 @@
         "server"
        ]
       }
+     },
+     "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60,
+      "description": "the name of the page as the app shows it (its heading, title or menu entry): Jobs, Dashboard, Settings. everydeck shows it before the path on Growth and in the timelines."
      }
     }
    }
@@ -1248,6 +1280,13 @@
        "verification"
       ],
       "description": "the flow is the app's sign-up, sign-in, password reset or payment: these are always flows when the app has them (flow_candidates with required); verification: the identity check of a person by a provider (e.g. Didit), never required"
+     },
+     "done": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 60,
+      "pattern": "^[^\\n\\r]+$",
+      "description": "What a person did in this flow, in the past tense and in the app's own words, as the owner reads it in a timeline: Analyzed CV, Sent a message, Published a post. No name of a person or record (everydeck adds the record). Required when the app map is set up for every flow except sign-in, sign-up and password reset."
      }
     }
    }
@@ -2486,6 +2525,61 @@
         "$ref": "#/$defs/evidence"
        }
       }
+     }
+    }
+   }
+  },
+  "first_value": {
+   "$ref": "#/$defs/first_value"
+  },
+  "roles": {
+   "type": "array",
+   "minItems": 2,
+   "maxItems": 6,
+   "description": "Only when the app has sides that use it differently (a marketplace: owners who list and guests who book; tenants and landlords): each side as a role, from a table of the app. members: people with a membership in table (identity.memberships org_table); owners: people who own a row of table (its owner_column or a key to the identity table); everybody_else: all other people (at most one, last). Each role may name its own first value. An app whose people all do the same has no roles.",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "label",
+     "label_plural",
+     "kind",
+     "evidence"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,39}$"
+     },
+     "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40,
+      "description": "one person in this role, in the app's words: Owner, Guest"
+     },
+     "label_plural": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+     },
+     "kind": {
+      "enum": [
+       "members",
+       "owners",
+       "everybody_else"
+      ]
+     },
+     "table": {
+      "$ref": "#/$defs/name",
+      "description": "members and owners: the table that makes a person this role"
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence",
+      "description": "where the app treats this side differently (a page, a check or the table)"
+     },
+     "first_value": {
+      "$ref": "#/$defs/first_value"
      }
     }
    }

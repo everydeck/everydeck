@@ -24,6 +24,10 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.14
+
+- Same version as the scaffold `@everydeck/check` 0.3.14 (the two are a pair) and the same schema and rules: `flows[].done`, `first_value`, `roles[]` and `screens[].label` in the app map (all optional, older app maps stay valid). `validate` checks the places of `first_value` and of each role and its first value in the repository, and lists every flow of a new app map without `done` as an open part.
+
 ### 0.3.13
 
 - Same version as the scaffold `@everydeck/check` 0.3.13 (the two are a pair). `not_in_database`: tables the code creates that the database does not have (found by the scaffold with `--db`). `validate` refuses them in `tables` and answers anything that names them with the reason ("is in the code but not in the database"); the inventory leaves them out (no table, no candidate).

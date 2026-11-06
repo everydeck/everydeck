@@ -431,6 +431,11 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         for k in ("currency", "minor_unit", "price"):
             if m.get(k): _check_evidence(files, m[k]["evidence"], f"{at}.{k}", sym(m[k]["evidence"]), errs)
         for j, st in enumerate(m.get("statuses") or []): _check_evidence(files, st["evidence"], f"{at}.statuses[{j}]", sym(st["evidence"]), errs)
+    # the first value and the sides of the app point to places in the code like every other fact
+    if b.get("first_value"): _check_evidence(files, b["first_value"]["evidence"], "first_value", sym(b["first_value"]["evidence"]), errs)
+    for i, r in enumerate(b.get("roles", []) or []):
+        _check_evidence(files, r["evidence"], f"roles[{i}] {r['id']}", sym(r["evidence"]), errs)
+        if r.get("first_value"): _check_evidence(files, r["first_value"]["evidence"], f"roles[{i}] {r['id']}.first_value", sym(r["first_value"]["evidence"]), errs)
     for i, a in enumerate(b.get("ai_calls", []) or []):
         _check_evidence(files, a["evidence"], f"ai_calls[{i}] {a['provider']}", sym(a["evidence"]), errs)
         if a.get("model"): _check_evidence(files, a["model"]["evidence"], f"ai_calls[{i}] {a['provider']}.model", [a["model"]["value"]], errs)

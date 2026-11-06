@@ -162,6 +162,12 @@
               "auth_sign_ups"
             ],
             "description": "everydeck records this flow without a signal in the app's code: browser_sign_in from the sign-ins the browser SDK reports once the app names the person (identity.browser_subject), auth_sign_ups from the created_at of the accounts in auth.users that the read bridge reads"
+          },
+          "done": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 60,
+            "description": "what a person did in this flow, past tense, in the app's words"
           }
         },
         "required": [
@@ -404,6 +410,30 @@
                     "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
                   }
                 }
+              },
+              "first_value": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "flow",
+                  "label"
+                ],
+                "properties": {
+                  "flow": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 60
+                  }
+                },
+                "description": "the first value, the first result of this flow (capabilities[].id)"
+              },
+              "side": {
+                "const": true,
+                "description": "a side of the app as the agent describes it (app map roles[])"
               }
             },
             "required": [
@@ -2346,6 +2376,26 @@
           }
         }
       }
+    },
+    "first_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "flow",
+        "label"
+      ],
+      "properties": {
+        "flow": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        }
+      },
+      "description": "the first value, the first result of this flow (capabilities[].id)"
     }
   },
   "required": [

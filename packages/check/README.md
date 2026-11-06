@@ -23,6 +23,10 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.14
+
+- The app map knows what a person did and what they came for (shared rules with `everydeck-check` 0.3.14): `flows[].done` (what a person did in that flow, in the past tense, as the owner reads it in a timeline: Analyzed CV), `first_value` (the first result of a main flow that a new person came for, with its place), `roles[]` (the sides of an app that use it differently, each from a table of the app, with its own first value) and `screens[].label` (the name of the page as the app shows it). All four are optional; older app maps stay valid. `everydeck-check validate` lists every flow of a new app map without `done` as an open part.
+
 ### 0.3.13
 
 - A table the migrations create that the database does not have is no part of the app: with `--db` the scaffold leaves it out of `tables` and lists it in the new `not_in_database` (table and place); a run without a database (the GitHub Action after the merge, `--merge`) keeps it out from there instead of bringing it back from the migrations. `validate` says why such a table may stand nowhere else (shared rules with `everydeck-check` 0.3.13).
