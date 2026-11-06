@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.15
+
+- **A page view keeps the record the page shows.** `initEverydeckBrowser({ screens, screenObjects })`: `screenObjects` names which parameter of a page pattern is a record of the app (`{ jobId: 'job' }`, as `everydeck_get_dev_keys` returns it); a page view of `/jobs/3f2c…` then sends `object_type: 'job'` and `object_ref: '3f2c…'` next to the pattern `/jobs/:jobId`, and everydeck says "opened job ‘Head of Finance’". Only identifiers (letters, digits, `-_.:`, at most 128 characters), never another parameter, never a query; everydeck never names a person's parameter there and drops any kind its app map does not know. Without `screenObjects` nothing changes: the pattern only.
+
 ## 0.5.14
 
 - **The outbox relay on Supabase runs without Supabase's JWT check, like the read bridge.** Its key is the invoke token from Vault (`everydeck_outbox_invoke_token`, header `x-everydeck-invoke-token`): a call without it, with a wrong or a short one, or with only the app's public key gets `401`, and the relay reads no row and sends nothing. Before, the head of `supabase/functions/everydeck-outbox-relay/index.ts` said to keep the check while everydeck deployed it without and put no public key into the Vault of a hosted project; a deploy with the check on turned the schedule's call away. Keep it off in `supabase/config.toml`:

@@ -32,7 +32,7 @@ export interface RuntimeModules {
  * `storage: AsyncStorage` is enough. Values are JSON strings of the unsent events under one key.
  */
 export interface StorageAdapter { getItem(key: string): string | null | Promise<string | null>; setItem(key: string, value: string): void | Promise<void>; removeItem(key: string): void | Promise<void> }
-export interface BrowserOptions extends EverydeckOptions { /** keep where the person came from on the first visit (UTM values of the address, domain of the referring page) and send it once the person is known; default on */ captureOrigin?: boolean; /** storage for unsent events (default: `localStorage`, which React Native does not have; pass AsyncStorage there) */ storage?: StorageAdapter; /** detect platform and version automatically (on by default); `client` overrides single values */ detectClient?: boolean; /** Expo/React Native modules for detection */ runtime?: RuntimeModules; /** page patterns from the app's router, as declared in the manifest under `screens` (`/partner/:slug`); every address is mapped to the matching pattern */ screens?: string[]; /** patterns of the app's API paths, as declared in the manifest under `api_routes` (`/api/partners/:slug`); the path of every captured request and paths in error messages are mapped to them (Supabase paths need no patterns) */ apiRoutes?: string[]; /** custom page name from the address (takes precedence over `screens`; the result is still mapped to the patterns) */ routeName?: (u: URL) => string; /** save unsent events on exit (default: only in native apps; a web page keeps only events everydeck refused with Retry-After, until the next visit; false: nothing) */ persist?: boolean; sessionId?: string; captureUnhandled?: boolean; /** clean the path (default: pathname); the result is mapped to `apiRoutes` */ sanitizeRoute?: (url: URL) => string; /** hosts whose requests are captured: inside an action (default: all) and in the background (default: the page's own host); name the app's API here when it runs on another host */ captureHosts?: string[]; /** Whether a captured request may carry the correlation headers `x-everydeck-*` (default: yes). Return false for targets whose CORS policy does not allow these headers; the request is still captured, only without server-side correlation. */ correlate?: (url: URL) => boolean;
+export interface BrowserOptions extends EverydeckOptions { /** keep where the person came from on the first visit (UTM values of the address, domain of the referring page) and send it once the person is known; default on */ captureOrigin?: boolean; /** storage for unsent events (default: `localStorage`, which React Native does not have; pass AsyncStorage there) */ storage?: StorageAdapter; /** detect platform and version automatically (on by default); `client` overrides single values */ detectClient?: boolean; /** Expo/React Native modules for detection */ runtime?: RuntimeModules; /** page patterns from the app's router, as declared in the manifest under `screens` (`/partner/:slug`); every address is mapped to the matching pattern */ screens?: string[]; /** which parameter of `screens` names a record of the app (`{ jobId: 'job' }`, as everydeck gives it with the keys): a page view keeps that record's identifier and its kind, so everydeck can say "opened job ‘Head of Finance’". Only identifiers (letters, digits, `-_.:`, at most 128), never other parameters; everydeck never names a parameter of a person here. Like PostHog and GA keep the address, but only for records */ screenObjects?: Record<string, string>; /** patterns of the app's API paths, as declared in the manifest under `api_routes` (`/api/partners/:slug`); the path of every captured request and paths in error messages are mapped to them (Supabase paths need no patterns) */ apiRoutes?: string[]; /** custom page name from the address (takes precedence over `screens`; the result is still mapped to the patterns) */ routeName?: (u: URL) => string; /** save unsent events on exit (default: only in native apps; a web page keeps only events everydeck refused with Retry-After, until the next visit; false: nothing) */ persist?: boolean; sessionId?: string; captureUnhandled?: boolean; /** clean the path (default: pathname); the result is mapped to `apiRoutes` */ sanitizeRoute?: (url: URL) => string; /** hosts whose requests are captured: inside an action (default: all) and in the background (default: the page's own host); name the app's API here when it runs on another host */ captureHosts?: string[]; /** Whether a captured request may carry the correlation headers `x-everydeck-*` (default: yes). Return false for targets whose CORS policy does not allow these headers; the request is still captured, only without server-side correlation. */ correlate?: (url: URL) => boolean;
   /** report every failed request to `captureHosts` (default: the own host) also outside an action, through a wrapper around `globalThis.fetch` (on by default) */ captureBackground?: boolean;
   /** report `console.error` as `browser.console_error` (on by default, off with `captureUnhandled: false` too): scrubbed text, frames of a passed error, never objects of the app */ captureConsole?: boolean;
   /** writes to Supabase (PostgREST `/rest/v1/<table>`) that the app map lists as `result.write` of a flow; each one becomes a run of that flow (start, error, id and platform as headers for the outbox trigger) */ writes?: BrowserWrite[];
@@ -50,6 +50,21 @@ export interface BrowserOptions extends EverydeckOptions { /** keep where the pe
 export interface BrowserWrite { flow: string; table: string; kind: 'insert' | 'update' | 'upsert' | 'delete'; object?: string; key?: string; status?: string }
 const WRITE_KINDS = new Set(['insert', 'update', 'upsert', 'delete']);
 const OBJECT_TYPE = /^[a-z][a-z0-9_-]{0,31}$/;
+/** a parameter name of a page pattern, and the identifier of a record in an address (never an e-mail, a name with blanks or a query) */
+const PARAM = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const RECORD_REF = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+/** the record a page shows: the last parameter of its pattern that `screenObjects` names, with the identifier from the address */
+export function pageObject(address: string, patterns: readonly string[], objects: ReadonlyMap<string, string>): { type: string; ref: string } | null {
+  if (!objects.size) return null;
+  const segs = segsOf(address); const p = bestPattern(segs, patterns); if (!p) return null;
+  const ps = p.split('/').filter(Boolean);
+  for (let i = ps.length - 1; i >= 0; i--) {
+    const x = ps[i]!; const type = x.startsWith(':') ? objects.get(x.slice(1)) : undefined; if (!type) continue;
+    let ref: string; try { ref = decodeURIComponent(segs[i] ?? ''); } catch { return null; }
+    return RECORD_REF.test(ref) ? { type, ref } : null;
+  }
+  return null;
+}
 const COLUMN = /^[a-z_][a-z0-9_]{0,62}$/;
 /** a status as the database stores it: a short code, never free text */
 const STATUS_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -444,7 +459,7 @@ export class EverydeckBrowser {
     return null;
   }
   constructor(o: BrowserOptions) {
-    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, captureBots, ...core } = o;
+    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, screenObjects, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, captureBots, ...core } = o;
     // valid entries only (flow like a signal name, known kind)
     this.writes = (writes ?? []).filter((w) => w && SAFE.test(String(w.flow)) && typeof w.table === 'string' && w.table.length > 0 && WRITE_KINDS.has(w.kind)).slice(0, 200)
       .map((w) => ({ flow: w.flow, table: w.table, kind: w.kind, ...(w.object && OBJECT_TYPE.test(w.object) && w.key && COLUMN.test(w.key) ? { object: w.object, key: w.key } : {}), ...(w.status && COLUMN.test(w.status) ? { status: w.status } : {}) }));
@@ -459,6 +474,8 @@ export class EverydeckBrowser {
       onSendResult: (r, pending) => { if (r === 'retry') this.savePending(); else if (r === 'accepted' && (pending === 0 || (!this.persistOn && this.stored))) this.clearPending(); } });
     const detected = found.later ? found.later.then((x) => { this.client.setClient({ ...x, ...(o.client ?? {}) }); }).catch(() => undefined) : Promise.resolve();
     this.screens = (screens ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 300);
+    // only valid entries (a parameter name, a kind of record like `writes[].object`)
+    this.screenObjects = new Map(Object.entries(screenObjects ?? {}).filter(([k, v]) => PARAM.test(k) && typeof v === 'string' && OBJECT_TYPE.test(v)).slice(0, 100));
     this.routeName = routeName ?? ((u: URL) => screenOf(pathOf(u), this.screens));
     this.sessionId = sessionId ?? uuid();
     // a bot or an automated browser (the screenshot after a deploy, a headless verification run) is no visitor
@@ -654,6 +671,7 @@ export class EverydeckBrowser {
   }
   private readonly store: StorageAdapter | null;
   private screens: string[] = [];
+  private screenObjects: Map<string, string> = new Map();
   private apiRoutes: string[] = [];
   /** Error message without token, query, e-mail and with paths only as patterns (pages and API) */
   private msg(e: unknown): string { return scrubPaths(sanitizeMessage(e), [...this.apiRoutes, ...this.screens]).slice(0, 300); }
@@ -679,7 +697,9 @@ export class EverydeckBrowser {
     if (this.pageViews >= PAGE_VIEWS_MAX) { this.client.noteLoss('sdk_page_views'); return; }
     this.pageViews++;
     const { sessionId, ...r } = this.ctxRefs(null);
-    this.client.breadcrumb(PAGE_EVENT, sessionId, { ...r, ...(!r.subjectRef && this.restored ? { subjectRef: this.restored } : {}), fields: { screen } });
+    // the record the page shows (only kinds everydeck named, only an identifier), next to the pattern
+    const obj = path.startsWith('/') ? pageObject(path, this.screens, this.screenObjects) : null;
+    this.client.breadcrumb(PAGE_EVENT, sessionId, { ...r, ...(!r.subjectRef && this.restored ? { subjectRef: this.restored } : {}), fields: { screen, ...(obj ? { object_type: obj.type, object_ref: obj.ref } : {}) } });
   }
   /** a page as everydeck keeps it: an address only as its pattern, a screen name without query or blanks */
   private pageName(raw: string): string { return (raw.startsWith('/') ? screenOf(raw, this.screens) : raw.replace(/[?#\s].*$/, '')).slice(0, 200); }
