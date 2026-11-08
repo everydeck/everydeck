@@ -2655,6 +2655,40 @@
        }
       }
      }
+    },
+    "server_settings": {
+     "type": "array",
+     "maxItems": 20,
+     "description": "Where the app's own server reads its everydeck settings from public.everydeck_server_config() (everydeckFromSupabase, Everydeck.from_supabase, rpc('everydeck_server_config')); the plan of everydeck_live_files must then carry that function",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "path",
+       "line"
+      ],
+      "properties": {
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "line": {
+        "type": "integer",
+        "minimum": 1
+       }
+      }
+     }
+    },
+    "everydeck_files": {
+     "type": "array",
+     "maxItems": 50,
+     "description": "everydeck's files in the repository (supabase/migrations/*_everydeck_*.sql, supabase/functions/everydeck-*/index.ts), compared with the plan of everydeck_live_files",
+     "items": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+     }
     }
    }
   },

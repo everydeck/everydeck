@@ -102,10 +102,56 @@ def build_inventory(repo: Path, app_map: dict[str, Any]) -> dict[str, Any]:
         "candidates": [first[k] for k in sorted(first)],
         "tables": [{"table": n, "evidence": w[:300], **({"used": u} if (u := used.get(n)) else {})} for n, w in sorted(tables.items())],
         **({"schedules": schedules} if schedules else {}),
+        **({"server_settings": reads} if (reads := server_settings(repo)) else {}),
+        **({"everydeck_files": files} if (files := everydeck_files(repo)) else {}),
     }
     inv["excerpts"] = _excerpts(repo, inv)
     inv["digest"] = digest_of(inv)
     return inv
+
+
+# the app's own server reads its everydeck settings from public.everydeck_server_config() (SDK: everydeckFromSupabase, serverConfigFromSupabase,
+# Everydeck.from_supabase; or the call itself). Then the Supabase project needs that function: everydeck_live_files with own_server: true brings it
+SERVER_SETTINGS = re.compile(r"\b(?:everydeckFromSupabase|serverConfigFromSupabase)\s*\(|\bEverydeck\s*\.\s*from_supabase\s*\(|\.rpc\s*\(\s*['\"]everydeck_server_config['\"]")
+EVERYDECK_FILE = re.compile(r"(^|/)supabase/(migrations/\d{14}_everydeck_[a-z0-9_]+\.sql|functions/everydeck-[a-z0-9-]+/index\.ts)$")
+SERVER_CONFIG_FILE = re.compile(r"(^|/)supabase/migrations/\d{14}_everydeck_server_config\.sql$")
+SERVER_SETTINGS_MAX = 20
+EVERYDECK_FILES_MAX = 50
+
+
+def server_settings(repo: Path) -> list[dict[str, Any]]:
+    """Every place in the app's code that reads the everydeck settings from public.everydeck_server_config() (path, line), at most SERVER_SETTINGS_MAX."""
+    out: list[dict[str, Any]] = []
+    for p in sorted(repo.rglob("*")):
+        rel = p.relative_to(repo)
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in CODE_EXT or p.stat().st_size > CODE_FILE_MAX: continue
+        try: text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError: continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if SERVER_SETTINGS.search(line) and not line.lstrip().startswith(("//", "#", "*")):
+                out.append({"path": rel.as_posix(), "line": i})
+                if len(out) >= SERVER_SETTINGS_MAX: return out
+    return out
+
+
+def everydeck_files(repo: Path) -> list[str]:
+    """everydeck's own files in the repo (migrations everydeck_*, Edge Functions everydeck-*), to compare with the plan of everydeck_live_files."""
+    out = []
+    for p in sorted(repo.rglob("*")):
+        rel = p.relative_to(repo)
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file(): continue
+        if EVERYDECK_FILE.search(rel.as_posix()): out.append(rel.as_posix())
+    return out[:EVERYDECK_FILES_MAX]
+
+
+def server_config_errors(inv: dict[str, Any] | None) -> list[str]:
+    """Code that reads public.everydeck_server_config() without the migration of that function in the repo: the server would stay silent."""
+    reads = (inv or {}).get("server_settings") or []
+    if not reads or any(SERVER_CONFIG_FILE.search(f) for f in (inv or {}).get("everydeck_files") or []): return []
+    at = f"{reads[0]['path']}:{reads[0]['line']}"
+    return [f"{at}: the app's own server reads its everydeck settings from public.everydeck_server_config(), but the repository has no migration *_everydeck_server_config.sql. "
+            "In a live app call everydeck_live_files with own_server: true (and the same outbox), write the returned files exactly as given and add the returned signals; "
+            "never write that function yourself. Without it the server starts without settings and sends nothing to everydeck."]
 
 
 def _money_uses(repo: Path, tables: dict[str, str]) -> dict[str, str]:
@@ -130,6 +176,8 @@ def _places(inv: dict[str, Any]) -> list[tuple[str, int | None, str | None]]:
     for d in [*inv["providers"], *inv["blocks"]]:
         m = re.search(r"\bin ([\w./@-]+\.[A-Za-z0-9]+)(?::(\d+))?$", d["evidence"])
         if m: out.append((m.group(1), int(m.group(2)) if m.group(2) else None, d["evidence"].split(" in ")[0]))
+    # where the app's own server reads its everydeck settings (everydeck's own review sees how the client is started, e.g. its refresh)
+    out += [(r["path"], r["line"], None) for r in inv.get("server_settings") or []][:3]
     return out
 
 

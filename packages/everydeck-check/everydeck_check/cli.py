@@ -144,6 +144,10 @@ def cmd_validate(a: argparse.Namespace) -> int:
                 # an old file name (everydeck-befund.json) is read, but written is only the new one
                 _write_like(a.manifest, APP_MAP if a.file_note else a.manifest, raw)
         errs = validate_app_map(raw, Path(repo).resolve() if repo else None, db)
+        # server code reads public.everydeck_server_config() while the repository has no migration of that function: the server would stay silent
+        if repo:
+            from .inventory import server_config_errors
+            errs += server_config_errors(raw.get("inventory"))
         from .rules import app_map_open
         # the open parts also while errors remain: the agent sees everything in its first run; a map everydeck cannot read yet has none
         parts = app_map_open(raw, require_result_signal=not errs)

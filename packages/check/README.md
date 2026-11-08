@@ -23,6 +23,10 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.19
+
+- Same version as `everydeck-check` 0.3.19, whose `validate --repo` now names in the inventory where the app's own server reads its everydeck settings. `--merge` keeps that inventory as before; nothing else changes in the scaffold.
+
 ### 0.3.18
 
 - Reports need `moderation.reports` (shared rules with `everydeck-check` 0.3.18): a flow that reports (an update of the flagged table, an insert into the report table) no longer closes `flow:moderation`.

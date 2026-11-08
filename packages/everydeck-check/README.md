@@ -24,6 +24,10 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.19
+
+- `validate --repo` writes into the inventory where the app's own server reads its everydeck settings from `public.everydeck_server_config()` (`server_settings`: `everydeckFromSupabase`, `serverConfigFromSupabase`, `Everydeck.from_supabase`, `rpc('everydeck_server_config')`) and everydeck's own files in the repository (`everydeck_files`). Code that reads the settings while the repository has no `*_everydeck_server_config.sql` is an error: in a live app `everydeck_live_files` with `own_server: true` brings the function. everydeck compares both with the plan of `everydeck_live_files` when the app map is submitted (shared version with `@everydeck/check` 0.3.19).
+
 ### 0.3.18
 
 - `validate` asks for `moderation.reports` wherever people can report content (a flag such as `reported` on a record, a report table), also when a flow with a result signal already reports it (`flow:moderation` stays open; shared rules with `@everydeck/check` 0.3.18). Until the app map names the place, everydeck shows the reports of such a flow under Moderation anyway.

@@ -5,9 +5,9 @@ The packages an app uses to connect to [everydeck](https://everydeck.ai). Licens
 | Package | Registry | Folder | Install |
 |---|---|---|---|
 | `@everydeck/sdk` 0.5.18 | npm | `packages/sdk` | `npm install @everydeck/sdk` |
-| `@everydeck/check` 0.3.18 (program `everydeck-scaffold`) | npm | `packages/check` | `npx @everydeck/check@0.3.18 . --out everydeck/app-map.json` |
+| `@everydeck/check` 0.3.19 (program `everydeck-scaffold`) | npm | `packages/check` | `npx @everydeck/check@0.3.19 . --out everydeck/app-map.json` |
 | `everydeck` 0.5.10 | PyPI | `packages/sdk-python` | `pip install everydeck` |
-| `everydeck-check` 0.3.18 | PyPI | `packages/everydeck-check` | `pip install everydeck-check` |
+| `everydeck-check` 0.3.19 | PyPI | `packages/everydeck-check` | `pip install everydeck-check` |
 
 The GitHub Action that keeps everydeck working after every push lives in [everydeck/check](https://github.com/everydeck/check) (`uses: everydeck/check@v1`).
 
@@ -17,4 +17,4 @@ Each package is published on its own, by publishing a GitHub release whose tag n
 
 ## Where the code comes from
 
-This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit 168e8ff17ce4). Change the code there, run the script, commit the result here.
+This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit 8327d8311e2c). Change the code there, run the script, commit the result here.
