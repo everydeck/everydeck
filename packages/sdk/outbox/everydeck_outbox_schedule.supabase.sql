@@ -18,7 +18,8 @@
 
 -- Only adds: cron.schedule with the name of an existing job replaces that job (pg_cron 1.3+), so applying this again needs no unschedule.
 CREATE EXTENSION IF NOT EXISTS pg_cron;
-CREATE EXTENSION IF NOT EXISTS pg_net;
+-- SDK 0.5.17: pg_net in the schema extensions, as the Supabase dashboard installs it; in public Supabase's Security Advisor lists it (extension in public)
+CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
 
 -- the heartbeat schedule: every 5 minutes (everydeck Free: heartbeat every 300 s), delivers what waits and sends the job heartbeat.
 SELECT cron.schedule('everydeck-outbox-relay', '*/5 * * * *', $cron$

@@ -18,7 +18,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 
-from .detect import SCHEMA_FILE_MAX, url_imports, DRIZZLE_TABLE, FIRESTORE_CALL, FIRESTORE_RULE, NPM, PRISMA_MODEL, PY, SKIP_DIRS, SQLALCHEMY_TABLE, SQL_CREATE, SQL_DROP, SQL_RENAME, _supabase_tables
+from .detect import SCHEMA_FILE_MAX, url_imports, DRIZZLE_TABLE, FIRESTORE_CALL, FIRESTORE_RULE, MIGRATION_PATH, NPM, PRISMA_MODEL, PY, SKIP_DIRS, SQLALCHEMY_TABLE, SQLMODEL_CLASS, SQL_CREATE, SQL_DROP, SQL_RENAME, _supabase_tables, prisma_tables
 from .reads import frontend_mentions
 
 BLOCKS = ["login", "people_roles", "organizations", "content_status", "moderation", "chats", "uploads", "search", "payments", "email", "push", "ai", "jobs", "imports", "bookings", "settings", "platforms"]
@@ -241,6 +241,17 @@ DB_TABLES: set[str] | None = None
 def _roles(req: dict[str, Any]) -> list[str]:
     r = req.get("role")
     return [] if r is None else list(r) if isinstance(r, list) else [r]
+
+
+def table_names(name: str) -> list[str]:
+    """The names code gives a table: as it is, camelCase and PascalCase, each also singular (Prisma models, Drizzle variables, tRPC routers)."""
+    def singular(x: str) -> str:
+        return re.sub(r"ies$", "y", x) if x.endswith("ies") else re.sub(r"(ses|xes|ches|shes)$", lambda m: m.group(1)[:-2], x) if re.search(r"(ses|xes|ches|shes)$", x) else x[:-1] if re.search(r"[^s]s$", x) else x
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower().split("_")
+    out = [name]
+    for ps in (parts, parts[:-1] + [singular(parts[-1])]):
+        camel = ps[0] + "".join(x[:1].upper() + x[1:] for x in ps[1:]); out += ["_".join(ps), camel, camel[:1].upper() + camel[1:]]
+    return list(dict.fromkeys(x for x in out if x))
 
 
 def _check_evidence(files: _Files, ev: dict[str, Any], at: str, expect: list[str], errs: list[str]) -> None:
@@ -466,7 +477,9 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         at = f"works_with[{i}] {w['table']}"; ev = w["evidence"]; t = tables_by_name.get(w["table"])
         shown_near = t is not None and any(sh["path"] == ev["path"] and abs(int(sh["line"]) - int(ev["line"])) <= LINE_SLACK for sh in list(t.get("shown") or []) + [sh for c in t["columns"] for sh in (c.get("shown") or [])])
         probe: list[str] = []
-        _check_evidence(files, ev, at, [w["table"]], probe)
+        # the table by any name the code gives it: snake_case, the ORM's camelCase and model name, singular (team_members, teamMembers,
+        # TeamMember, db.teamMember); a symbol alone no longer passes the place without the table (it was a loophole)
+        _check_evidence(files, {k: v for k, v in ev.items() if k != "symbol"}, at, table_names(w["table"]), probe)
         if probe and not (shown_near and files.lines(ev["path"]) is not None and int(ev["line"]) <= len(files.lines(ev["path"]) or [])): errs.append(probe[0] + "; name the place in the UI (page or component) that shows the table, or a place that carries a display location of it")
         elif not probe and _is_backend(ev["path"]): errs.append(f"{at}: {ev['path']} is no UI file (backend folder); works_with names the page or component where the users see, create or edit it")
     for i, y in enumerate(b.get("everydeck_tables") or []): _check_evidence(files, y["evidence"], f"everydeck_tables[{i}] {y['table']}", [y["table"]], errs)
@@ -575,21 +588,27 @@ def detect_tables(repo: Path) -> dict[str, str]:
         def add(name: str, kind: str) -> None:
             if name not in found: found[name] = f"{kind} {name} in {rel}"
         suf = rel.suffix
-        if suf == ".sql":   # final state of the schema: migrations in file order, DROP TABLE removes
-            for m in SQL_CREATE.finditer(text):
+        if suf == ".sql":   # final state of the schema: migrations in file order, DROP TABLE removes; CREATE and DROP in the order of the file
+            text = text.replace("`", '"')   # MySQL names in backticks (Prisma/MySQL migrations)
+            ops = [(m.start(), "create", m) for m in SQL_CREATE.finditer(text)]
+            if MIGRATION_PATH.search(rel.as_posix()): ops += [(m.start(), "drop", m) for m in SQL_DROP.finditer(text)]
+            for _, op, m in sorted(ops, key=lambda x: x[0]):
+                if op == "drop": found.pop(m.group(1), None); continue
                 sm = SQL_CREATE_IN_SCHEMA.match(text, m.start())
                 if sm and sm.group(1).lower() in EVERYDECK_SCHEMAS: continue   # the outbox copied from the SDK (everydeck_outbox.event, .capture_error)
                 add(m.group(1), "table")
-            for n in SQL_DROP.findall(text): found.pop(n, None)
             for old, new in SQL_RENAME.findall(text):   # renamed: the new name is in this file
                 if found.pop(old, None) is not None: add(new, "table")
         elif suf == ".prisma":
-            for a, c in PRISMA_MODEL.findall(text): add(a or c, "model")
+            for n in prisma_tables(text): add(n, "model")
         elif suf == ".rules":
             for n in FIRESTORE_RULE.findall(text):
                 if n not in ("databases", "documents"): add(n, "collection")
         elif suf == ".py":
             for n in SQLALCHEMY_TABLE.findall(text): add(n, "table")
+            for m in SQLMODEL_CLASS.finditer(text):
+                body = text[m.end():]; nxt = re.search(r"(?m)^\S", body)
+                if not SQLALCHEMY_TABLE.search(body[:nxt.start() if nxt else len(body)]): add(m.group(1).lower(), "table")
             # Alembic: op.create_table("x") / op.drop_table("x") in file order, like the skeleton
             for m in ALEMBIC_OP.finditer(_upgrade_body(text)):   # only upgrade(); downgrade() reverts everything
                 if m.group(1) == "create_table": add(m.group(2), "table")
@@ -957,6 +976,9 @@ def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
     errs += exposure_errors(repo)
     declared_routes = {r["pattern"].rstrip("/") or "/" for r in (b.get("api_routes") or [])} | {s["pattern"].rstrip("/") or "/" for s in (b.get("screens") or [])}
     for pat, where in detect_routes(repo).items():   # an app map may carry the full pattern (router prefix + include_router prefix + path); the place here is only the decorator's path
+        # "/" of a router with a prefix (FastAPI APIRouter(prefix="/events") + @router.get("/")): the app map carries the full pattern at the same file
+        in_file = where.rsplit(" in ", 1)[-1]
+        if pat == "/" and any((r.get("evidence") or {}).get("path") == in_file for r in (b.get("api_routes") or [])): continue
         if pat not in declared_routes and not any(d.endswith(pat) and pat != "/" for d in declared_routes): errs.append(f"api_routes[]: {where} is not in the app map (pattern {pat})")
     declared_pkgs = {c["package"].lower() for c in (b.get("components") or [])}
     for name, where in detect_providers(repo).items():
@@ -1224,24 +1246,35 @@ def contact_copy_errors(b: dict[str, Any], repo: Path) -> list[str]:
     return errs
 
 
+# a missing result signal needs a change of the app's code; every other error is about the app map. They come last, after everything else
+SIGNAL_ERROR = re.compile(r"result signal|browser_subject|needs a signal|signal .* (?:is used twice|once)", re.I)
+
+
 def validate_app_map(doc: dict[str, Any], repo: Path | None, db: str | None = None) -> list[str]:
+    """Every stage in one run: before, the first stage with an error hid all later ones, and the missing result signal (a code change) hid
+    every place, table and money entry of the map; real apps saw only that error first. Only a map that does not have the shape stops early,
+    because nothing else can be read then. A stage that cannot run because of an earlier error says so instead of staying silent."""
     global DB_TABLES
     errs = schema_errors(doc)
     if errs: return errs
-    errs = reference_errors(doc)
+    errs = list(reference_errors(doc))
     # the same check as everydeck on submission (bundled), derivation and derived manifest included
-    if not errs:
-        from .rules import app_map_rule_errors
-        errs = app_map_rule_errors(doc)
-    if db and not errs:
+    from .rules import app_map_rule_errors
+    # everydeck's own check says the missing result signal in its words; the reference check said it before: once is enough
+    one_signal = re.compile(r"at least one flow (?:needs a|with a) result signal")
+    errs += [e for e in app_map_rule_errors(doc) if e not in errs and not (one_signal.search(e) and any(one_signal.search(x) for x in errs))]
+    if db:
         try: DB_TABLES = database_tables(db)
-        except RuntimeError as e: return [f"--db: {e}"]
+        except RuntimeError as e: return errs + [f"--db: {e}"]
         errs += database_errors(doc, DB_TABLES)
         try: errs += default_errors(doc, database_time_defaults(db))
-        except RuntimeError as e: return [f"--db: {e}"]
-    if repo and not errs:
-        errs = evidence_errors(doc, repo) + completeness_errors(doc, repo) + contact_copy_errors(doc, repo)
-    return errs
+        except RuntimeError as e: return errs + [f"--db: {e}"]
+    if repo:
+        for stage, check in (("places", evidence_errors), ("completeness", completeness_errors), ("contact copies", contact_copy_errors)):
+            try: errs += [e for e in check(doc, repo) if e not in errs]
+            except Exception as e:   # noqa: BLE001 (an earlier error (a reference to nothing) can break a later stage; it says so and the rest still runs)
+                errs.append(f"{stage}: not checked in this run because of the errors above ({type(e).__name__}: {str(e)[:120]}); fix them and run validate again")
+    return [e for e in errs if not SIGNAL_ERROR.search(e)] + [e for e in errs if SIGNAL_ERROR.search(e)]
 
 
 def drift_manifest(b: dict[str, Any]) -> dict[str, Any]:

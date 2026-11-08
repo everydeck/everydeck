@@ -31,7 +31,7 @@ SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", ".next", ".expo"
 
 # dependency → block (npm). Prefix match with "*".
 NPM: dict[str, str] = {
-    "stripe": "payments", "@stripe/*": "payments", "@paddle/*": "payments", "@lemonsqueezy/*": "payments", "@paypal/*": "payments", "razorpay": "payments", "@mollie/*": "payments",
+    "stripe": "payments", "@stripe/*": "payments", "@paddle/*": "payments", "@lemonsqueezy/*": "payments", "@paypal/*": "payments", "razorpay": "payments", "@mollie/*": "payments", "@polar-sh/*": "payments", "mercadopago": "payments", "@mercadopago/*": "payments",
     "openai": "ai", "@anthropic-ai/*": "ai", "@google/generative-ai": "ai", "@google/genai": "ai", "ai": "ai", "@ai-sdk/*": "ai", "langchain": "ai", "@langchain/*": "ai", "cohere-ai": "ai", "@mistralai/*": "ai", "replicate": "ai", "groq-sdk": "ai",
     "expo-notifications": "push", "@capacitor/push-notifications": "push", "@capacitor-firebase/messaging": "push", "@react-native-firebase/messaging": "push", "web-push": "push", "@onesignal/*": "push", "react-native-onesignal": "push", "react-native-push-notification": "push",
     "resend": "email", "postmark": "email", "nodemailer": "email", "@sendgrid/mail": "email", "mailgun.js": "email", "mailgun-js": "email", "@aws-sdk/client-ses": "email", "@getbrevo/*": "email", "node-mailjet": "email",
@@ -72,7 +72,7 @@ URL_IMPORT = re.compile(r"""['"](?:npm:|jsr:|https?://(?:esm\.sh|cdn\.skypack\.d
 HOSTS: list[tuple[str, str, str]] = [
     ("api.resend.com", "email", "resend"), ("api.sendgrid.com", "email", "sendgrid"), ("api.postmarkapp.com", "email", "postmark"), ("api.mailgun.net", "email", "mailgun"), ("api.brevo.com", "email", "brevo"), ("api.mailjet.com", "email", "mailjet"),
     ("fcm.googleapis.com", "push", "fcm"), ("onesignal.com/api", "push", "onesignal"), ("exp.host/--/api/v2/push", "push", "expo push"),
-    ("api.stripe.com", "payments", "stripe"), ("api.paddle.com", "payments", "paddle"), ("api.lemonsqueezy.com", "payments", "lemonsqueezy"), ("api.midtrans.com", "payments", "midtrans"), ("api.xendit.co", "payments", "xendit"),
+    ("api.stripe.com", "payments", "stripe"), ("api.paddle.com", "payments", "paddle"), ("api.lemonsqueezy.com", "payments", "lemonsqueezy"), ("api.midtrans.com", "payments", "midtrans"), ("api.xendit.co", "payments", "xendit"), ("api.polar.sh", "payments", "polar"), ("api.mercadopago.com", "payments", "mercadopago"),
     ("api.openai.com", "ai", "openai"), ("api.anthropic.com", "ai", "anthropic"), ("generativelanguage.googleapis.com", "ai", "google ai"),
 ]
 
@@ -99,8 +99,22 @@ SQL_DROP = re.compile(r"""drop\s+table\s+(?:if\s+exists\s+)?(?:(?:"?[A-Za-z_][\w
 # ALTER TABLE x RENAME TO y: in the final state the table is named y (like DROP TABLE, in file order)
 SQL_RENAME = re.compile(r"""alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:(?:"?[A-Za-z_][\w]*"?)\.)?"?([A-Za-z_][\w]*)"?\s+rename\s+to\s+"?([A-Za-z_][\w]*)"?""", re.I)
 PRISMA_MODEL = re.compile(r"(?m)^\s*model\s+([A-Za-z_]\w*)\s*\{|@@map\(\s*['\"]([A-Za-z_]\w*)['\"]\s*\)")
+# one name per Prisma model: the table name of @@map("x") or @@map(name: "x") inside the block, else the model name (with @@map(name: "users"),
+# the model User and the table users were both asked for)
+PRISMA_BLOCK = re.compile(r"(?ms)^\s*model\s+([A-Za-z_]\w*)\s*\{(.*?)^\s*\}")
+PRISMA_MAP = re.compile(r"""@@map\(\s*(?:name\s*:\s*)?['"]([A-Za-z_]\w*)['"]""")
+
+
+def prisma_tables(text: str) -> list[str]:
+    return [(PRISMA_MAP.search(m.group(2)) or m).group(1) for m in PRISMA_BLOCK.finditer(text)]
+
+
+# a migration step of the schema; a reset or seed script elsewhere (scripts/sql/dev-reset.sql) drops nothing, the same rule as the scaffold
+MIGRATION_PATH = re.compile(r"(^|/)(migrations?|drizzle|alembic|versions|schema|schemas|sql/migrations|db/migrate)(/|$)|(^|/)(\d{3,}[^/]*|schema)\.sql$", re.I)
 DRIZZLE_TABLE = re.compile(r"""\b(?:pgTable|mysqlTable|sqliteTable)\(\s*['"]([A-Za-z_]\w*)['"]""")
-SQLALCHEMY_TABLE = re.compile(r"""__tablename__\s*=\s*['"]([A-Za-z_]\w*)['"]""")
+SQLALCHEMY_TABLE = re.compile(r"""__tablename__\s*(?::\s*[\w\[\]]+\s*)?=\s*['"]([A-Za-z_]\w*)['"]""")   # also annotated (__tablename__: str = "x")
+# SQLModel: class X(Base, table=True) without __tablename__ is the table x (class name in lower case)
+SQLMODEL_CLASS = re.compile(r"""(?m)^class\s+([A-Za-z_]\w*)\s*\([^)]*\btable\s*=\s*True[^)]*\)\s*:""")
 FIRESTORE_RULE = re.compile(r"match\s+/([A-Za-z_]\w*)/\{")
 FIRESTORE_CALL = re.compile(r"""\bcollection\(\s*(?:[A-Za-z_]\w*\s*,\s*)?['"]([A-Za-z_]\w*)['"]""")
 
@@ -178,7 +192,7 @@ def detect_schema(repo: Path) -> list[tuple[str, str]]:
         if suf == ".sql":
             for name in SQL_CREATE.findall(text): add(name, "table", rel)
         elif suf == ".prisma":
-            for a, b in PRISMA_MODEL.findall(text): add(a or b, "model", rel)
+            for n in prisma_tables(text): add(n, "model", rel)
         elif suf == ".rules":
             for name in FIRESTORE_RULE.findall(text):
                 if name not in ("databases", "documents"): add(name, "collection", rel)

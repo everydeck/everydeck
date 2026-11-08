@@ -27,10 +27,11 @@ def run_rule(rule: str, payload: dict[str, Any], timeout: float = 120) -> dict[s
     return json.loads(p.stdout)
 
 
-def app_map_open(doc: dict[str, Any]) -> dict[str, Any]:
-    """What everydeck returns to the agent on submission: one sentence, the open parts nobody answered yet, how many stay open."""
+def app_map_open(doc: dict[str, Any], require_result_signal: bool = True) -> dict[str, Any]:
+    """What everydeck returns to the agent on submission: one sentence, the open parts nobody answered yet, how many stay open. Without the result
+    signal required (validate with errors left), the open parts of a map that only lacks its signal are listed too."""
     try:
-        r = run_rule("app_map", {"input": doc})
+        r = run_rule("app_map", {"input": doc, **({} if require_result_signal else {"require_result_signal": False})})
     except RulesUnavailable as e:
         return {"setup": None, "open": [], "still_open": 0, "error": str(e)}
     return {"setup": r.get("setup"), "open": r.get("open", []), "still_open": r.get("still_open", 0)}

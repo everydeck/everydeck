@@ -16,15 +16,20 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join, relative, dirname, resolve } from 'node:path';
 import { analyseReads } from './scaffold-reads.mjs';
 import { ICON_MAX_BYTES, findIcon, iconsTooLarge } from './scaffold-icon.mjs';
-import { candidateWays, detectPeople } from './rules/everydeck-rules.mjs';
+import { candidateWays, detectPeople, setupQuestions } from './rules/everydeck-rules.mjs';
 
 const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: scaffold.mjs <repo> [--db <url or structure address>] [--out file] [--merge file]'); process.exit(2); }
 const opt = (k) => (args.includes(k) ? args[args.indexOf(k) + 1] : null);
 const SKIP = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', '.next', '.expo', 'coverage', '__pycache__', '.venv', 'venv', 'Pods', '.everydeck', 'everydeck', 'everydeck-outbox', 'supabase_types']);
+const TEST_PY = /(^|\/)(tests?|__tests__)\/|(^|\/)test_[^/]*\.py$|(^|\/)conftest\.py$/;
 const files = [];
-(function walk(dir, depth) { if (depth > 7) return; for (const n of readdirSync(dir)) { if (SKIP.has(n)) continue; const p = join(dir, n); const st = statSync(p); if (st.isDirectory()) walk(p, depth + 1); else if (st.size < 2_000_000) files.push(p); } })(repo, 0);
-const rel = (p) => relative(repo, p);
-const text = (p) => readFileSync(p, 'utf8');
+// What the skeleton cannot read (a dead symlink, a folder without rights, a file that breaks a part of the analysis) never stops it: it is listed in
+// open[] of the summary with the place and the reason, and the agent decides (before, a dead symlink stopped the skeleton of real apps)
+const open = []; const note = (path, reason) => { if (open.length < 50 && !open.some((x) => x.path === path && x.reason === reason)) open.push({ path, reason: String(reason).slice(0, 200) }); };
+(function walk(dir, depth) { if (depth > 7) return; let names; try { names = readdirSync(dir); } catch (e) { note(relative(repo, dir) || '.', `cannot list this folder (${e.code ?? e.message})`); return; }
+  for (const n of names) { if (SKIP.has(n)) continue; const p = join(dir, n); let st; try { st = statSync(p); } catch (e) { note(relative(repo, p), `cannot read (${e.code === 'ENOENT' ? 'a link to a file or folder that does not exist' : e.code ?? e.message})`); continue; } if (st.isDirectory()) walk(p, depth + 1); else if (st.size < 2_000_000) files.push(p); } })(repo, 0);
+const rel = (p) => (p ? relative(repo, p) : '');
+const text = (p) => { try { return readFileSync(p, 'utf8'); } catch (e) { note(rel(p), `cannot read (${e.code ?? e.message})`); return ''; } };
 const lineOf = (src, idx) => src.slice(0, idx).split('\n').length;
 const commit = (() => { try { return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim(); } catch { return '0'.repeat(40); } })();
 
@@ -63,22 +68,30 @@ function enumValues(list, file, baseLine) {   // each value with the line it is 
   return out;
 }
 function applyEnum(t, colName, list, file, line) { const c = t.columns.find((x) => x.name === colName); if (c) c.enum = enumValues(list, file, line); }
-const stripSql = (src) => src.replace(/--[^\n]*/g, (m) => ' '.repeat(m.length));   // strip comments, line numbers stay
-// Migrations in file order: only the final state of the schema counts; a table dropped later (DROP TABLE) is not in the app map
-for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
+const stripSql = (src) => src.replace(/--[^\n]*/g, (m) => ' '.repeat(m.length)).replace(/`/g, '"');   // strip comments, line numbers stay; MySQL quotes names with backticks (Prisma/MySQL): read like double quotes
+// Migrations in file order: only the final state of the schema counts; a table dropped later (DROP TABLE) is not in the app map.
+// A reset or seed script outside the migrations (scripts/sql/dev-reset.sql: DROP TABLE IF EXISTS for every table, sorted before drizzle/) is no step of
+// the schema: its DROP TABLE removes nothing, its CREATE TABLE only adds a table the migrations do not create (before, such a script removed every table of an app).
+const isMigration = (p) => /(^|\/)(migrations?|drizzle|alembic|versions|schema|schemas|sql\/migrations|db\/migrate)(\/|$)/i.test(rel(p)) || /(^|\/)(\d{3,}[^/]*|schema)\.sql$/i.test(rel(p));
+const sqlFiles = files.filter((p) => p.endsWith('.sql')).sort((a, b) => Number(isMigration(b)) - Number(isMigration(a)) || (a < b ? -1 : a > b ? 1 : 0));   // migrations first, then other SQL files
+for (const f of sqlFiles) {
   const src = stripSql(text(f));
-  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\s+(?:select\s+\*\s+from|table)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) {   // CREATE TABLE … AS SELECT * FROM y (or AS TABLE y): the same columns as y
+  // CREATE and DROP in the order of the file (Prisma: DROP TABLE IF EXISTS "x" CASCADE; CREATE TABLE "x" (…) in one migration; before, every DROP ran
+  // after every CREATE of the file and the table was lost)
+  const ddl = [];
+  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\s+(?:select\s+\*\s+from|table)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ddl.push({ at: m.index, run: () => {   // CREATE TABLE … AS SELECT * FROM y (or AS TABLE y): the same columns as y
     const at = { path: rel(f), line: lineOf(src, m.index), symbol: m[2] };
     const t = addTable(m[2], 'table', at, m[1]); const from = tables.get(m[3]); if (from && !t.columns.length) t.columns = from.columns.map((c) => ({ ...c }));
     t.copy_of = { table: m[3], evidence: at };   // a copy of y (for example a backup before a change), a fact with its place
-  }
-  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\b/gi)) addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]);   // CREATE TABLE … AS: without a column list
-  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi)) {
+  } });
+  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\b/gi)) ddl.push({ at: m.index + 0.5, run: () => addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]) });   // CREATE TABLE … AS: without a column list
+  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi)) ddl.push({ at: m.index, run: () => {
     const start = m.index + m[0].length; let depth = 1, i = start; while (i < src.length && depth > 0) { if (src[i] === '(') depth++; if (src[i] === ')') depth--; i++; }
     const existed = tables.has(m[2]); const t = addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]);
     if (!existed) parseColumns(src.slice(start, i - 1), f, lineOf(src, start), t);   // CREATE TABLE IF NOT EXISTS on an existing table changes nothing (as in Postgres; copies of migrations in two folders)
-  }
-  for (const m of src.matchAll(/drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) tables.delete(m[1]);
+  } });
+  if (isMigration(f)) for (const m of src.matchAll(/drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ddl.push({ at: m.index, run: () => tables.delete(m[1]) });
+  for (const d of ddl.sort((x, y) => x.at - y.at)) d.run();
   // ALTER TABLE x RENAME TO y: from here on the table is called y (place: the rename, where the name is); references from other tables follow
   for (const m of src.matchAll(/alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+rename\s+to\s+"?([A-Za-z_]\w*)"?/gi)) {
     const t = tables.get(m[1]); if (!t || tables.has(m[2])) continue;
@@ -97,7 +110,8 @@ for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
   }
   for (const m of src.matchAll(/alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+((?:add\s+(?:column\s+)?[^;]+))/gi)) {
     const t = tables.get(m[1]); if (!t) continue;
-    for (const part of m[2].split(/,\s*(?=add\s+)/i)) { const c = /add\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?"?([A-Za-z_]\w*)"?\s+(.+)$/is.exec(part.trim()); if (!c || /^constraint$/i.test(c[1]) || t.columns.some((x) => x.name === c[1])) continue; parseColumns(`${c[1]} ${c[2].replace(/,\s*$/, '')}`, f, lineOf(src, m.index + m[0].indexOf(part)), t); }
+    // other actions of the same ALTER TABLE (ALTER COLUMN … DROP NOT NULL) are no columns (Prisma migrations: "ALTER" was read as a column)
+    for (const part of m[2].split(/,\s*(?=(?:add|alter|drop|rename|validate|set|owner|enable|disable|inherit|cluster)\s)/i).filter((x) => /^\s*add\s/i.test(x))) { const c = /add\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?"?([A-Za-z_]\w*)"?\s+(.+)$/is.exec(part.trim()); if (!c || /^constraint$/i.test(c[1]) || t.columns.some((x) => x.name === c[1])) continue; parseColumns(`${c[1]} ${c[2].replace(/,\s*$/, '')}`, f, lineOf(src, m.index + m[0].indexOf(part)), t); }
   }
   for (const m of src.matchAll(/alter\s+table\s+(?:only\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+add\s+constraint\s+\w+\s+check\s*\(\s*"?(\w+)"?\s+in\s*\(([^)]*)\)/gi)) { const t = tables.get(m[1]); if (t) applyEnum(t, m[2], m[3], f, lineOf(src, m.index + m[0].indexOf(m[3]))); }
   // Keys added after the table (pg_dump style): ALTER TABLE [ONLY] x ADD [CONSTRAINT name] PRIMARY KEY (…) / FOREIGN KEY (col) REFERENCES schema.table(col)
@@ -111,14 +125,14 @@ for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
 //    or is moddatetime('column'). Fact with a place (columns[].updated); the read scope gets it as `changed` and allows changed_since.
 {
   const setters = new Map();   // function name → column(s) the body sets to now()/current_timestamp
-  for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
+  for (const f of sqlFiles) {
     const src = stripSql(text(f));
     for (const m of src.matchAll(/create\s+(?:or\s+replace\s+)?function\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\([^)]*\)[\s\S]*?\bas\s+(\$[A-Za-z_]*\$)([\s\S]*?)\2/gi)) {
       const cols = [...m[3].matchAll(/\bnew\.(?:"?)([A-Za-z_]\w*)(?:"?)\s*:?=\s*(?:now\(\)|current_timestamp|clock_timestamp\(\)|timezone\([^)]*now\(\)\))/gi)].map((x) => x[1]);
       if (cols.length) setters.set(m[1], cols);
     }
   }
-  for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
+  for (const f of sqlFiles) {
     const src = stripSql(text(f));
     for (const m of src.matchAll(/create\s+(?:or\s+replace\s+)?trigger\s+"?\w+"?\s+(before|after)\s+((?:insert|update|delete)(?:\s+or\s+(?:insert|update|delete))*)\s+(?:of\s+[\w\s,"]+\s+)?on\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?[\s\S]*?execute\s+(?:function|procedure)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(([^)]*)\)/gi)) {
       if (m[1].toLowerCase() !== 'before' || !/update/i.test(m[2])) continue;
@@ -139,7 +153,7 @@ for (const f of files.filter((p) => p.endsWith('.py') && /alembic|migrations|ver
   for (const m of src.matchAll(/op\.create_table\(\s*['"]([A-Za-z_]\w*)['"]/g)) {
     if ([...dropLater].some((k) => { const [n, at, file] = k.split('@'); return n === m[1] && file === f && Number(at) > m.index; })) continue;   // dropped later in the same file
     const t = addTable(m[1], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[1] });
-    const start = m.index; let depth = 0, i = start; do { if (src[i] === '(') depth++; if (src[i] === ')') depth--; i++; } while (i < src.length && depth > 0);
+    const start = m.index; let depth = 0, i = src.indexOf('(', start); do { if (src[i] === '(') depth++; if (src[i] === ')') depth--; i++; } while (i < src.length && depth > 0);   // from the parenthesis of op.create_table( (before: from the o of op, the body was one character and no column was read)
     const body = src.slice(start, i);
     for (const c of body.matchAll(/sa\.Column\(\s*['"]([A-Za-z_]\w*)['"]\s*,\s*(?:sa\.|postgresql\.)?([A-Za-z_]+)(?:\([^)]*\))?([^)]*(?:\([^)]*\)[^)]*)*)\)/g)) {
       const col = { name: c[1], type: c[2].toLowerCase() }; const rest = c[3];
@@ -179,6 +193,26 @@ for (const f of files.filter((p) => p.endsWith('.py'))) {
       const en = c[2] && /^(?:Optional\[)?(\w+Enum)\]?$/.exec(c[2].replace(/\s/g, '')); if (en && pyEnums.has(en[1])) col.enum = pyEnums.get(en[1]);
       if (!t.columns.some((x) => x.name === name)) t.columns.push(col);
     }
+  }
+}
+// ── Python models and Alembic through the syntax tree (scaffold-models.py): SQLModel (table=True, the table is the class name), SQLAlchemy with annotated
+//    __tablename__ and mapped_column over several lines, columns of base classes; Alembic add_column/drop_column/rename in the order of the revision chain
+//    (before, SQLModel tables had no columns and SQLAlchemy tables lost the columns of their base classes)
+{
+  const pyAll = files.filter((p) => p.endsWith('.py') && !TEST_PY.test(rel(p)));
+  if (pyAll.length) {
+    let pm = null; try { pm = JSON.parse(execFileSync('python3', ['-I', new URL('./scaffold-models.py', import.meta.url).pathname, resolve(repo), '-'], { input: pyAll.map((p) => resolve(p)).join('\n'), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })); }
+    catch (e) { note('*.py', `python3 with the ast module is needed to read the Python models (${String(e.message ?? e).split('\n')[0].slice(0, 120)}); tables of Python models may lack columns`); }
+    for (const x of pm?.errors ?? []) note(x.path, x.reason);
+    const colOf = (c, path) => ({ name: c.name, type: c.type, ...(c.pk ? { pk: true } : {}), ...(c.nullable ? { nullable: true } : {}), ...(c.fk ? { fk: c.fk } : {}), ...(c.computed ? { computed: { path, line: c.line } } : {}) });
+    for (const o of pm?.alembic ?? []) { const t = tables.get(o.table);
+      if (o.op === 'rename_table') { if (t && !tables.has(o.name)) { tables.delete(o.table); t.name = o.name; t.defined = { path: o.path, line: o.line, symbol: o.name }; tables.set(o.name, t); } continue; }
+      if (!t) continue;
+      if (o.op === 'add_column' && !t.columns.some((c) => c.name === o.column.name)) t.columns.push(colOf(o.column, o.path));
+      if (o.op === 'drop_column') t.columns = t.columns.filter((c) => c.name !== o.name);
+      if (o.op === 'rename_column') { const c = t.columns.find((x) => x.name === o.name); if (c && !t.columns.some((x) => x.name === o.to)) c.name = o.to; } }
+    for (const m of pm?.models ?? []) { const t = tables.get(m.table) ?? addTable(m.table, 'table', { path: m.path, line: m.line, symbol: m.class });
+      for (const c of m.columns) if (!t.columns.some((x) => x.name === c.name)) t.columns.push(colOf(c, c.path)); }
   }
 }
 // ── Firestore ──
@@ -238,7 +272,7 @@ if (dbUrl) {
 //    The rule lock.computed locks them; the value stays with the app.
 const fnDefs = new Map(); const trigDefs = new Map();   // also used for the copies of contact data below
 {
-  for (const f of files.filter((p) => p.endsWith('.sql')).sort()) {
+  for (const f of sqlFiles) {
     const src = stripSql(text(f)); const ops = [];
     for (const m of src.matchAll(/create\s+(?:or\s+replace\s+)?function\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi)) {
       let depth = 1, i = m.index + m[0].length; while (i < src.length && depth > 0) { if (src[i] === '(') depth++; if (src[i] === ')') depth--; i++; }   // arguments with parentheses (numeric(10,2), default now())
@@ -249,7 +283,7 @@ const fnDefs = new Map(); const trigDefs = new Map();   // also used for the cop
     for (const m of src.matchAll(/drop\s+function\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => fnDefs.delete(m[1].toLowerCase()) });
     for (const m of src.matchAll(/create\s+(?:or\s+replace\s+)?trigger\s+"?(\w+)"?\s+(before|after|instead\s+of)\s+([\s\S]*?)\bon\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?[\s\S]*?execute\s+(?:function|procedure)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => trigDefs.set(`${m[4]}:${m[1]}`.toLowerCase(), { table: m[4], when: m[2].toLowerCase(), fn: m[5].toLowerCase(), name: m[1], event: (/insert|update|delete/i.exec(m[3])?.[0] ?? 'update').toLowerCase(), place: { path: rel(f), line: lineOf(src, m.index) } }) });
     for (const m of src.matchAll(/drop\s+trigger\s+(?:if\s+exists\s+)?"?(\w+)"?\s+on\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => trigDefs.delete(`${m[2]}:${m[1]}`.toLowerCase()) });
-    for (const m of src.matchAll(/drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => { for (const k of [...trigDefs.keys()]) if (k.startsWith(`${m[1].toLowerCase()}:`)) trigDefs.delete(k); } });
+    if (isMigration(f)) for (const m of src.matchAll(/drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ops.push({ at: m.index, run: () => { for (const k of [...trigDefs.keys()]) if (k.startsWith(`${m[1].toLowerCase()}:`)) trigDefs.delete(k); } });
     for (const op of ops.sort((a, b) => a.at - b.at)) op.run();
   }
   // Functions and triggers that exist only in the database (not in the migrations): place "database"
@@ -291,36 +325,84 @@ const fnDefs = new Map(); const trigDefs = new Map();   // also used for the cop
   }
 }
 // ── Components (provider packages that everydeck-check knows) ──
-const KNOWN = /^(stripe|@stripe\/|@paddle\/|@lemonsqueezy\/|paddle$|openai$|@anthropic-ai\/|@google\/generative-ai$|@google\/genai$|google-generativeai$|resend$|postmark$|postmarker$|nodemailer$|@sendgrid\/mail$|sendgrid$|mailgun|@aws-sdk\/client-ses$|next-auth$|@auth\/|@supabase\/supabase-js$|@supabase\/ssr$|supabase$|firebase$|firebase-admin$|@clerk\/|passport$|lucia$|expo-notifications$|expo-server-sdk$|exponent-server-sdk$|@capacitor\/push-notifications$|@capacitor-firebase\/messaging$|@react-native-firebase\/messaging$|pyfcm$|web-push$|@aws-sdk\/client-s3$|boto3$|cloudinary$|multer$|busboy$|formidable$|node-cron$|cron$|bullmq$|bull$|pg-boss$|celery$|apscheduler$|rq$|pg$|postgres$|@prisma\/client$|drizzle-orm$|asyncpg$|sqlalchemy$|psycopg|algoliasearch$|meilisearch$|typesense$|@elastic\/|@capacitor\/core$|expo$|react-native$|electron$|@tauri-apps\/|bcrypt|argon2|jsonwebtoken$|jose$|iron-session$|python-jose$|pyjwt$|passlib$|sharp$|jimp$|@supabase\/storage-js$|uploadthing$|@uploadthing\/|pillow$|socket\.io$|pusher|ably$|stream-chat$|@stream-io\/|sendbird|@sendbird\/|@paypal\/|razorpay$|@mollie\/|cohere-ai$|@mistralai\/|langchain$|@langchain\/|@ai-sdk\/|^ai$|@getbrevo\/|node-mailjet$|@workos-inc\/|auth0$|@auth0\/|@oslojs\/|agenda$|@temporalio\/|@onesignal\/|react-native-onesignal$|@react-native-firebase\/messaging$)/;
+const KNOWN = /^(stripe|@stripe\/|@paddle\/|@lemonsqueezy\/|paddle$|openai$|@anthropic-ai\/|@google\/generative-ai$|@google\/genai$|google-generativeai$|resend$|postmark$|postmarker$|nodemailer$|@sendgrid\/mail$|sendgrid$|mailgun|@aws-sdk\/client-ses$|next-auth$|@auth\/|@supabase\/supabase-js$|@supabase\/ssr$|supabase$|firebase$|firebase-admin$|@clerk\/|passport$|lucia$|expo-notifications$|expo-server-sdk$|exponent-server-sdk$|@capacitor\/push-notifications$|@capacitor-firebase\/messaging$|@react-native-firebase\/messaging$|pyfcm$|web-push$|@aws-sdk\/client-s3$|boto3$|cloudinary$|multer$|busboy$|formidable$|node-cron$|cron$|bullmq$|bull$|pg-boss$|celery$|apscheduler$|rq$|pg$|postgres$|@prisma\/client$|drizzle-orm$|asyncpg$|sqlalchemy$|psycopg|algoliasearch$|meilisearch$|typesense$|@elastic\/|@capacitor\/core$|expo$|react-native$|electron$|@tauri-apps\/|bcrypt|argon2|jsonwebtoken$|jose$|iron-session$|python-jose$|pyjwt$|passlib$|sharp$|jimp$|@supabase\/storage-js$|uploadthing$|@uploadthing\/|pillow$|socket\.io$|pusher|ably$|stream-chat$|@stream-io\/|sendbird|@sendbird\/|@paypal\/|razorpay$|@mollie\/|cohere-ai$|@mistralai\/|langchain$|@langchain\/|@ai-sdk\/|^ai$|@getbrevo\/|node-mailjet$|@workos-inc\/|auth0$|@auth0\/|@oslojs\/|oslo$|better-auth$|@node-rs\/bcrypt$|@node-rs\/argon2$|express-session$|@fastify\/(session|jwt|secure-session)$|scrypt-js$|@polar-sh\/|mercadopago$|@mercadopago\/|@lemonsqueezy\/|groq-sdk$|replicate$|@vercel\/blob$|react-native-push-notification$|authlib$|flask-login$|django-allauth$|fastapi-users$|argon2-cffi$|anthropic$|openai$|google-genai$|mistralai$|dramatiq$|arq$|elasticsearch$|agenda$|@temporalio\/|@onesignal\/|react-native-onesignal$|@react-native-firebase\/messaging$)/;
 const components = [];
 for (const f of files.filter((p) => p.endsWith('package.json'))) {
   const src = text(f); let pkg; try { pkg = JSON.parse(src); } catch { continue; }
   for (const dep of Object.keys({ ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) })) if (KNOWN.test(dep) && !components.some((c) => c.package === dep)) { const idx = src.indexOf(`"${dep}"`); components.push({ id: dep.replace(/[^A-Za-z0-9_.-]/g, '-').replace(/^-+/, '').slice(0, 60), package: dep, evidence: { path: rel(f), line: lineOf(src, idx) } }); }
 }
 for (const f of files.filter((p) => /requirements[^/]*\.txt$|pyproject\.toml$/.test(p))) {
-  const src = text(f); src.split('\n').forEach((l, i) => { const raw = l.trim().split(/[=<>!\[ ;#"']/)[0]; const name = raw.toLowerCase(); if (name && KNOWN.test(name) && !components.some((c) => c.package.toLowerCase() === name)) components.push({ id: name.replace(/[^A-Za-z0-9_.-]/g, '-'), package: raw, evidence: { path: rel(f), line: i + 1 } }); });
+  // pyproject.toml lists "pyjwt<3.0.0,>=2.8.0" in quotes
+  const src = text(f); src.split('\n').forEach((l, i) => { const raw = l.trim().replace(/^["']/, '').split(/[=<>!~\[ ;#"',]/)[0]; const name = raw.toLowerCase(); if (name && KNOWN.test(name) && !components.some((c) => c.package.toLowerCase() === name)) components.push({ id: name.replace(/[^A-Za-z0-9_.-]/g, '-'), package: raw, evidence: { path: rel(f), line: i + 1 } }); });
 }
 // ── Routes and pages ──
 const api_routes = []; const screens = [];
-const pattern = (p) => p.replace(/\[\.\.\.[^\]]+\]/g, '*').replace(/\[([^\]]+)\]/g, ':$1').replace(/\{(\w+):path\}/g, '*').replace(/\{(\w+)(?::[^}]*)?\}/g, ':$1').replace(/\([^)]*\)\/?/g, '').replace(/\/$/, '') || '/';
+const pattern = (p) => p.replace(/\[\[\.\.\.[^\]]+\]\]/g, '*').replace(/\[\.\.\.[^\]]+\]/g, '*').replace(/\[([^\]]+)\]/g, ':$1').replace(/\{(\w+):path\}/g, '*').replace(/\{(\w+)(?::[^}]*)?\}/g, ':$1').replace(/\([^)]*\)\/?/g, '').replace(/\/$/, '') || '/';
 const TEST_PATH = /\.(test|spec|stories)\.[tj]sx?$|(^|\/)(__tests__|e2e|cypress|tests?)\/|(^|\/)test_[^/]*\.py$/;   // pages and routes from tests are not part of the app
 for (const f of files.filter((p) => /\.(ts|tsx|js|mjs|cjs|py)$/.test(p) && !TEST_PATH.test(relative(repo, p)))) {
   const src = text(f); const r = rel(f);
   const re = f.endsWith('.py') ? /@(?:app|router|api|[a-z_]+_router)\.(get|post|put|patch|delete)\(\s*['"](\/[^'"\s]*)['"]/g : /\b(?:app|router|server|fastify|api|r)\.(get|post|put|patch|delete)\(\s*['"`](\/[^'"`\s]*)['"`]/g;
   for (const m of src.matchAll(re)) { if (m[2].includes('${')) continue; /* template strings are client calls, not routes */ const pat = pattern(m[2]); if (!api_routes.some((x) => x.pattern === pat && x.method === m[1].toUpperCase())) api_routes.push({ pattern: pat, method: m[1].toUpperCase(), evidence: { path: r, line: lineOf(src, m.index) } }); }
   const parts = r.split('/');
-  if (parts.includes('api') && /^route\.(ts|js)$/.test(parts.at(-1))) { const i = parts.indexOf('api'); const pat = pattern('/' + parts.slice(i, -1).join('/')); if (!api_routes.some((x) => x.pattern === pat)) api_routes.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
+  // Next.js route handlers: one route per exported method, at the line of its export (before, every route was GET at line 1)
+  if (parts.includes('api') && /^route\.(ts|js)$/.test(parts.at(-1))) { const i = parts.indexOf('api'); const pat = pattern('/' + parts.slice(i, -1).join('/'));
+    const methods = [...src.matchAll(/^export\s+(?:async\s+)?(?:function\s+|const\s+)(GET|POST|PUT|PATCH|DELETE)\b|^export\s*\{([^}]*)\}/gm)].flatMap((m) => (m[1] ? [{ method: m[1], line: lineOf(src, m.index) }] : [...m[2].matchAll(/\b(?:\w+\s+as\s+)?(GET|POST|PUT|PATCH|DELETE)\b/g)].map((x) => ({ method: x[1], line: lineOf(src, m.index) }))));
+    if (!methods.length && !api_routes.some((x) => x.pattern === pat)) api_routes.push({ pattern: pat, evidence: { path: r, line: 1 } });
+    for (const mm of methods) if (!api_routes.some((x) => x.pattern === pat && x.method === mm.method)) api_routes.push({ pattern: pat, method: mm.method, evidence: { path: r, line: mm.line } }); }
   if (/^app\//.test(r) && /\/page\.(tsx|jsx|ts|js)$/.test(r) && !parts.includes('api')) { const pat = pattern('/' + parts.slice(1, -1).join('/')); screens.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
   if (/^app\//.test(r) && /\.(tsx|jsx)$/.test(r) && !/\/page\.|_layout|\+not-found|\+html/.test(r) && !parts.includes('api') && !/\.test\./.test(r) && existsSync(join(repo, 'app.json'))) { const pat = pattern('/' + r.replace(/^app\//, '').replace(/\.(tsx|jsx)$/, '').replace(/\/index$/, '')); screens.push({ pattern: pat, evidence: { path: r, line: 1 } }); }
-  for (const m of src.matchAll(/<Route\s+[^>]*path=["'](\/[^"']*)["']/g)) { const pat = pattern(m[1]); screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
+  // also path={"/x"} (wouter)
+  for (const m of src.matchAll(/<Route\s+[^>]*path=\{?\s*["'`](\/[^"'`]*)["'`]\s*\}?/g)) { const pat = pattern(m[1]); screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
+  // nested React Router routes with relative paths (<Route element={<Layout />}><Route path="classes" /></Route>): the path of the parents in front, index is the parent's page
+  if (/<Route\b/.test(src)) { const stack = [];
+    for (const m of src.matchAll(/<Route\b((?:[^>{]|\{(?:[^{}]|\{[^{}]*\})*\})*?)(\/?)>|<\/Route>/g)) {
+      if (m[0] === '</Route>') { stack.pop(); continue; }
+      const attrs = m[1] ?? ''; const p0 = /\bpath=\{?\s*["'`]([^"'`]*)["'`]/.exec(attrs)?.[1]; const parent = stack.at(-1) ?? '';
+      const full = p0 === undefined ? parent : p0.startsWith('/') ? p0 : `${parent}/${p0}`.replace(/\/+/g, '/');
+      if ((p0 !== undefined && !p0.startsWith('/') && p0 !== '*') || (/\bindex\b/.test(attrs) && p0 === undefined)) { const pat = pattern(full || '/'); if (!screens.some((x) => x.pattern === pat)) screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
+      if (!m[2]) stack.push(full); } }
   for (const m of src.matchAll(/\{\s*path:\s*['"](\/[^'"]*)['"]/g)) { const pat = pattern(m[1]); screens.push({ pattern: pat, evidence: { path: r, line: lineOf(src, m.index) } }); }
+}
+// ── Pages of the frameworks, from the files the framework itself routes. Each by the package.json nearest to
+//    the file (monorepos: apps/web/app, apps/remix/app/routes): Next.js app/ and src/app/ (page files) and pages/ (Pages Router), SvelteKit src/routes/**/+page.svelte,
+//    Remix and React Router framework mode app/routes (flat routes: dots are slashes, $id a parameter, _index the index, _layout no segment), TanStack Router
+//    createFileRoute('/path'), React-admin <Resource name="deals"> (list and record page). wouter and React Router <Route path> are read above.
+{
+  const pkgDirs = files.filter((p) => /(^|\/)package\.json$/.test(p)).map((p) => { let deps = {}; try { const j = JSON.parse(text(p)); deps = { ...(j.dependencies ?? {}), ...(j.devDependencies ?? {}) }; } catch { /* not JSON */ } return { dir: rel(dirname(p)), deps }; }).sort((a, b) => b.dir.length - a.dir.length);
+  const pkgOf = (r) => pkgDirs.find((x) => !x.dir || r.startsWith(x.dir + '/')) ?? null;
+  const under = (r, dir, sub) => { const base = (dir ? dir + '/' : ''); for (const s0 of sub) if (r.startsWith(base + s0 + '/')) return r.slice((base + s0 + '/').length); return null; };
+  const seg = (x) => x.replace(/\[\[\.\.\.([^\]]+)\]\]|\[\.\.\.([^\]]+)\]/g, '*').replace(/\[\[([^\]]+)\]\]/g, ':$1').replace(/\[([^\]=]+)(?:=[^\]]+)?\]/g, ':$1');
+  const clean = (parts) => '/' + parts.filter((x) => x && !/^\(.*\)$/.test(x)).join('/');
+  const addPage = (pat, r, line = 1) => { const p0 = pat.replace(/\/+/g, '/').replace(/(.)\/$/, '$1') || '/'; if (!screens.some((x) => x.pattern === p0)) screens.push({ pattern: p0, evidence: { path: r, line } }); };
+  for (const f of files.filter((p) => /\.(tsx|jsx|ts|js|mjs|svelte|vue)$/.test(p) && !TEST_PATH.test(rel(p)))) {
+    const r = rel(f); const pk = pkgOf(r); const deps = pk?.deps ?? {}; const dir = pk?.dir ?? '';
+    if (deps.next) {
+      const a = under(r, dir, ['app', 'src/app']); if (a !== null && /(^|\/)page\.(tsx|jsx|ts|js)$/.test(a)) addPage(clean(a.split('/').slice(0, -1).map(seg)), r);
+      const pg = under(r, dir, ['pages', 'src/pages']); if (pg !== null && /\.(tsx|jsx|ts|js)$/.test(pg) && !/^(api\/|_app\.|_document\.|_error\.|404\.|500\.)/.test(pg)) addPage(clean(pg.replace(/\.(tsx|jsx|ts|js)$/, '').replace(/(^|\/)index$/, '').split('/').map(seg)), r);
+    }
+    if (deps['@sveltejs/kit']) { const a = under(r, dir, ['src/routes']); if (a !== null && /(^|\/)\+page\.svelte$/.test(a)) addPage(clean(a.split('/').slice(0, -1).map(seg)), r); }
+    if (Object.keys(deps).some((d) => d.startsWith('@remix-run/') || d === '@react-router/dev')) { const a = under(r, dir, ['app/routes']);
+      // remix-flat-routes: a folder ending in + holds flat routes with its name as the prefix (documenso: _authenticated+/t.$teamUrl+/documents._index.tsx);
+      // a folder without + is one route (its route.tsx)
+      const ps = a?.split('/') ?? []; const file = ps.pop() ?? ''; const plus = ps.filter((d) => d.endsWith('+')).length;
+      const name0 = a === null || !/\.(tsx|jsx|ts|js)$/.test(file) || /\.(server|client)\.[tj]sx?$/.test(file) ? null
+        : plus === ps.length ? [...ps.map((d) => d.slice(0, -1)), file.replace(/\.(tsx|jsx|ts|js)$/, '')].join('.')
+        : plus === ps.length - 1 && /^route\.(tsx|jsx|ts|js)$/.test(file) ? [...ps.slice(0, -1).map((d) => d.slice(0, -1)), ps.at(-1)].join('.') : null;
+      if (name0 && !/(^|\.)_layout$|(^|\.)route$/.test(name0)) {
+        const name = name0;
+        if (!/^resource|^api\b|\[\.\]xml|\.xml$|\.txt$|sitemap|robots/.test(name)) addPage(clean(name.replace(/\+$/, '').split('.').map((x) => (x === '_index' || x === 'index' ? '' : x === '$' ? '*' : x.startsWith('_') ? '' : x.replace(/^\(\$?([^)]+)\)$/, '').replace(/^\$(.+)$/, ':$1').replace(/_$/, '')))), r);
+      } }
+    if (/\.(tsx|jsx|ts|js)$/.test(r)) { const src = text(f);
+      for (const m of src.matchAll(/\bcreateFileRoute\(\s*['"`](\/[^'"`]*)['"`]\s*\)/g)) addPage(clean(m[1].split('/').map((x) => (x === '$' ? '*' : x.startsWith('_') ? '' : x.replace(/^\$(.+)$/, ':$1').replace(/_$/, '')))), r, lineOf(src, m.index));
+      for (const m of src.matchAll(/<Resource\b[^>]*\bname=["']([A-Za-z_][\w-]*)["']/g)) { addPage(`/${m[1]}`, r, lineOf(src, m.index)); addPage(`/${m[1]}/:id`, r, lineOf(src, m.index)); } }
+  }
 }
 // ── Platforms ──
 const platforms = [];
 const cap = files.find((p) => /capacitor\.config\.(ts|js|json)$/.test(p)); if (cap) { platforms.push({ id: 'web', runtime: 'browser', evidence: { path: rel(cap), line: 1 } }); if (existsSync(join(repo, 'ios'))) platforms.push({ id: 'ios', runtime: 'capacitor', evidence: { path: rel(cap), line: 1 } }); if (existsSync(join(repo, 'android'))) platforms.push({ id: 'android', runtime: 'capacitor', evidence: { path: rel(cap), line: 1 } }); }
 const appJson = files.find((p) => /(^|\/)app\.json$/.test(p) && text(p).includes('"expo"')); if (appJson) for (const id of ['web', 'ios', 'android']) platforms.push({ id, runtime: 'expo', evidence: { path: rel(appJson), line: 1 } });
 if (!platforms.length && files.some((p) => /package\.json$/.test(p))) platforms.push({ id: 'web', runtime: 'browser', evidence: { path: rel(files.find((p) => /package\.json$/.test(p))), line: 1 } });
-if (components.some((c) => /^(pg|postgres|asyncpg|sqlalchemy|psycopg|@prisma\/client|drizzle-orm)/.test(c.package))) platforms.push({ id: 'server', runtime: files.some((p) => p.endsWith('.py')) ? 'python' : 'node', evidence: components.find((c) => /^(pg|postgres|asyncpg|sqlalchemy|psycopg|@prisma\/client|drizzle-orm)/.test(c.package)).evidence });
+if (components.some((c) => /^(pg|postgres|asyncpg|sqlalchemy|psycopg|@prisma\/client|drizzle-orm)/.test(c.package))) platforms.push({ id: 'server', runtime: /\.(txt|toml)$/.test(components.find((c) => /^(pg|postgres|asyncpg|sqlalchemy|psycopg|@prisma\/client|drizzle-orm)/.test(c.package)).evidence.path) ? 'python' : 'node', evidence: components.find((c) => /^(pg|postgres|asyncpg|sqlalchemy|psycopg|@prisma\/client|drizzle-orm)/.test(c.package)).evidence });
 
 const BLOCKS = ['login', 'people_roles', 'organizations', 'content_status', 'moderation', 'chats', 'uploads', 'search', 'payments', 'email', 'push', 'ai', 'jobs', 'imports', 'bookings', 'settings', 'platforms'];
 // The app map was called everydeck/everydeck-befund.json before: an existing setup with only the old file is still merged; the result goes only to --out
@@ -339,7 +421,8 @@ const tableKey = (n) => (tables.has(n) ? n : [...tables.keys()].find((k) => k.to
 const addShown = (name, entry) => { const t = tables.get(name); if (!t) return; t.shown ??= []; if (t.shown.length < 60 && !t.shown.some((x) => x.path === entry.path && x.line === entry.line)) t.shown.push({ path: entry.path, line: entry.line, element: 'data', ...(entry.symbol ? { symbol: entry.symbol } : {}), ...(entry.via ? { via: entry.via } : {}) }); };
 // Final state: a foreign key to a table that does not exist in the final state (DROP TABLE … CASCADE) is gone; other schemas (auth.users) stay
 for (const t of tables.values()) for (const c of t.columns) if (c.fk && !c.fk.table.includes('.') && !tableKey(c.fk.table)) delete c.fk;
-const reads = analyseReads({ repo, files, tables, tableKey });
+const NO_READS = { routes: [], reach: { decided: false, entries: [], unreachable: [] }, page_files: [], import_graph: {}, shown: [], not_shown: [], columns_shown: [], column_writes: [], column_inserts: [], provider_columns: [], money: [], display: [], display_ends: [], value_labels: [], name_chains: [], browser_writes: [], views: [], sql_functions: [] };
+const reads = (() => { try { return analyseReads({ repo, files, tables, tableKey }); } catch (e) { note(String(e?.stack ?? '').match(/\((?:file:\/\/)?[^)]*\/(scaffold-[a-z]+\.mjs:\d+)/)?.[1] ?? 'scaffold-reads.mjs', `the analysis of data accesses stopped (${e?.message ?? e}); no display places, routes from the analysis or browser writes in this run: add them with places`); return NO_READS; } })();
 // Routes with the full pattern (FastAPI: APIRouter(prefix) + include_router(prefix) + path; Express: app.use prefix) from the analysis; regex matches covered by them are dropped
 for (const r of reads.routes) { const entry = { pattern: r.pattern, method: r.method, evidence: { path: r.file, line: r.line } };
   const i = api_routes.findIndex((x) => x.evidence.path === r.file && x.evidence.line === r.line && (!x.method || x.method === r.method));   // same place (the decorator): full pattern instead of the path
@@ -352,6 +435,32 @@ for (let i = screens.length - 1; i >= 0; i--) if (unreachablePaths.has(screens[i
   const routed = new Set((reads.page_files ?? []).map((x) => `${x.path}:${x.line}`)); const isRouted = (x) => routed.has(`${x.evidence.path}:${x.evidence.line}`);
   for (let i = screens.length - 1; i >= 0; i--) { const first = screens.findIndex((x) => x.pattern === screens[i].pattern && (isRouted(x) || !screens.some((y) => y.pattern === x.pattern && isRouted(y)))); if (first !== i) screens.splice(i, 1); } }
 for (const s of reads.shown) addShown(s.table, s);
+// ── Reads through an ORM and through React-admin (the analysis above follows supabase-js, Firestore, SQL and API
+//    calls, not Prisma/Drizzle accessors or React-admin's data hooks). A read in a file the app's entry reaches (a page, a server component, a loader, a tRPC
+//    procedure, a helper they import) is a display place of the table, with the accessor as the symbol:
+//    Prisma prisma.post.findMany / db.user.findFirst / ctx.db.x.count (model → table through @@map), Drizzle db.query.teams.findMany and .from(teams) /
+//    .innerJoin(teams) (variable → table through pgTable('teams')), React-admin useGetList('deals'), useGetOne, <ReferenceField reference="companies">, <List resource>.
+{
+  const prismaModel = new Map(); const drizzleVar = new Map();
+  for (const f of files.filter((p) => p.endsWith('.prisma'))) for (const m of text(f).matchAll(/^\s*model\s+([A-Za-z_]\w*)\s*\{([\s\S]*?)^\s*\}/gm)) { const map = /@@map\(\s*(?:name\s*:\s*)?['"]([A-Za-z_]\w*)['"]/.exec(m[2])?.[1] ?? m[1]; const t = tableKey(map); if (t) prismaModel.set(m[1][0].toLowerCase() + m[1].slice(1), t); }
+  for (const f of files.filter((p) => /\.(ts|js|mjs)$/.test(p))) for (const m of text(f).matchAll(/\b(?:export\s+)?const\s+([A-Za-z_]\w*)\s*=\s*(?:pgTable|mysqlTable|sqliteTable|\w+\.table)\(\s*['"]([A-Za-z_]\w*)['"]/g)) { const t = tableKey(m[2]); if (t) drizzleVar.set(m[1], t); }
+  const ORM = [
+    [/\b(?:prisma|db|tx|client|ctx\.(?:db|prisma)|this\.prisma)\.([a-z]\w*)\.(findMany|findFirst|findUnique|findFirstOrThrow|findUniqueOrThrow|count|aggregate|groupBy)\s*\(/g, (m) => prismaModel.get(m[1]) ?? (prismaModel.size ? null : tableKey(m[1])), 'prisma'],
+    [/\bdb\.query\.([A-Za-z_]\w*)\.(findMany|findFirst)\s*\(/g, (m) => drizzleVar.get(m[1]) ?? tableKey(m[1]), 'drizzle'],
+    [/\.(?:from|innerJoin|leftJoin|rightJoin|fullJoin)\(\s*([A-Za-z_]\w*)\s*[,)]/g, (m) => drizzleVar.get(m[1]) ?? null, 'drizzle'],
+    [/\buse(?:GetList|GetOne|GetMany|GetManyReference|InfiniteGetList)(?:<[^>()]*>)?\(\s*['"]([A-Za-z_][\w-]*)['"]/g, (m) => tableKey(m[1]), 'react-admin'],
+    [/<(?:List|ReferenceField|ReferenceManyField|ReferenceInput|ReferenceArrayField|ReferenceArrayInput|ReferenceOneField|ReferenceManyCount|InfiniteList|Show|Edit)\b[^>]*\b(?:resource|reference)=["']([A-Za-z_][\w-]*)["']/g, (m) => tableKey(m[1]), 'react-admin'],
+  ];
+  const noUi = /(^|\/)(migrations?|drizzle|seeds?|scripts?|prisma\/seed|e2e|tests?|__tests__)\/|seed\.[tj]s$|\.config\.[tj]s$/;
+  const unreach = new Set(reads.reach.unreachable.map((u) => u.path));
+  for (const f of files.filter((p) => /\.(tsx|jsx|ts|js|mjs|svelte|vue)$/.test(p) && !/\.d\.ts$/.test(p))) {
+    const r = rel(f); if (TEST_PATH.test(r) || noUi.test(r) || unreach.has(r)) continue;
+    const src = text(f); if (!/find|query|from\(|Join\(|useGet|reference=|resource=/.test(src)) continue;
+    for (const [re, toTable, kind] of ORM) for (const m of src.matchAll(re)) { const t = toTable(m); if (!t || !tables.has(t)) continue;
+      const line = lineOf(src, m.index + m[0].lastIndexOf(m[1])); if (/^\s*(\/\/|\*)/.test(src.split('\n')[line - 1] ?? '')) continue;   // the line of the name (a JSX element over several lines)
+      addShown(t, { path: r, line, symbol: m[1], via: `${kind} read ${m[0].replace(/\s+/g, ' ').slice(0, 60)}` }); }
+  }
+}
 // Display places per column (element data, place = where the column is named or read); the read scope contains only columns with a display place
 // Write places (columns[].written) and IDs of other systems (columns[].external_id: the value comes from a call to a provider package or is passed to it)
 for (const w of reads.column_writes) { const c = tables.get(w.table)?.columns.find((x) => x.name === w.column); if (!c || c.pk) continue;
@@ -464,9 +573,9 @@ const mergedTables = [...[...tables.values()].map((t) => { const old = merge?.ta
 //    triggers only keep columns) and every place where the app signs people up or in or resets a password (required: these are always flows). The agent
 //    describes each one as a flow or sets left_out with the reason; everydeck-check and everydeck refuse one without either. --merge keeps the reasons.
 const AUTH_CALLS = [
-  ['sign_up', /\.auth\.(signUp)\s*\(|\b(createUserWithEmailAndPassword)\s*\(|\b(useSignUp)\s*\(|<(SignUp)\b|\.auth\.(sign_up)\s*\(/],
-  ['sign_in', /\.auth\.(signIn(?:WithPassword|WithOtp|WithOAuth|WithIdToken|WithSSO)?|verifyOtp)\s*\(|\b(signInWith(?:EmailAndPassword|Popup|Redirect|EmailLink|PhoneNumber|Credential))\s*\(|\b(useSignIn)\s*\(|<(SignIn)\b|\.auth\.(sign_in_with_(?:password|otp|oauth|id_token)|verify_otp)\s*\(|\b(signIn)\s*\(\s*['"]/],
-  ['password_reset', /\.auth\.(resetPasswordForEmail)\s*\(|\b(sendPasswordResetEmail)\s*\(|\.auth\.(reset_password_(?:email|for_email))\s*\(/],
+  ['sign_up', /\b(signUp\.email|signUp\.social)\s*\(|\.auth\.(signUp)\s*\(|\b(createUserWithEmailAndPassword)\s*\(|\b(useSignUp)\s*\(|<(SignUp)\b|\.auth\.(sign_up)\s*\(/],
+  ['sign_in', /\b(signIn\.(?:email|social|username|magicLink|passkey))\s*\(|\.auth\.(signIn(?:WithPassword|WithOtp|WithOAuth|WithIdToken|WithSSO)?|verifyOtp)\s*\(|\b(signInWith(?:EmailAndPassword|Popup|Redirect|EmailLink|PhoneNumber|Credential))\s*\(|\b(useSignIn)\s*\(|<(SignIn)\b|\.auth\.(sign_in_with_(?:password|otp|oauth|id_token)|verify_otp)\s*\(|\b(signIn)\s*\(\s*['"]/],
+  ['password_reset', /\b(forgetPassword|requestPasswordReset)\s*\(\s*\{|\.auth\.(resetPasswordForEmail)\s*\(|\b(sendPasswordResetEmail)\s*\(|\.auth\.(reset_password_(?:email|for_email))\s*\(/],
 ];
 const byPlace = (a, b) => a.path.localeCompare(b.path) || a.line - b.line;
 const candidates = [];
@@ -487,23 +596,25 @@ const PAY = [
     ['customer', /\b(stripe\.(?:customers|Customer)\.(?:create|modify|update|retrieve))\s*\(/],
     ['portal', /\b(stripe\.billing_?[pP]ortal\.(?:sessions|Session)\.create)\s*\(/]] },
   { provider: 'paddle', pkg: /^@paddle\//i, host: /(?:sandbox-)?api\.paddle\.com/, calls: [['checkout', /\b(Paddle\.Checkout\.open)\s*\(/], ['webhook', /\b(\w+\.webhooks\.unmarshal)\s*\(/]] },
-  { provider: 'lemonsqueezy', pkg: /^@lemonsqueezy\//i, host: /api\.lemonsqueezy\.com/, calls: [['checkout', /\b(createCheckout)\s*\(/]] },
+  { provider: 'lemonsqueezy', pkg: /^@lemonsqueezy\//i, host: /api\.lemonsqueezy\.com/, calls: [['checkout', /\b(createCheckout)\s*\(/], ['subscription', /\b((?:get|update|cancel)Subscription)\s*\(/], ['customer', /\b((?:get|create)Customer)\s*\(/]] },
   { provider: 'revenuecat', pkg: /^(react-native-purchases|@revenuecat\/[\w.-]+)$/i, host: /api\.revenuecat\.com/, calls: [['checkout', /\b(Purchases\.purchase(?:Package|Product|StoreProduct))\s*\(/]] },
   { provider: 'midtrans', pkg: /^(midtrans-client|midtransclient)$/i, host: /(?:app|api)(?:\.sandbox)?\.midtrans\.com/, calls: [['checkout', /\b(\w+\.createTransaction(?:Token)?|\w+\.create_transaction(?:_token)?)\s*\(/], ['webhook', /\b(\w+\.transaction\.notification)\s*\(/]] },
   { provider: 'xendit', pkg: /^(xendit-node|xendit|xendit-python)$/i, host: /api\.xendit\.co/, calls: [['checkout', /\b(\w+\.createInvoice|\w+\.create_invoice)\s*\(/]] },
   { provider: 'paypal', pkg: /^@paypal\//i, host: /api-m\.(?:sandbox\.)?paypal\.com/, calls: [['checkout', /\b(paypal\.Buttons)\s*\(/]] },
   { provider: 'mollie', pkg: /^(@mollie\/api-client|mollie-api-python)$/i, host: /api\.mollie\.com/, calls: [['checkout', /\b(\w+\.payments\.create)\s*\(/]] },
+  { provider: 'polar', pkg: /^@polar-sh\/[\w.-]+$/i, host: /(?:sandbox-)?api\.polar\.sh/, calls: [['checkout', /\b(\w+\.checkouts\.create|\w+\.checkouts\.custom\.create|Checkout)\s*\(/], ['webhook', /\b(validateEvent)\s*\(/], ['subscription', /\b(\w+\.subscriptions\.(?:update|revoke|get))\s*\(/], ['customer', /\b(\w+\.customers\.(?:create|get|update))\s*\(/], ['portal', /\b(\w+\.customerSessions\.create|CustomerPortal)\s*\(/]] },
+  { provider: 'mercadopago', pkg: /^(mercadopago|@mercadopago\/[\w.-]+)$/i, host: /api\.mercadopago\.com/, calls: [['checkout', /\b(new\s+Preference|\w+\.preferences?\.create|preference\.create)\s*\(/], ['api', /\b(new\s+Payment|\w+\.payment\.(?:get|create))\s*\(/]] },
   { provider: 'razorpay', pkg: /^razorpay$/i, host: /api\.razorpay\.com/, calls: [['checkout', /\b(\w+\.orders?\.create)\s*\(/]] },
 ];
 const AI = [
   { provider: 'anthropic', client: /\b((?:Async)?Anthropic(?:Bedrock|Vertex)?)\s*\(/, call: /\.((?:beta\.)?messages\.(?:create|parse|stream))\s*\(/, needs: /anthropic/i },
-  { provider: 'google', client: /\b(GoogleGenerativeAI|GoogleGenAI|genai\.Client|genai\.GenerativeModel)\s*\(/, call: /\.(generateContent(?:Stream)?|models\.generate_content|generate_content)\s*\(/ },
+  { provider: 'google', client: /\b(GoogleGenerativeAI|GoogleGenAI|genai\.Client|genai\.GenerativeModel)\s*\(/, call: /\.(generateContent(?:Stream)?|models\.generate_content|generate_content|sendMessage(?:Stream)?|send_message)\s*\(/, needs: /@google\/(?:generative-ai|genai)|google\.generativeai|google\.genai|from google import genai/ },
   { provider: 'mistral', client: /\b(Mistral(?:Client)?)\s*\(/, call: /\.(chat\.complete(?:Async)?|chat\.stream)\s*\(/, needs: /mistral/i },
   { provider: 'groq', client: /\b((?:Async)?Groq)\s*\(/, call: null },
   { provider: 'openai', client: /\b((?:Async)?(?:Azure)?OpenAI)\s*\(/, call: /\.(chat\.completions\.create|chat\.completions\.parse|responses\.create|responses\.parse|completions\.create|embeddings\.create|images\.(?:generate|edit)|audio\.(?:transcriptions|translations|speech)\.create)\s*\(/ },
 ];
 const AI_SDK_CALL = /\b(generateText|streamText|generateObject|streamObject|embedMany)\s*\(/;
-const AI_HOSTS = [[/api\.openai\.com/, 'openai'], [/api\.anthropic\.com/, 'anthropic'], [/generativelanguage\.googleapis\.com/, 'google'], [/openrouter\.ai\/api/, 'openrouter'], [/api\.mistral\.ai/, 'mistral'], [/api\.groq\.com/, 'groq'], [/api\.together\.xyz/, 'together']];
+const AI_HOSTS = [[/ai\.gateway\.lovable\.dev/, 'lovable_ai'], [/api\.openai\.com/, 'openai'], [/api\.anthropic\.com/, 'anthropic'], [/generativelanguage\.googleapis\.com/, 'google'], [/openrouter\.ai\/api/, 'openrouter'], [/api\.mistral\.ai/, 'mistral'], [/api\.groq\.com/, 'groq'], [/api\.together\.xyz/, 'together']];
 const payProviders = []; const aiCalls = [];
 for (const P of PAY) {
   const comp = components.find((c) => P.pkg.test(c.package)); const calls = [];
@@ -511,6 +622,8 @@ for (const P of PAY) {
     for (const [kind, re] of P.calls) { const m = re.exec(l); if (m && (comp || P.provider === 'stripe' || ls.some((x) => P.host.test(x)))) calls.push({ kind, evidence: { path: rel(f), line: i + 1, symbol: m[1] } }); }
     const h = P.host.exec(l); if (h && /['"`]/.test(l)) calls.push({ kind: 'api', evidence: { path: rel(f), line: i + 1, symbol: h[0] } }); }); }
   if (!comp && !calls.length) continue;
+  // A package in package.json that no file imports is no provider of the app (an app that moved from Stripe to Polar keeps stripe in package.json)
+  if (comp && !calls.length && !codeFiles.some((f) => new RegExp(`(?:from\\s*|require\\(\\s*|import\\(\\s*|^\\s*import\\s+|^\\s*from\\s+)['"]?${comp.package.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?:['"/]|\\s|$)`, 'm').test(text(f)))) continue;
   payProviders.push({ provider: P.provider, ...(comp ? { component: comp.id } : {}), evidence: comp ? { path: comp.evidence.path, line: comp.evidence.line, symbol: comp.package } : calls[0].evidence, calls: calls.slice(0, 50) });
 }
 for (const f of codeFiles) {
@@ -572,6 +685,11 @@ const described = new Set(moneyAll.filter((m) => m.holds === 'prices' || m.holds
 for (const t of mergedTables) { if (moneyAll.some((x) => x.table === t.name)) continue;
   const c = t.columns.find((x) => x.fk && described.has(x.fk.table) && x.fk.table !== t.name);
   if (c) moneyAll.push({ table: t.name, because: 'refers_to_money', evidence: { path: t.defined.path, line: t.defined.line, symbol: c.name }, columns: [c.name] }); }
+// The ids of a payment provider on a table (teams.stripe_customer_id, users.stripe_subscription_id, organization.polar_customer_id): the table holds
+// money (a plan of the team or the person), also when the payment itself runs at the provider. What a row holds, the agent says.
+const PROVIDER_ID = /^(stripe|polar|paddle|lemon_?squeezy|mercado_?pago|paypal|razorpay|mollie|revenuecat|chargebee)_?(customer|subscription|price|product|plan|payment|checkout|order|invoice)_?id$/i;
+for (const t of mergedTables) { if (moneyAll.some((x) => x.table === t.name)) continue; const cols = t.columns.filter((c) => !c.pk && !c.fk && PROVIDER_ID.test(c.name.replace(/([a-z0-9])([A-Z])/g, '$1_$2')));
+  if (cols.length) moneyAll.push({ table: t.name, because: 'provider_id', evidence: { path: t.defined.path, line: t.defined.line, ...(t.defined.symbol ? { symbol: t.defined.symbol } : {}) }, columns: cols.map((c) => c.name) }); }   // the place is the table; the columns are listed
 const money = payProviders.length || moneyAll.length || merge?.money ? { providers: [...payProviders, ...(merge?.money?.providers ?? []).filter((o) => !payProviders.some((p) => p.provider === o.provider))], tables: moneyAll.slice(0, 200) } : null;
 // ── People: the same rule everydeck uses (detectPeople in the rules bundle). The table with one row per account (its key references auth.users; with
 //    several, the one with a name the app shows, then with a name column, then the most referenced), the name column the app shows, e-mail and phone
@@ -604,9 +722,14 @@ const redirectNear = (ls, i) => { for (let j = i; j < Math.min(ls.length, i + 6)
 for (const f of codeFiles) { const ls = text(f).split('\n'); ls.forEach((l, i) => { if (/^\s*(\/\/|#|\*)/.test(l)) return; for (const [kind, re] of AUTH_CALLS) { const m = re.exec(l); if (m) { const redirect = kind === 'password_reset' ? redirectNear(ls, i) : null; authPlaces.push({ kind, path: rel(f), line: i + 1, symbol: m.slice(1).find(Boolean), ...(redirect ? { redirect } : {}) }); } } }); }
 for (const a of authPlaces.sort(byPlace)) addCand({ id: `auth:${a.kind}`, source: 'auth', kind: a.kind, ...(a.redirect ? { redirect: a.redirect } : {}), evidence: { path: a.path, line: a.line, symbol: a.symbol }, required: true });
 for (const r of api_routes.filter((x) => x.method === 'POST' || !x.method).sort((a, b) => byPlace(a.evidence, b.evidence))) {   // an own login: the app's routes for it (not required: the route name is the fact)
-  const kind = /(^|\/)(register|sign-?up|signup)$/i.test(r.pattern) ? 'sign_up' : /(^|\/)(login|sign-?in|signin)$/i.test(r.pattern) ? 'sign_in' : /(forgot|reset)[-_]?password|password[-_]?reset/i.test(r.pattern) ? 'password_reset' : null;
+  const kind = /(^|\/)(register|sign-?up|signup)(\/|$)/i.test(r.pattern) ? 'sign_up' : /(^|\/)(login|sign-?in|signin)(\/|$)/i.test(r.pattern) ? 'sign_in' : /(forgot|reset)[-_]?password|password[-_]?reset/i.test(r.pattern) ? 'password_reset' : null;
   if (kind) addCand({ id: `auth:${kind}`, source: 'auth', kind, evidence: { path: r.evidence.path, line: r.evidence.line, symbol: r.pattern.split('/').pop() } });
 }
+// Server actions of an own login (Next.js 'use server': export async function signIn/signUp/login/register, saas-starter app/(login)/actions.ts)
+for (const f of codeFiles) { const src = text(f); if (!/^\s*['"]use server['"]/m.test(src)) continue;
+  for (const m of src.matchAll(/^export\s+(?:async\s+)?(?:function\s+|const\s+)(sign_?[uU]p|register|sign_?[iI]n|log_?[iI]n|forgot_?[pP]assword|reset_?[pP]assword)\b/gm)) {
+    const kind = /up$|register/i.test(m[1]) ? 'sign_up' : /in$/i.test(m[1]) ? 'sign_in' : 'password_reset';
+    addCand({ id: `auth:${kind}`, source: 'auth', kind, evidence: { path: rel(f), line: lineOf(src, m.index), symbol: m[1] } }); } }
 for (const p of payProviders) for (const c of p.calls.filter((x) => x.kind === 'checkout' || x.kind === 'webhook').sort((a, b) => byPlace(a.evidence, b.evidence))) addCand({ id: `payment:${c.kind}`, source: 'payment', kind: c.kind, evidence: c.evidence, required: true });
 for (const w of [...(reads.browser_writes ?? [])].sort(byPlace)) addCand(w.route ? { id: `browser_write:${w.route}`, source: 'browser_write', kind: 'request', route: w.route, handler: w.handler, evidence: { path: w.path, line: w.line, symbol: w.symbol } }
   : { id: `browser_write:${w.kind}:${w.table}`, source: 'browser_write', kind: w.kind, table: w.table, evidence: { path: w.path, line: w.line, symbol: w.symbol } });
@@ -648,6 +771,18 @@ const mergedNames = new Set(mergedTables.map((t) => t.name));
 const keptNameRule = (rule, id) => { const t = mergedTables.find((x) => x.name === id.table); return rule?.steps?.length && t && rule.steps.every((s) => s.columns.every((c) => t.columns.some((x) => x.name === c))) ? rule : null; };
 
 const iconSkipped = icon ? [] : iconsTooLarge(repo, files);
+// The checklist from facts the skeleton found, with their places (before, every block was present: false although the app signs people in,
+// takes payments or calls AI). Login from the people found, payments from a provider the code uses, AI from the calls, organizations from memberships.
+// What the agent wrote stays; a block still at the skeleton's old default (false without places) gets the fact.
+const factBlocks = (() => { const id = identityOut; const out = new Map();
+  if (id?.evidence) out.set('login', { present: true, evidence: [{ path: id.evidence.path, line: id.evidence.line }], ...(id.table ? { tables: [id.table] } : {}) });
+  if (payProviders.length) out.set('payments', { present: true, evidence: payProviders.slice(0, 3).map((p) => ({ path: p.evidence.path, line: p.evidence.line })), ...(moneyAll.length ? { tables: [...new Set(moneyAll.map((m) => m.table))].slice(0, 30) } : {}) });
+  const aiCallsOnly = aiOut.filter((a) => a.kind === 'call'); if (aiCallsOnly.length) out.set('ai', { present: true, evidence: aiCallsOnly.slice(0, 5).map((a) => ({ path: a.evidence.path, line: a.evidence.line })) });
+  if (id?.memberships?.length) out.set('organizations', { present: true, evidence: id.memberships.slice(0, 3).map((m) => m.evidence), tables: [...new Set(id.memberships.flatMap((m) => [m.org_table, m.table]))].slice(0, 30) });
+  return out; })();
+const checklistOut = BLOCKS.map((block) => { const old = merge?.checklist?.find((c) => c.block === block); const fact = factBlocks.get(block);
+  if (old && (old.present || old.evidence?.length || old.tables?.length || old.flows?.length || old.functions?.length)) return old;
+  return fact ? { block, ...fact } : old ?? { block, present: false }; });
 const appOut = (() => { const { icon: _old, ...rest } = merge?.app ?? {}; const a = { ...rest, ...(icon ? { icon } : {}) }; return Object.keys(a).length ? a : null; })();
 const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git:${commit.slice(0, 12)}`, commit, ...(appOut ? { app: appOut } : {}),
   components: [...components.map((c) => ({ ...c, ...(merge?.components?.find((x) => x.package === c.package)?.call ? { call: merge.components.find((x) => x.package === c.package).call } : {}) })), ...(merge?.components ?? []).filter((x) => !components.some((c) => c.package === x.package))], platforms: merge?.platforms ?? platforms, screens: screens.map((x, i) => { const d = merge?.screens?.find((y) => y.pattern === x.pattern)?.described ?? describedOf(i); return d ? { ...x, described: d } : x; }), api_routes,   // a page's description (described) stays as long as the page exists
@@ -663,7 +798,7 @@ const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git
   ...(merge?.works_with ? { works_with: merge.works_with.filter((w) => mergedNames.has(w.table) && (!w.part_of || mergedNames.has(w.part_of))) } : {}),
   ...(merge?.core_object && mergedNames.has(merge.core_object.table) ? { core_object: merge.core_object } : {}),   // the agent's core object stays, like works_with
   identity: (() => { const id = identityOut; if (!id) return null; const { name_rule: agentRule, ...rest } = id; const rule = nameRuleOf(id) ?? keptNameRule(agentRule, id); return rule ? { ...rest, name_rule: rule } : rest; })(), tables: mergedTables, functions: merge?.functions ?? [], flows: merge?.flows ?? [], ...(flowCandidates.length ? { flow_candidates: flowCandidates } : {}), money, ...(aiOut.length ? { ai_calls: aiOut } : {}), ...(merge?.channels ? { channels: merge.channels } : {}), ...(merge?.jobs ? { jobs: merge.jobs } : {}), ...(merge?.payments !== undefined ? { payments: merge.payments } : {}), ...(merge?.adapters ? { adapters: merge.adapters } : {}),
-  checklist: merge?.checklist ?? BLOCKS.map((block) => ({ block, present: false })),
+  checklist: checklistOut,
   // what the agent recorded (outcomes) and what everydeck-check wrote (inventory, renewed by its next validate) stay
   ...(merge?.outcomes ? { outcomes: merge.outcomes } : {}), ...(merge?.inventory ? { inventory: merge.inventory } : {}) };
 // --types prints the object type names as everydeck derives them (singular of the table name), for triggers, actions, door and cleanup list before submitting
@@ -685,4 +820,6 @@ if (outPath) { mkdirSync(dirname(outPath), { recursive: true }); writeFileSync(o
 function notePlaces(file) { try { const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   const tree = git('stash', 'create') || git('rev-parse', 'HEAD'); const at = git('rev-parse', '--git-path', 'everydeck/places.json'); const f = at.startsWith('/') ? at : join(repo, at);
   mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, JSON.stringify({ tree, app_map: relative(resolve(repo), resolve(file)) }) + '\n'); } catch { /* not a git repository: nothing to note */ } }
-console.error(JSON.stringify({ out: outPath, tables: out.tables.length, columns: out.tables.reduce((n, t) => n + t.columns.length, 0), shown: out.tables.filter((t) => (t.shown ?? []).length || t.columns.some((c) => (c.shown ?? []).length)).length, not_shown: out.tables.reduce((n, t) => n + (t.not_shown ?? []).length, 0), components: out.components.length, api_routes: api_routes.length, screens: screens.length, platforms: out.platforms.length, routes_with_reads: reads.routes.filter((r) => r.reads.length).length, views: reads.views.length, sql_functions: reads.sql_functions.length, merged: !!merge , ...(iconSkipped.length ? { icon_skipped: iconSkipped, icon_note: `the app's logo is larger than ${ICON_MAX_BYTES} bytes, so everydeck shows no logo; add a smaller copy (PNG or SVG) and run again` } : {}) }));
+// What the skeleton does not know for sure, it asks with the place (the same rule as everydeck-check validate, open[] question:…)
+const questions = (() => { try { return setupQuestions(out); } catch { return []; } })();
+console.error(JSON.stringify({ out: outPath, tables: out.tables.length, columns: out.tables.reduce((n, t) => n + t.columns.length, 0), shown: out.tables.filter((t) => (t.shown ?? []).length || t.columns.some((c) => (c.shown ?? []).length)).length, not_shown: out.tables.reduce((n, t) => n + (t.not_shown ?? []).length, 0), components: out.components.length, api_routes: api_routes.length, screens: screens.length, platforms: out.platforms.length, routes_with_reads: reads.routes.filter((r) => r.reads.length).length, views: reads.views.length, sql_functions: reads.sql_functions.length, merged: !!merge, ...(questions.length ? { questions: questions.map((q) => ({ id: q.id, ask: q.what })) } : {}), ...(open.length ? { open, open_note: 'the skeleton could not read these places; add what they hold with places, or leave them if they are no part of the app' } : {}), ...(iconSkipped.length ? { icon_skipped: iconSkipped, icon_note: `the app's logo is larger than ${ICON_MAX_BYTES} bytes, so everydeck shows no logo; add a smaller copy (PNG or SVG) and run again` } : {}) }));

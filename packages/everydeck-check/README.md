@@ -24,6 +24,14 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.17
+
+- `validate` runs every check in one run: shape, references, everydeck's rules, the database, every place in the repo, completeness and contact copies. The errors about the app map come first, a missing result signal (a change of the app's code) last, and `open[]` lists the open parts while errors remain. Before, the first stage with an error hid every later one. Tables are read like `@everydeck/check` 0.3.17 (MySQL backticks, reset scripts drop nothing, `DROP` and `CREATE` in file order, Prisma `@@map(name: …)` gives one name per model, SQLModel `table=True`, annotated `__tablename__`). `works_with` names its table by any name the code gives it (snake_case, camelCase, the model name, singular); a symbol alone no longer passes a place without the table. Module paths, i18n keys with three or more parts and CSS selectors are no mention of a table. New open parts `question:people` and `question:money:<table>` ask for who signs in and for tables with amounts or subscription columns, each with the place; an outcome closes them. Polar and Mercado Pago are known providers.
+
+### 0.3.16
+
+- The app map says what everydeck needs to show the AI calls, reports, blocks and status changes of an app (shared rules with `@everydeck/check` 0.3.16): `ai_calls[].context` (the place of `aiContext`, the flow it names and the references it passes: `subject_ref`, `account_ref`, `object_ref`; a reference the code cannot pass in `without` with one sentence why), `moderation.reports` (where people report content: a flag such as `reported` on a record, or a report table) and `moderation.blocks` (where the app blocks people or records). `everydeck-check validate` lists what is missing before you submit: every AI call without its context (`ai:context:<path>:<line>`), reports without `moderation.reports` or a report flow with a result signal (`flow:moderation`; a flow that sends a message is no longer a report), blocks without `identity.suspend` or `moderation.blocks` (`moderation:blocks`), and a table with a status column the browser changes without `status_column` and `statuses[]` or a flow with a result signal (`status:<table>`). Each closes with `not_applicable` and its place when the app has none. Optional fields; older app maps stay valid.
+
 ### 0.3.15
 
 - Same version as the scaffold `@everydeck/check` 0.3.15 (the two are a pair) and the same schema and rules: `ai_calls[].flow` in the app map (optional, older app maps stay valid; `validate` checks that it names a flow of `flows[]`), and every flow people use that everydeck neither gets reported nor sees itself is an open part `signal:<flow id>`.

@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.17
+
+- **Supabase's Security Advisor shows no warning for what the SDK adds to the app's database.** `outbox/everydeck_outbox.sql`: `everydeck_outbox.run_job` sets its search path (`"$user", public, extensions`, the one a schedule has on Supabase, so a command finds the app's functions as before), the outbox tables carry a policy that lets no role through (the relay reads as the owner or `service_role`, which skip row-level security), and `anon` and `authenticated` may run no function of the outbox. The schedules (`outbox/everydeck_outbox_schedule.supabase.sql`, `bridge/everydeck_read_bridge_schedule.supabase.sql`) create `pg_net` in the schema `extensions`, as the Supabase dashboard does, never in `public`. All statements only add and can run again; an outbox from an earlier version keeps working. A `pg_net` that an earlier version created in `public` stays there (Postgres cannot move it); remove it there only with Supabase's own steps.
+
 ## 0.5.16
 
 - **An AI call names the record it worked on.** `everydeck.aiContext({ flow, subjectRef, accountRef, objectType, objectRef }, fn)`, `wrapOpenAI(client, { objectType, objectRef })` and `everydeck.aiCall({ …, objectType, objectRef })`: the kind of the record as the app map names it (`person`, `job`) and its key, both or none (else left out with a warning). everydeck then says "analyzed CV ‘Julia Hartmann’ · $0.046" on the person and the organization and lists every call with who, what and why under Money. Pass `subjectRef` too: without the person who started it, a call is counted for nobody. Only identifiers, never content; everydeck drops a kind its app map does not know. Python SDK 0.5.10: `ai_context(…, object_type=…, object_ref=…)` the same.

@@ -145,12 +145,15 @@ def cmd_validate(a: argparse.Namespace) -> int:
                 _write_like(a.manifest, APP_MAP if a.file_note else a.manifest, raw)
         errs = validate_app_map(raw, Path(repo).resolve() if repo else None, db)
         from .rules import app_map_open
-        parts = app_map_open(raw) if not errs else {"setup": None, "open": [], "still_open": 0}
+        # the open parts also while errors remain: the agent sees everything in its first run; a map everydeck cannot read yet has none
+        parts = app_map_open(raw, require_result_signal=not errs)
         nxt = (f"{len(parts['open'])} open parts nobody answered yet: connect each (flow, channel, money entry) or record its outcome in outcomes[] (covered_by a flow that does exactly this, not_applicable with the place that shows it); deferred and unsupported stay open and the owner sees them"
                if parts["open"] else None)
         # a refusal says what comes next too, so the agent does not end its turn with a question to the owner
         if errs: nxt = ("Fix each error in everydeck/app-map.json (and the code it names) yourself with your file tools: every error names the place and what to change. "
-                        "Then run validate again until it exits 0. Nothing here is the owner's decision: do not ask the owner and do not end your turn.")
+                        "All checks ran: work through the list in order; the errors about the app map come first, a missing result signal (a change of the app's code) last. "
+                        + (f"Answer the {len(parts['open'])} open parts in the same pass. " if parts.get("open") else "")
+                        + "Then run validate again until it exits 0. Nothing here is the owner's decision: do not ask the owner and do not end your turn.")
         # places moved by the agent's own edits are moved by git, not by hand (and code goes where it belongs, not to the end of a file)
         if errs and any(PLACE_MOVED.search(e) for e in errs):
             nxt += (" Places that moved because you edited a file: run `everydeck-check reanchor --worktree --write` (it moves every place of the app map to the"

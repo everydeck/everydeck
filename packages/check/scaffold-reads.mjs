@@ -90,7 +90,7 @@ export function sqlKnowledge(sqlTexts) {
 /** Everything an analysis returns: { shown[], not_shown[], routes[] }; table names are already mapped to the app map (tableKey). */
 export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   const repo = resolve(repo0); const files = files0.map((f) => resolve(f));   // absolute paths: imports resolve to absolute paths
-  const rel = (p) => relative(repo, p); const text = (p) => readFileSync(p, 'utf8');
+  const rel = (p) => (p ? relative(repo, p) : ''); const text = (p) => { try { return readFileSync(p, 'utf8'); } catch { return ''; } };   // a place without a file (a node the parser made up) is no place
   const srcOf = new Map(); const read = (p) => { if (!srcOf.has(p)) srcOf.set(p, text(p)); return srcOf.get(p); };
   const { views, fns } = sqlKnowledge([...files.filter((p) => p.endsWith('.sql')).sort().map(read), ...files.filter((p) => p.endsWith('.py') && /alembic|migrations|versions/.test(p)).sort().map(read)]);
   // view → tables of the app map (recursive through views), SQL function → tables (recursive through called functions)
@@ -191,6 +191,15 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   // Aliases from tsconfig.json (compilerOptions.paths, e.g. "@/*": ["./src/*"]); without an entry @/ means src/ or the root next to the tsconfig
   const fsx = { repo, files, read, isFile: (p) => existsSync(p) && statSync(p).isFile() };
   const resolveModule = moduleResolver(fsx);   // aliases from tsconfig.json (paths, baseUrl), @/ and ~/
+  // Helpers the frontend imports from a folder named db/, database/ or supabase/ (chatbot-ui db/chats.ts, utils/supabase/queries.ts) are frontend code, not a
+  // backend: the browser or the page runs them. They count when a frontend file imports them (two steps) and they load no server package.
+  { const isFe = new Set(frontend); let frontier = [...frontend];
+    for (let step = 0; step < 2 && frontier.length; step++) { const next = [];
+      for (const f of frontier) for (const m of read(f).matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\(\s*)['"]([^'"]+)['"]/g)) { const g = resolveModule(f, m[1]); if (!g || isFe.has(g) || !codeFiles.includes(g)) continue;
+        const r = rel(g); const src = read(g);
+        if (!/(^|\/)(db|database|supabase)\//.test(r) || /(^|\/)supabase\/(functions|migrations)\/|(^|\/)(migrations|scripts|tests?|__tests__)\//.test(r) || TEST_FILE.test(r) || SERVER_IMPORT.test(src) || REGISTERS_ROUTES.test(src) || isTypeFile(r, src)) continue;
+        isFe.add(g); frontend.push(g); next.push(g); }
+      frontier = next; } }
   const importsOf = (sf, file) => { const m = new Map(); for (const st of sf.statements) { if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier)) { const f = resolveModule(file, st.moduleSpecifier.text); if (!f) continue; const cl = st.importClause; if (!cl) continue; if (cl.name) m.set(cl.name.text, { file: f, name: 'default' }); if (cl.namedBindings) { if (ts.isNamespaceImport(cl.namedBindings)) m.set(cl.namedBindings.name.text, { file: f, ns: true }); else for (const el of cl.namedBindings.elements) m.set(el.name.text, { file: f, name: (el.propertyName ?? el.name).text }); } } } return m; };
   const fnDecls = (sf) => { const m = new Map(); const add = (name, node) => { if (name && !m.has(name)) m.set(name, node); };
     const visit = (n) => { if (ts.isFunctionDeclaration(n) && n.name) add(n.name.text, n); if (ts.isVariableStatement(n)) for (const d of n.declarationList.declarations) if (ts.isIdentifier(d.name) && d.initializer && (ts.isArrowFunction(unwrap(d.initializer)) || ts.isFunctionExpression(unwrap(d.initializer)) || ts.isCallExpression(unwrap(d.initializer)))) add(d.name.text, unwrap(d.initializer)); if (ts.isExportAssignment(n)) add('default', n.expression); ts.forEachChild(n, visit); }; visit(sf); return m; };
@@ -438,7 +447,7 @@ export function analyseReads({ repo: repo0, files: files0, tables, tableKey }) {
   // ── Display kind from the place where the app shows the value; only columns of tables the frontend reads ──
   // Frontend data accesses per line (tables read there, also through API routes, RPC, views)
   const readsByLine = new Map(); for (const cr of colReads) { const k = `${cr.path}:${cr.line}`; if (!readsByLine.has(k)) readsByLine.set(k, new Set()); readsByLine.get(k).add(cr.table); }
-  const readsAt = (file, line) => readsByLine.get(`${rel(file)}:${line}`) ?? null;
+  const readsAt = (file, line) => (file ? readsByLine.get(`${rel(file)}:${line}`) ?? null : null);
   const readColumns = new Map(); for (const cr of colReads) if (!readColumns.has(cr.table)) readColumns.set(cr.table, new Set((tables.get(cr.table)?.columns ?? []).map((c) => c.name)));
   const shownAs = ts && frontend.length ? analyseDisplay({ ts, files: frontend, reachable, parse, rel, lineOf, unwrap, strOf, resolveModule, tableColumns: readColumns, tableKey, readsAt, allFiles: files, read, valuesOf: (t, c) => { const tb = tables.get(t); const col = tb?.columns.find((x) => x.name === c); return [...new Set([...(col?.enum ?? []).map((e) => e.value), ...(tb?.status_column === c ? (tb.statuses ?? []).map((x) => x.value) : [])])]; } }) : { places: [], ends: [], labels: [] };
   for (const r of pyRel) for (const m of pyFile(r).money ?? []) money.push({ ...m, path: r, via: m.via.replace(/at line (\d+)/, `at ${r}:$1`).slice(0, 160) });   // Python: scaffold-ast.py money_places

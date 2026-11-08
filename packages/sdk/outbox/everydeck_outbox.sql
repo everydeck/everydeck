@@ -39,6 +39,13 @@ REVOKE ALL ON SEQUENCE everydeck_outbox.event_id_seq FROM PUBLIC;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN EXECUTE 'REVOKE ALL ON SCHEMA everydeck_outbox FROM anon, authenticated'; EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA everydeck_outbox FROM anon, authenticated'; END IF;
 END $$;
+-- SDK 0.5.17: a policy that lets no role through (the relay reads as the owner or service_role, which skip row-level security), so Supabase's Security
+-- Advisor does not list the table as "RLS enabled, no policy"; nothing else changes.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = 'everydeck_outbox.event'::regclass AND polname = 'everydeck_no_access') THEN
+    CREATE POLICY everydeck_no_access ON everydeck_outbox.event AS RESTRICTIVE FOR ALL TO PUBLIC USING (false) WITH CHECK (false);
+  END IF;
+END $$;
 
 -- Trigger function. Arguments (all text, '' = none):
 --   0 signal name (as declared in the manifest, e.g. 'work_order.completed')
@@ -63,6 +70,9 @@ REVOKE ALL ON everydeck_outbox.capture_error FROM PUBLIC;
 REVOKE ALL ON SEQUENCE everydeck_outbox.capture_error_id_seq FROM PUBLIC;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN EXECUTE 'REVOKE ALL ON everydeck_outbox.capture_error FROM anon, authenticated'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = 'everydeck_outbox.capture_error'::regclass AND polname = 'everydeck_no_access') THEN
+    CREATE POLICY everydeck_no_access ON everydeck_outbox.capture_error AS RESTRICTIVE FOR ALL TO PUBLIC USING (false) WITH CHECK (false);
+  END IF;
 END $$;
 
 -- SECURITY DEFINER: the browser's database role may write the business row; it never gets rights on the outbox itself.
@@ -121,9 +131,10 @@ REVOKE ALL ON FUNCTION everydeck_outbox.job_heartbeat(text, text) FROM PUBLIC;
 -- The whole command of a schedule as one job: cron.schedule('<job>', '<rhythm>', $$ SELECT everydeck_outbox.run_job('<job>', $job$ <the command> $job$) $$).
 -- Success: beat ok. Failure: the command's writes roll back, the beat says error, and the SQLSTATE goes to the log as a WARNING (no error text,
 -- which can carry column values) instead of failing the schedule, because a failed schedule would roll back its beat too. Runs with the rights of the schedule's owner
--- (SECURITY INVOKER), never more.
+-- (SECURITY INVOKER), never more. SDK 0.5.17: with the search path a schedule has on Supabase ("$user", public, extensions; a schema that does not exist
+-- is skipped), set on the function, so the command finds the app's functions as before and Supabase's Security Advisor does not list it.
 CREATE OR REPLACE FUNCTION everydeck_outbox.run_job(p_job text, p_command text) RETURNS void
-LANGUAGE plpgsql SECURITY INVOKER AS $$
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = "$user", public, extensions AS $$
 BEGIN
   IF p_job IS NULL OR p_job !~ '^[a-z][a-z0-9_.-]{0,63}$' THEN RAISE EXCEPTION 'everydeck_outbox.run_job: job id % is not an id of jobs[] (lowercase, a-z 0-9 _ . -)', p_job; END IF;
   BEGIN
@@ -136,3 +147,6 @@ BEGIN
   PERFORM everydeck_outbox.job_heartbeat(p_job, 'ok');
 END $$;
 REVOKE ALL ON FUNCTION everydeck_outbox.run_job(text, text) FROM PUBLIC;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN EXECUTE 'REVOKE ALL ON ALL FUNCTIONS IN SCHEMA everydeck_outbox FROM anon, authenticated'; END IF;
+END $$;

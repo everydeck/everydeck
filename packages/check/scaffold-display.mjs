@@ -55,7 +55,7 @@ export function analyseDisplay({ ts, files, reachable, parse, rel, lineOf, unwra
       if (ts.isFunctionDeclaration(st) && st.name && st.modifiers?.some((x) => x.kind === ts.SyntaxKind.DefaultKeyword)) m.set('default', { fn: st, node: st }); }
     declCache.set(file, m); return m; };
   /** Identifier at a place → declaration (file, name), also through imports */
-  const targetOf = (file, name) => { const local = declsOf(file).get(name); if (local) return { file, name, ...local }; const im = importsOf(file).get(name); if (im?.file) { const d = declsOf(im.file).get(im.name); if (d) return { file: im.file, name: im.name, ...d }; } return null; };
+  const targetOf = (file, name) => { if (!file) return null; const local = declsOf(file).get(name); if (local) return { file, name, ...local }; const im = importsOf(file).get(name); if (im?.file) { const d = declsOf(im.file).get(im.name); if (d) return { file: im.file, name: im.name, ...d }; } return null; };
 
   // ── JSX: usages of the app's components (<Card property={p}>) ──
   const usages = new Map();   // `${file}#${name}` → JsxOpeningLikeElement[]

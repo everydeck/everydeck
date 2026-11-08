@@ -749,8 +749,8 @@
      }
     },
     "browser_subject": {
-      "$ref": "#/$defs/evidence",
-      "description": "Where the browser names the signed-in person to the everydeck SDK (everydeck.setSubject(<user id>); everydeck.reset() where the app signs the person out, never setSubject(null) for that). Without it every visit and sign-in stays anonymous."
+     "$ref": "#/$defs/evidence",
+     "description": "Where the browser names the signed-in person to the everydeck SDK (everydeck.setSubject(<user id>); everydeck.reset() where the app signs the person out, never setSubject(null) for that). Without it every visit and sign-in stays anonymous."
     },
     "name_rule": {
      "type": "object",
@@ -2112,6 +2112,129 @@
       "minLength": 1,
       "maxLength": 64,
       "description": "the flow (an id of flows[]) that aiContext({ flow }) names around this call; then everydeck counts the flow from its AI calls"
+     },
+     "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "evidence",
+       "flow",
+       "refs"
+      ],
+      "description": "where everydeck.aiContext / everydeck.ai_context opens around this call, the flow name it passes and the references it passes; a reference it cannot pass is named in without with one sentence why",
+      "properties": {
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       },
+       "flow": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+        "description": "the flow the context names (snake_case as the code names the feature, or the id of a flow of the app map: then name it in ai_calls[].flow too)"
+       },
+       "refs": {
+        "type": "array",
+        "maxItems": 3,
+        "uniqueItems": true,
+        "items": {
+         "enum": [
+          "subject_ref",
+          "account_ref",
+          "object_ref"
+         ]
+        },
+        "description": "what the context passes: subject_ref (the person who started it), account_ref (the organization of identity.memberships), object_ref (the record it works on, with object_type)"
+       },
+       "without": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "a reference the context does not pass, each with one sentence why (for example: the app has no organization for this person)",
+        "properties": {
+         "subject_ref": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 240,
+          "pattern": "^[^\\n\\r]+$"
+         },
+         "account_ref": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 240,
+          "pattern": "^[^\\n\\r]+$"
+         },
+         "object_ref": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 240,
+          "pattern": "^[^\\n\\r]+$"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "moderation": {
+   "type": "object",
+   "additionalProperties": false,
+   "description": "how people report content and how the app blocks people or records; everydeck shows reports under Needs you and Moderation. A person's own sign-in block stays in identity.suspend",
+   "properties": {
+    "reports": {
+     "type": "array",
+     "maxItems": 20,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "table",
+       "evidence"
+      ],
+      "properties": {
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "column": {
+        "$ref": "#/$defs/name",
+        "description": "the flag on the reported record (for example reported, flagged); leave it out when every row of the table is a report"
+       },
+       "reason_column": {
+        "$ref": "#/$defs/name",
+        "description": "the column that holds the reason of a report"
+       },
+       "reporter_column": {
+        "$ref": "#/$defs/name",
+        "description": "the column that points at the person who reported"
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence",
+        "description": "where the app files the report (the insert or the update that sets the flag)"
+       }
+      }
+     }
+    },
+    "blocks": {
+     "type": "array",
+     "maxItems": 20,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "table",
+       "evidence"
+      ],
+      "properties": {
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "column": {
+        "$ref": "#/$defs/name",
+        "description": "the flag or time that blocks (for example suspended, banned_until); leave it out when every row of the table is a block"
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence",
+        "description": "where the app sets or checks the block"
+       }
+      }
      }
     }
    }

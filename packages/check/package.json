@@ -1,6 +1,6 @@
 {
   "name": "@everydeck/check",
-  "version": "0.3.15",
+  "version": "0.3.17",
   "description": "everydeck skeleton: reads the facts of an app repository (tables, pages, routes, flows, each with its place in the code) into everydeck/app-map.json",
   "license": "MIT",
   "homepage": "https://everydeck.ai",
@@ -20,6 +20,7 @@
     "scaffold-icon.mjs",
     "scaffold-db.mjs",
     "scaffold-ast.py",
+    "scaffold-models.py",
     "rules/everydeck-rules.mjs",
     "README.md",
     "LICENSE"
