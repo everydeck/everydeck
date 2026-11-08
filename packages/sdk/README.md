@@ -58,6 +58,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, { prepare: false, max: 2,
 Deno.serve(everydeckReadBridge({ endpoint: Deno.env.get('EVERYDECK_URL') ?? '', key: Deno.env.get('EVERYDECK_READ_BRIDGE_TOKEN') ?? '', db: sql, prefix: '/everydeck-read-bridge' }).fetch);
 ```
 
+## 0.5.18
+
+- **A server function that started before everydeck wrote its settings reports once they are there.** `everydeckFromSupabase` with `refreshSeconds: 0` read `public.everydeck_server_config()` only once; empty at that moment (the new version of the app ran before everydeck brought its settings into the Supabase project after the merge), the client stayed off for as long as the instance lived and sent nothing, AI calls included. Settings that are empty at start are now read again every 60 seconds (`SETTINGS_RETRY_SECONDS`) until they are there, also with `refreshSeconds: 0`; complete settings are still read once.
+
 ## 0.5.17
 
 - **Supabase's Security Advisor shows no warning for what the SDK adds to the app's database.** `outbox/everydeck_outbox.sql`: `everydeck_outbox.run_job` sets its search path (`"$user", public, extensions`, the one a schedule has on Supabase, so a command finds the app's functions as before), the outbox tables carry a policy that lets no role through (the relay reads as the owner or `service_role`, which skip row-level security), and `anon` and `authenticated` may run no function of the outbox. The schedules (`outbox/everydeck_outbox_schedule.supabase.sql`, `bridge/everydeck_read_bridge_schedule.supabase.sql`) create `pg_net` in the schema `extensions`, as the Supabase dashboard does, never in `public`. All statements only add and can run again; an outbox from an earlier version keeps working. A `pg_net` that an earlier version created in `public` stays there (Postgres cannot move it); remove it there only with Supabase's own steps.

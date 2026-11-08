@@ -43,3 +43,10 @@ def app_map_rule_errors(doc: dict[str, Any]) -> list[str]:
         return list(run_rule("app_map", {"input": doc}).get("errors", []))
     except RulesUnavailable as e:
         return [f"everydeck rules: {e}"]
+
+
+def lost_agent_facts(before: dict[str, Any], after: dict[str, Any]) -> dict[str, list[str]]:
+    """Which facts the agent set in `before` are missing in `after` (kept: fields, dropped: whole entries of the agent's lists), by the same rule as
+    the scaffold's --merge and everydeck's GitHub check (keepAgentFacts); everydeck-check writes an app map in reanchor and validate and loses none."""
+    r = run_rule("keep", {"before": before, "after": after})
+    return {"kept": list(r.get("kept", [])), "dropped": list(r.get("dropped", []))}

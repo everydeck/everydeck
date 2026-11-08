@@ -40,6 +40,9 @@ export async function serverConfigFromSupabase(client: SupabaseRpcClient): Promi
  * A client for a server of its own whose settings come from serverConfigFromSupabase; release key "auto" (the commit the host sets). If the call
  * fails, the client is switched off with a warning that names the function and never a value; the app works unchanged.
  */
+/** settings that were empty at start are read again this often (seconds), until they are there */
+export const SETTINGS_RETRY_SECONDS = 60;
+
 export async function everydeckFromSupabase(client: SupabaseRpcClient, o: Omit<Partial<EverydeckOptions>, 'endpoint' | 'credential' | 'manifestDigest' | 'configSource'> & {
   /** read the settings again every n seconds (default 300, like PostHog polls its flags); 0 reads them once at start */ refreshSeconds?: number } = {}): Promise<EverydeckClient> {
   const { refreshSeconds = 300, ...rest } = o;
@@ -49,12 +52,18 @@ export async function everydeckFromSupabase(client: SupabaseRpcClient, o: Omit<P
   // a new approval (new digest) or a new server key reaches a long-running server without a restart; environment variables are fixed
   const fromEnv = ['EVERYDECK_ENDPOINT', 'EVERYDECK_SERVER_KEY', 'EVERYDECK_MANIFEST_DIGEST'].every((k) => !!process.env[k]);
   let failed = false;
+  // a function that started before everydeck wrote its settings read empty values once (refreshSeconds 0) and sent nothing, silently, for as long as
+  // the instance lived. Empty at start, it reads again every SETTINGS_RETRY_SECONDS until it has them, also with refreshSeconds 0
+  const complete = (c: ServerConfig) => !!c.endpoint && !!c.server_key && !!c.manifest_digest;
+  let settled = complete(cfg);
   const load = async () => {
-    try { const c = await serverConfigFromSupabase(client); failed = false; return { endpoint: c.endpoint, credential: c.server_key, manifestDigest: c.manifest_digest }; }
+    if (refreshSeconds === 0 && settled) return null;
+    try { const c = await serverConfigFromSupabase(client); failed = false; if (complete(c)) settled = true; return { endpoint: c.endpoint, credential: c.server_key, manifestDigest: c.manifest_digest }; }
     catch { if (!failed) warn('could not read public.everydeck_server_config() again; the last settings stay in use'); failed = true; return null; }
   };
+  const every = refreshSeconds > 0 ? refreshSeconds : settled ? 0 : SETTINGS_RETRY_SECONDS;
   return createEverydeck({ ...rest, releaseKey: o.releaseKey ?? 'auto', endpoint: cfg.endpoint ?? '', credential: cfg.server_key ?? '', manifestDigest: cfg.manifest_digest ?? '',
-    ...(refreshSeconds > 0 && !fromEnv ? { configSource: { everyMs: Math.max(10, refreshSeconds * 1000), load } } : {}) });
+    ...(every > 0 && !fromEnv ? { configSource: { everyMs: Math.max(10, every * 1000), load } } : {}) });
 }
 
 /** Reads a file of the running app (for code lines when sending); larger than 2 MB or unreadable → null */

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join, relative, dirname, resolve } from 'node:path';
 import { analyseReads } from './scaffold-reads.mjs';
 import { ICON_MAX_BYTES, findIcon, iconsTooLarge } from './scaffold-icon.mjs';
-import { candidateWays, detectPeople, setupQuestions } from './rules/everydeck-rules.mjs';
+import { candidateWays, detectPeople, keepAgentFacts, setupQuestions } from './rules/everydeck-rules.mjs';
 
 const args = process.argv.slice(2); const repo = args[0]; if (!repo) { console.error('usage: scaffold.mjs <repo> [--db <url or structure address>] [--out file] [--merge file]'); process.exit(2); }
 const opt = (k) => (args.includes(k) ? args[args.indexOf(k) + 1] : null);
@@ -784,7 +784,7 @@ const checklistOut = BLOCKS.map((block) => { const old = merge?.checklist?.find(
   if (old && (old.present || old.evidence?.length || old.tables?.length || old.flows?.length || old.functions?.length)) return old;
   return fact ? { block, ...fact } : old ?? { block, present: false }; });
 const appOut = (() => { const { icon: _old, ...rest } = merge?.app ?? {}; const a = { ...rest, ...(icon ? { icon } : {}) }; return Object.keys(a).length ? a : null; })();
-const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git:${commit.slice(0, 12)}`, commit, ...(appOut ? { app: appOut } : {}),
+const skeletonOut = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git:${commit.slice(0, 12)}`, commit, ...(appOut ? { app: appOut } : {}),
   components: [...components.map((c) => ({ ...c, ...(merge?.components?.find((x) => x.package === c.package)?.call ? { call: merge.components.find((x) => x.package === c.package).call } : {}) })), ...(merge?.components ?? []).filter((x) => !components.some((c) => c.package === x.package))], platforms: merge?.platforms ?? platforms, screens: screens.map((x, i) => { const d = merge?.screens?.find((y) => y.pattern === x.pattern)?.described ?? describedOf(i); return d ? { ...x, described: d } : x; }), api_routes,   // a page's description (described) stays as long as the page exists
     // components added by the agent (e.g. a package in an Edge Function) stay
   // tables of the everydeck installation named by the agent stay (as long as the table exists)
@@ -796,11 +796,14 @@ const out = { schema_version: '1.12-r0', release_key: merge?.release_key ?? `git
   // against the ones this run found itself: a table the agent read from the database (`defined: database`, kept from the app map) is not in the repository,
   // and in a GitHub Action without a database the skeleton does not find it; its object type then left the sidebar without a word.
   ...(merge?.works_with ? { works_with: merge.works_with.filter((w) => mergedNames.has(w.table) && (!w.part_of || mergedNames.has(w.part_of))) } : {}),
-  ...(merge?.core_object && mergedNames.has(merge.core_object.table) ? { core_object: merge.core_object } : {}),   // the agent's core object stays, like works_with
+  ...(merge?.core_object ? { core_object: mergedNames.has(merge.core_object.table) ? merge.core_object : undefined } : {}),   // the agent's core object stays, like works_with; undefined: its table is gone, so it does not come back below
   identity: (() => { const id = identityOut; if (!id) return null; const { name_rule: agentRule, ...rest } = id; const rule = nameRuleOf(id) ?? keptNameRule(agentRule, id); return rule ? { ...rest, name_rule: rule } : rest; })(), tables: mergedTables, functions: merge?.functions ?? [], flows: merge?.flows ?? [], ...(flowCandidates.length ? { flow_candidates: flowCandidates } : {}), money, ...(aiOut.length ? { ai_calls: aiOut } : {}), ...(merge?.channels ? { channels: merge.channels } : {}), ...(merge?.jobs ? { jobs: merge.jobs } : {}), ...(merge?.payments !== undefined ? { payments: merge.payments } : {}), ...(merge?.adapters ? { adapters: merge.adapters } : {}),
   checklist: checklistOut,
   // what the agent recorded (outcomes) and what everydeck-check wrote (inventory, renewed by its next validate) stay
   ...(merge?.outcomes ? { outcomes: merge.outcomes } : {}), ...(merge?.inventory ? { inventory: merge.inventory } : {}) };
+// Every other field the agent set stays as it was (first_value, roles, moderation, an AI call's flow and context, a page's label …): only what the skeleton
+//    renews from the code itself (SKELETON_FACTS) may change. Before, a field this file did not name was gone after every push of the GitHub check.
+const out = merge ? keepAgentFacts(merge, skeletonOut).map : keepAgentFacts(null, skeletonOut).map;
 // --types prints the object type names as everydeck derives them (singular of the table name), for triggers, actions, door and cleanup list before submitting
 if (args.includes('--types')) {
   const singular = (n) => (/ies$/.test(n) ? n.replace(/ies$/, 'y') : /(ses|xes|zes|ches|shes)$/.test(n) ? n.replace(/es$/, '') : /[^s]s$/.test(n) ? n.replace(/s$/, '') : n);
