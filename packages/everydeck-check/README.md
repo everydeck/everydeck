@@ -24,6 +24,10 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.21
+
+- The app map can name every table whose rows the app deletes itself (`row_deletes[]`, optional): the place of the DELETE or TRUNCATE, who deletes (`schedule` for a job or a time window, `on_write` for a trigger or code that deletes while something else is written, `person` when a person asks for it) and the window (`older_than`, ISO 8601) when the code shows it; a job that deletes names its tables in `jobs[].deletes`. `validate` refuses an entry without a place, a place that names the table but deletes nothing, a place that deletes another table, a table that is not in the app map, another value for who deletes, a window that is no ISO 8601 duration, and a job that deletes a table without its entry by schedule. everydeck no longer warns about data loss in a table the app empties itself.
+
 ### 0.3.20
 
 - The app map can say how the app builds the address of a photo it shows: `columns[].image_src` (optional) with `form` (`url` or `storage`), `bucket` and `access` for Supabase Storage, `base`, `key`, and size-variant rules in `detail` and `thumb` (`host`, `replace_ext`, `before_ext`). `validate --repo` checks the place where the app builds the address and that a Storage form names its bucket. everydeck then shows the same photos as the app (shared version with `@everydeck/check` 0.3.20).

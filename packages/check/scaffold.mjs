@@ -803,6 +803,8 @@ const skeletonOut = { schema_version: '1.12-r0', release_key: merge?.release_key
   ...((reads.display_ends ?? []).filter((e) => !e.element.startsWith('contact_')).length ? { display_ends: reads.display_ends.filter((e) => !e.element.startsWith('contact_')) } : {}),   // a contact place without a column is not a display fact   // display places whose value cannot be traced to a column (fact, never guessed)   // files no entry point of the app reaches: no page, no display place
   ...(notInDb.size ? { not_in_database: [...notInDb.values()].sort((a, b) => a.table.localeCompare(b.table)) } : {}),
   ...(merge?.everydeck_tables ? { everydeck_tables: merge.everydeck_tables.filter((y) => mergedTables.some((t) => t.name === y.table)) } : {}),
+  // the tables the agent says the app empties itself stay with their place (as long as the table exists); validate checks the place again
+  ...(merge?.row_deletes ? { row_deletes: merge.row_deletes.filter((d) => mergedTables.some((t) => t.name === d.table)) } : {}),
   // the agent's description stays; entries for tables that are not in the merged app map are dropped. Checked against the tables of the output, not
   // against the ones this run found itself: a table the agent read from the database (`defined: database`, kept from the app map) is not in the repository,
   // and in a GitHub Action without a database the skeleton does not find it; its object type then left the sidebar without a word.

@@ -32,6 +32,8 @@ ALEMBIC_OP = re.compile(r"""\bop\.(create_table|drop_table)\(\s*['"]([A-Za-z_]\w
 # everydeck's own schemas (outbox, read bridge, app bridge): their tables count by themselves, as the guide says
 EVERYDECK_SCHEMAS = {"everydeck", "everydeck_outbox", "everydeck_bridge", "everydeck_read"}
 SQL_CREATE_IN_SCHEMA = re.compile(r"""create\s+table\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z_][\w]*)"?\.\s*"?[A-Za-z_][\w]*"?""", re.I)
+# what deletes rows in SQL and the usual clients (Supabase/Drizzle .delete(), Prisma deleteMany, Sequelize/Rails destroy)
+ROW_DELETE = re.compile(r"\b(?:delete|truncate)\b|\.delete\(|delete_?many|destroy", re.I)
 EVERYDECK_TABLES_NOTE = "tables in everydeck's schemas (everydeck_outbox, everydeck_bridge, everydeck_read) count by themselves: leave them out of everydeck_tables; any other table your installation adds stays in tables[] too"
 
 
@@ -194,6 +196,15 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
     # everydeck_tables: tables the everydeck installation created; each must be in the app map
     for i, y in enumerate(b.get("everydeck_tables") or []):
         if y["table"] not in {t["name"] for t in b.get("tables", [])}: errs.append(f"everydeck_tables[{i}] {y['table']}: table {y['table']} is not in the app map; {EVERYDECK_TABLES_NOTE}")
+    # tables the app empties itself (row_deletes) are tables of the app map; a job that deletes names them, and each has its place by schedule
+    names = {t["name"] for t in b.get("tables", [])}
+    for i, d in enumerate(b.get("row_deletes") or []):
+        if d["table"] not in names: errs.append(f"row_deletes[{i}] {d['table']}: table {d['table']} is not in the app map")
+    scheduled = {d["table"] for d in b.get("row_deletes") or [] if d["by"] == "schedule"}
+    for i, j in enumerate(b.get("jobs") or []):
+        for t in j.get("deletes") or []:
+            if t not in names: errs.append(f"jobs[{i}] {j['id']}: deletes table {t}, which is not in the app map")
+            elif t not in scheduled: errs.append(f"jobs[{i}] {j['id']}: deletes {t}, but row_deletes has no entry by schedule for it (the place of the DELETE)")
     # a described screen names only tables and flows of the app map (mirror of the reference check in the contracts)
     for i, sc in enumerate(b.get("screens") or []):
         d = sc.get("described")
@@ -488,6 +499,13 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         if probe and not (shown_near and files.lines(ev["path"]) is not None and int(ev["line"]) <= len(files.lines(ev["path"]) or [])): errs.append(probe[0] + "; name the place in the UI (page or component) that shows the table, or a place that carries a display location of it")
         elif not probe and _is_backend(ev["path"]): errs.append(f"{at}: {ev['path']} is no UI file (backend folder); works_with names the page or component where the users see, create or edit it")
     for i, y in enumerate(b.get("everydeck_tables") or []): _check_evidence(files, y["evidence"], f"everydeck_tables[{i}] {y['table']}", [y["table"]], errs)
+    # the place of a row delete names the table and deletes there (DELETE, TRUNCATE, .delete(), deleteMany, destroy) in the line ± 3
+    for i, d in enumerate(b.get("row_deletes") or []):
+        at = f"row_deletes[{i}] {d['table']}"; ev = d["evidence"]; before = len(errs)
+        _check_evidence(files, ev, at, table_names(d["table"]), errs)
+        lines = files.lines(ev["path"]) if ev["path"] != "database" else None
+        if len(errs) == before and lines is not None and not ROW_DELETE.search("\n".join(lines[max(0, int(ev["line"]) - 1 - LINE_SLACK):int(ev["line"]) + LINE_SLACK])):
+            errs.append(f"{at}: {ev['path']}:{ev['line']} deletes nothing (no DELETE, TRUNCATE, .delete(), deleteMany or destroy ±{LINE_SLACK} lines); name the place that deletes the rows")
     for i, pc in enumerate((b.get("app") or {}).get("production_in_code") or []): _check_evidence(files, pc["evidence"], f"app.production_in_code[{i}] {pc['kind']}", [], errs)
     ic = (b.get("app") or {}).get("icon")
     if ic:   # the icon the app ships: file there, content = checksum, the place names the file (or is the file itself)

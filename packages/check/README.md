@@ -23,6 +23,10 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.21
+
+- Same version as `everydeck-check` 0.3.21, whose app map can name the tables the app deletes rows from itself (`row_deletes[]`, `jobs[].deletes`). `--merge` keeps the agent's entries, except for a table the code no longer has. `validate` refuses an entry without a place, a place that names the table but deletes nothing, a place that deletes another table, a table that is not in the app map, another value for who deletes, a window that is no ISO 8601 duration, and a job that deletes a table without its entry by schedule.
+
 ### 0.3.20
 
 - Same version as `everydeck-check` 0.3.20, whose app map can say how the app builds the address of a photo (`columns[].image_src`). `--merge` keeps the agent's `image_src` like `contact` and `not_contact`.

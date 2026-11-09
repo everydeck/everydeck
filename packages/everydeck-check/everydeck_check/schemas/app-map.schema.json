@@ -1524,6 +1524,15 @@
      },
      "evidence": {
       "$ref": "#/$defs/evidence"
+     },
+     "deletes": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+       "$ref": "#/$defs/name"
+      },
+      "description": "the tables whose rows this job deletes (a DELETE or TRUNCATE it runs, also through a function it calls); each one has its entry with by schedule and the place of the DELETE in row_deletes[]"
      }
     }
    }
@@ -1700,6 +1709,44 @@
     }
    },
    "description": "tables the everydeck installation added to the app (outbox, operator links, the request log of the app bridge) with the place that creates them: everydeck's own, never objects of the app; also tables in everydeck's schemas (everydeck_outbox, everydeck_read, everydeck_bridge) and tables defined in the file of an everydeck adapter"
+  },
+  "row_deletes": {
+   "type": "array",
+   "maxItems": 120,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "table",
+     "by",
+     "evidence"
+    ],
+    "properties": {
+     "table": {
+      "$ref": "#/$defs/name"
+     },
+     "by": {
+      "enum": [
+       "schedule",
+       "on_write",
+       "person"
+      ],
+      "description": "who deletes: schedule = a job or a time window deletes rows without a person (pg_cron, a scheduled function, rows older than a day); on_write = a trigger or the code deletes rows when something else is written, without a person asking; person = only when a person asks for it (delete account, delete this record)"
+     },
+     "older_than": {
+      "type": "string",
+      "pattern": "^P(?:\\d+W)?(?:\\d+D)?(?:T(?:\\d+H)?(?:\\d+M)?)?$",
+      "minLength": 3,
+      "maxLength": 20,
+      "description": "the window the code deletes by, as an ISO 8601 duration in weeks, days, hours or minutes (rows older than a day, older than an hour); only when the code shows it"
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence",
+      "description": "the place of the DELETE or TRUNCATE (function, trigger, pg_cron job, edge function or app code): the line names the table and deletes"
+     }
+    }
+   },
+   "description": "every table whose rows the app deletes itself, with the place of the DELETE and who deletes. everydeck does not count a drop in a table the app empties itself (by schedule or on_write) as data loss; a table deleted only when a person asks stays watched. Facts only, never from a table name: without an entry the table is the app's data"
   },
   "not_in_database": {
    "type": "array",
