@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .detect import OTHER_TREES, other_tree
+
 KEY = re.compile(r"evd_smp_[0-9a-f]{40}")
 NAME = "EVERYDECK_SOURCEMAPS_KEY"
 PUBLIC_PREFIXES = ("VITE_", "NEXT_PUBLIC_", "PUBLIC_", "EXPO_PUBLIC_", "REACT_APP_")
@@ -65,7 +67,7 @@ def key_findings(repo: Path, builds: list[str] | None = None) -> dict[str, Any]:
     skipped: list[dict[str, Any]] = []
     for d, dirs, files in os.walk(repo):
         rel_d = os.path.relpath(d, repo)
-        dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS)
+        dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and (x if rel_d == "." else f"{rel_d}/{x}") not in OTHER_TREES and not other_tree(Path(d) / x))   # never another worktree
         parts = set(Path(rel_d).parts)
         in_build = bool(parts & BUILD_PARTS) or any(rel_d == b or rel_d.startswith(b + "/") for b in extra)
         for f in sorted(files):

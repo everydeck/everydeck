@@ -18,7 +18,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 
-from .detect import SCHEMA_FILE_MAX, url_imports, DRIZZLE_TABLE, FIRESTORE_CALL, FIRESTORE_RULE, MIGRATION_PATH, NPM, PRISMA_MODEL, PY, SKIP_DIRS, SQLALCHEMY_TABLE, SQLMODEL_CLASS, SQL_CREATE, SQL_DROP, SQL_RENAME, _supabase_tables, prisma_tables
+from .detect import SCHEMA_FILE_MAX, url_imports, DRIZZLE_TABLE, FIRESTORE_CALL, FIRESTORE_RULE, MIGRATION_PATH, NPM, PRISMA_MODEL, PY, SKIP_DIRS, SQLALCHEMY_TABLE, SQLMODEL_CLASS, SQL_CREATE, SQL_DROP, SQL_RENAME, _supabase_tables, is_test_sql, prisma_tables, repo_files, sql_code, table_name
 from .reads import frontend_mentions
 
 BLOCKS = ["login", "people_roles", "organizations", "content_status", "moderation", "chats", "uploads", "search", "payments", "email", "push", "ai", "jobs", "imports", "bookings", "settings", "platforms"]
@@ -592,7 +592,7 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
 
 # ── completeness against the repo ──
 def _files_of(repo: Path, suffixes: set[str]):
-    for p in sorted(repo.rglob("*")):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in suffixes or p.stat().st_size > SCHEMA_FILE_MAX:
             continue
@@ -617,14 +617,15 @@ def detect_tables(repo: Path) -> dict[str, str]:
             if name not in found: found[name] = f"{kind} {name} in {rel}"
         suf = rel.suffix
         if suf == ".sql":   # final state of the schema: migrations in file order, DROP TABLE removes; CREATE and DROP in the order of the file
-            text = text.replace("`", '"')   # MySQL names in backticks (Prisma/MySQL migrations)
+            if is_test_sql(rel.as_posix()): continue   # a test script is no part of the schema
+            text = sql_code(text.replace("`", '"'))   # MySQL names in backticks (Prisma/MySQL migrations); no literals and comments
             ops = [(m.start(), "create", m) for m in SQL_CREATE.finditer(text)]
             if MIGRATION_PATH.search(rel.as_posix()): ops += [(m.start(), "drop", m) for m in SQL_DROP.finditer(text)]
             for _, op, m in sorted(ops, key=lambda x: x[0]):
                 if op == "drop": found.pop(m.group(1), None); continue
                 sm = SQL_CREATE_IN_SCHEMA.match(text, m.start())
                 if sm and sm.group(1).lower() in EVERYDECK_SCHEMAS: continue   # the outbox copied from the SDK (everydeck_outbox.event, .capture_error)
-                add(m.group(1), "table")
+                if name := table_name(text, m): add(name, "table")
             for old, new in SQL_RENAME.findall(text):   # renamed: the new name is in this file
                 if found.pop(old, None) is not None: add(new, "table")
         elif suf == ".prisma":
@@ -1017,7 +1018,7 @@ def completeness_errors(b: dict[str, Any], repo: Path) -> list[str]:
 def exposure_errors(repo: Path) -> list[str]:
     """The reader schema everydeck_read must not be reachable through the Supabase API (supabase/config.toml [api] schemas)."""
     errs: list[str] = []
-    for cfg in sorted(repo.rglob("config.toml")):
+    for cfg in (p for p in repo_files(repo) if p.name == "config.toml"):
         rel = cfg.relative_to(repo).as_posix()
         if any(part in SKIP_DIRS for part in rel.split("/")) or not rel.endswith("supabase/config.toml") and rel != "config.toml": continue
         try: text = cfg.read_text(encoding="utf-8", errors="replace")

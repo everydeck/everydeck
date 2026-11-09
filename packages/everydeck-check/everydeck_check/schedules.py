@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .detect import SCHEMA_FILE_MAX, SKIP_DIRS
+from .detect import SCHEMA_FILE_MAX, SKIP_DIRS, repo_files
 
 # pg_cron: cron.schedule('name', 'expr', …) or cron.schedule('expr', …) (unnamed); a later cron.unschedule('name') takes it back
 PG_SCHEDULE = re.compile(r"""\bcron\.schedule(?:_in_database)?\s*\(\s*(?:'([^']{1,200})'|\$\w*\$)?\s*(?:,\s*'([^']{1,100})')?""", re.I)
@@ -25,7 +25,7 @@ SHOWN = 50   # the inventory lists at most this many schedules (schema maxItems)
 
 
 def _files(repo: Path):
-    for p in sorted(repo.rglob("*")):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file(): continue
         yield rel, p

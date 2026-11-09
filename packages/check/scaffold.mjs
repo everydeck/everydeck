@@ -13,7 +13,7 @@
 // with places; `--merge` keeps these parts from an existing app map and renews only the skeleton parts.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative, dirname, resolve } from 'node:path';
+import { join, relative, dirname, resolve, sep } from 'node:path';
 import { analyseReads } from './scaffold-reads.mjs';
 import { ICON_MAX_BYTES, findIcon, iconsTooLarge } from './scaffold-icon.mjs';
 import { candidateWays, detectPeople, keepAgentFacts, setupQuestions } from './rules/everydeck-rules.mjs';
@@ -26,8 +26,17 @@ const files = [];
 // What the skeleton cannot read (a dead symlink, a folder without rights, a file that breaks a part of the analysis) never stops it: it is listed in
 // open[] of the summary with the place and the reason, and the agent decides (before, a dead symlink stopped the skeleton of real apps)
 const open = []; const note = (path, reason) => { if (open.length < 50 && !open.some((x) => x.path === path && x.reason === reason)) open.push({ path, reason: String(reason).slice(0, 200) }); };
+// Like git and ripgrep, folders and files .gitignore leaves out, other worktrees (.claude/worktrees, `git worktree add` into the folder)
+// and other repositories (a folder with its own .git) are never entered; a submodule (gitdir …/modules/…) is part of the app. Before, the skeleton went
+// through ~85 worktrees under .claude/worktrees and ran out of memory.
+const ignored = (() => { try {
+  const s = new Set(execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }).split('\0').filter(Boolean).map((p) => p.replace(/\/$/, '')));
+  return s.has('') || s.has('.') ? new Set() : s;   // the repository itself ignored by an outer one: nothing is left out
+} catch { return new Set(); } })();
+const OTHER_TREES = new Set(['.claude/worktrees']);   // Claude Code's worktrees of the same repository (also without their .git, as a copy)
+const otherTree = (dir) => { const g = join(dir, '.git'); let st; try { st = statSync(g); } catch { return false; } if (st.isDirectory()) return true; try { return !readFileSync(g, 'utf8').replace(/\\/g, '/').includes('/modules/'); } catch { return true; } };
 (function walk(dir, depth) { if (depth > 7) return; let names; try { names = readdirSync(dir); } catch (e) { note(relative(repo, dir) || '.', `cannot list this folder (${e.code ?? e.message})`); return; }
-  for (const n of names) { if (SKIP.has(n)) continue; const p = join(dir, n); let st; try { st = statSync(p); } catch (e) { note(relative(repo, p), `cannot read (${e.code === 'ENOENT' ? 'a link to a file or folder that does not exist' : e.code ?? e.message})`); continue; } if (st.isDirectory()) walk(p, depth + 1); else if (st.size < 2_000_000) files.push(p); } })(repo, 0);
+  for (const n of names) { if (SKIP.has(n)) continue; const p = join(dir, n); const r = relative(repo, p).split(sep).join('/'); if (ignored.has(r)) continue; let st; try { st = statSync(p); } catch (e) { note(relative(repo, p), `cannot read (${e.code === 'ENOENT' ? 'a link to a file or folder that does not exist' : e.code ?? e.message})`); continue; } if (st.isDirectory()) { if (!OTHER_TREES.has(r) && !otherTree(p)) walk(p, depth + 1); } else if (st.size < 2_000_000) files.push(p); } })(repo, 0);
 const rel = (p) => (p ? relative(repo, p) : '');
 const text = (p) => { try { return readFileSync(p, 'utf8'); } catch (e) { note(rel(p), `cannot read (${e.code ?? e.message})`); return ''; } };
 const lineOf = (src, idx) => src.slice(0, idx).split('\n').length;
@@ -73,24 +82,52 @@ const stripSql = (src) => src.replace(/--[^\n]*/g, (m) => ' '.repeat(m.length)).
 // A reset or seed script outside the migrations (scripts/sql/dev-reset.sql: DROP TABLE IF EXISTS for every table, sorted before drizzle/) is no step of
 // the schema: its DROP TABLE removes nothing, its CREATE TABLE only adds a table the migrations do not create (before, such a script removed every table of an app).
 const isMigration = (p) => /(^|\/)(migrations?|drizzle|alembic|versions|schema|schemas|sql\/migrations|db\/migrate)(\/|$)/i.test(rel(p)) || /(^|\/)(\d{3,}[^/]*|schema)\.sql$/i.test(rel(p));
-const sqlFiles = files.filter((p) => p.endsWith('.sql')).sort((a, b) => Number(isMigration(b)) - Number(isMigration(a)) || (a < b ? -1 : a > b ? 1 : 0));   // migrations first, then other SQL files
+// Tables only from what the app runs, the same rule as everydeck-check. Never from a test script (a folder tests/, e2e/ or …-test/, a file
+// test-….sql, …-test.sql, ….test.sql; a migration folder is never one), never from text in quotes or a comment (RAISE NOTICE 'create table worked (…)'),
+// never an SQL word without quotes (CREATE TABLE IF …: "if"); in quotes it is a name ("user"). Before, both landed in the app map of a real app.
+const TEST_DIR = /^(tests?|__tests__|e2e|cypress|spec)$|[-_.]tests?$/i; const TEST_SQL_FILE = /^tests?[-_.]|[-_.]tests?\.sql$|\.(test|spec)\.sql$/i;
+const MIGRATION_DIRS = new Set(['migrations', 'migration', 'drizzle', 'alembic', 'versions', 'migrate']);
+const isTestSql = (r) => { const dirs = r.split('/'); const name = dirs.pop();   // r: the path in the repository, with /
+  return dirs.some((d) => TEST_DIR.test(d)) || (!dirs.some((d) => MIGRATION_DIRS.has(d.toLowerCase())) && TEST_SQL_FILE.test(name)); };
+const SQL_WORDS = new Set(`all and any as asc between by case check column constraint create default desc distinct do else end exists false for foreign from
+  grant group having if in into is join like limit not null on only or order primary references returning select set table then to true union
+  unique using values when where with`.split(/\s+/));
+// The SQL without what is no statement: the inside of '…' literals and comments (-- …, /* … */) become spaces, lines and places stay; "…" names and
+// $$ bodies stay (a DO block creates tables). Read from the file as it is (stripSql blanks -- also inside a literal)
+const sqlCode = (s) => {
+  const out = s.split(''); const n = s.length; const blank = (a, b) => { for (let k = a; k < Math.min(b, n); k++) if (out[k] !== '\n') out[k] = ' '; };
+  for (let i = 0; i < n;) {
+    const c = s[i]; const two = s.slice(i, i + 2);
+    if (c === '"') { const j = s.indexOf('"', i + 1); i = j < 0 ? n : j + 1; }   // a name: stays
+    else if (two === '--') { let j = s.indexOf('\n', i); if (j < 0) j = n; blank(i, j); i = j; }
+    else if (two === '/*') { let j = s.indexOf('*/', i + 2); j = j < 0 ? n : j + 2; blank(i, j); i = j; }
+    else if (c === "'") {   // '' is a quote inside; E'…' also \'
+      const esc = i > 0 && /[eE]/.test(s[i - 1]) && !(i > 1 && /\w/.test(s[i - 2])); let j = i + 1;
+      while (j < n) { if (esc && s[j] === '\\') { j += 2; continue; } if (s[j] === "'" && s[j + 1] === "'") { j += 2; continue; } if (s[j] === "'") break; j++; }
+      blank(i + 1, j); i = j + 1;
+    } else i++;
+  }
+  return out.join('');
+};
+const tableName = (code, m) => (code[m.indices[2][0] - 1] === '"' || !SQL_WORDS.has(m[2].toLowerCase()) ? m[2] : null);   // the table of a CREATE TABLE match, or null for an SQL word
+const sqlFiles = files.filter((p) => p.endsWith('.sql') && !isTestSql(rel(p).split(sep).join('/'))).sort((a, b) => Number(isMigration(b)) - Number(isMigration(a)) || (a < b ? -1 : a > b ? 1 : 0));   // migrations first, then other SQL files
 for (const f of sqlFiles) {
-  const src = stripSql(text(f));
+  const raw = text(f); const src = stripSql(raw); const code = sqlCode(raw.replace(/`/g, '"'));   // CREATE and DROP only in code, the same places as src
   // CREATE and DROP in the order of the file (Prisma: DROP TABLE IF EXISTS "x" CASCADE; CREATE TABLE "x" (…) in one migration; before, every DROP ran
   // after every CREATE of the file and the table was lost)
   const ddl = [];
-  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\s+(?:select\s+\*\s+from|table)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ddl.push({ at: m.index, run: () => {   // CREATE TABLE … AS SELECT * FROM y (or AS TABLE y): the same columns as y
+  for (const m of code.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\s+(?:select\s+\*\s+from|table)\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gid)) if (tableName(code, m)) ddl.push({ at: m.index, run: () => {   // CREATE TABLE … AS SELECT * FROM y (or AS TABLE y): the same columns as y
     const at = { path: rel(f), line: lineOf(src, m.index), symbol: m[2] };
     const t = addTable(m[2], 'table', at, m[1]); const from = tables.get(m[3]); if (from && !t.columns.length) t.columns = from.columns.map((c) => ({ ...c }));
     t.copy_of = { table: m[3], evidence: at };   // a copy of y (for example a backup before a change), a fact with its place
   } });
-  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\b/gi)) ddl.push({ at: m.index + 0.5, run: () => addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]) });   // CREATE TABLE … AS: without a column list
-  for (const m of src.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi)) ddl.push({ at: m.index, run: () => {
+  for (const m of code.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s+as\b/gid)) if (tableName(code, m)) ddl.push({ at: m.index + 0.5, run: () => addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]) });   // CREATE TABLE … AS: without a column list
+  for (const m of code.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gid)) if (tableName(code, m)) ddl.push({ at: m.index, run: () => {
     const start = m.index + m[0].length; let depth = 1, i = start; while (i < src.length && depth > 0) { if (src[i] === '(') depth++; if (src[i] === ')') depth--; i++; }
     const existed = tables.has(m[2]); const t = addTable(m[2], 'table', { path: rel(f), line: lineOf(src, m.index), symbol: m[2] }, m[1]);
     if (!existed) parseColumns(src.slice(start, i - 1), f, lineOf(src, start), t);   // CREATE TABLE IF NOT EXISTS on an existing table changes nothing (as in Postgres; copies of migrations in two folders)
   } });
-  if (isMigration(f)) for (const m of src.matchAll(/drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ddl.push({ at: m.index, run: () => tables.delete(m[1]) });
+  if (isMigration(f)) for (const m of code.matchAll(/drop\s+table\s+(?:if\s+exists\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gi)) ddl.push({ at: m.index, run: () => tables.delete(m[1]) });
   for (const d of ddl.sort((x, y) => x.at - y.at)) d.run();
   // ALTER TABLE x RENAME TO y: from here on the table is called y (place: the rename, where the name is); references from other tables follow
   for (const m of src.matchAll(/alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s+rename\s+to\s+"?([A-Za-z_]\w*)"?/gi)) {
@@ -523,7 +560,9 @@ for (const m of reads.not_shown) { const t = tables.get(m.table); if (!t) contin
 // Without a database (the GitHub Action) the skeleton sees only the migrations; what the agent read from the database with --db and the migrations do
 // not say (a foreign key, the allowed values, a default) stays on the column. With --db the database decides. The skeleton replaces a fact only with its own.
 const dbFactsOf = (oc, c) => ({ ...(oc.fk && !c.fk ? { fk: oc.fk } : {}), ...(oc.enum?.length && !c.enum?.length ? { enum: oc.enum } : {}), ...(oc.default !== undefined && c.default === undefined ? { default: oc.default } : {}) });
-const keptOld = (merge?.tables ?? []).filter((x) => !tables.has(x.name) && !notInDb.has(x.name) && (!catalog || catalog.tables.some((d) => d.name === x.name)));
+// Except what an older skeleton read from a test script or an SQL word ("if"): gone with the next --merge, nothing for the agent to restore
+const readWrongly = (x) => SQL_WORDS.has(String(x.name).toLowerCase()) || (typeof x.defined?.path === 'string' && x.defined.path.endsWith('.sql') && isTestSql(x.defined.path));
+const keptOld = (merge?.tables ?? []).filter((x) => !tables.has(x.name) && !notInDb.has(x.name) && !readWrongly(x) && (!catalog || catalog.tables.some((d) => d.name === x.name)));
 // Where this run finds a mention again (same file, within 3 lines), the agent's sentence for it stays (like an override in a
 // lockfile); everything else of not_shown is renewed. Before, every --merge put the generic sentence back and the agent wrote its own again.
 const keptNotShown = (fresh, old) => fresh.map((n) => (old ?? []).find((o) => o.path === n.path && Math.abs(o.line - n.line) <= 3 && o.fact) ?? n)

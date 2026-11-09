@@ -22,7 +22,7 @@ import re
 from . import rules
 from .app_map import candidate_ways, detect_providers, detect_tables, scan_candidates
 from .schedules import detect_schedules
-from .detect import CODE_EXT, CODE_FILE_MAX, NPM, PACKAGE_DEPTH, PY, SCHEMA_FILE_MAX, SKIP_DIRS, _match, detect_blocks
+from .detect import CODE_EXT, CODE_FILE_MAX, NPM, PACKAGE_DEPTH, PY, SCHEMA_FILE_MAX, SKIP_DIRS, _match, detect_blocks, repo_files
 
 # code that everydeck-check does not read: a backend in this language is "not inspected"; native shells of an app (ios/, android/) are no backend
 UNSUPPORTED = {".go": "go", ".rb": "ruby", ".php": "php", ".java": "java", ".kt": "kotlin", ".cs": "csharp", ".ex": "elixir", ".exs": "elixir", ".rs": "rust", ".scala": "scala"}
@@ -65,7 +65,7 @@ def digest_of(inv: dict[str, Any]) -> str:
 
 def _scanned(repo: Path) -> dict[str, Any]:
     files = 0; skipped: list[dict[str, str]] = []; other: dict[str, list[str]] = {}
-    for p in sorted(repo.rglob("*")):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file(): continue
         if p.name in PACKAGE_FILES and len(rel.parts) > PACKAGE_DEPTH:
@@ -123,7 +123,7 @@ EVERYDECK_FILES_MAX = 50
 def server_settings(repo: Path) -> list[dict[str, Any]]:
     """Every place in the app's code that reads the everydeck settings from public.everydeck_server_config() (path, line), at most SERVER_SETTINGS_MAX."""
     out: list[dict[str, Any]] = []
-    for p in sorted(repo.rglob("*")):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in CODE_EXT or p.stat().st_size > CODE_FILE_MAX: continue
         try: text = p.read_text(encoding="utf-8", errors="replace")
@@ -151,7 +151,7 @@ CONSENT_BANNERS_MAX = 20
 def consent_banners(repo: Path) -> list[dict[str, Any]]:
     """Every place in the app's frontend code that asks for consent (path, line), at most CONSENT_BANNERS_MAX; everydeck's own consent call is not one."""
     out: list[dict[str, Any]] = []
-    for p in sorted(repo.rglob("*")):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         # a consent manager is often a script tag in the page itself (index.html of Vite, Create React App)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or (p.suffix not in CODE_EXT and p.suffix != ".html") or p.suffix in (".py", ".dart") or p.stat().st_size > CODE_FILE_MAX: continue
@@ -167,7 +167,7 @@ def consent_banners(repo: Path) -> list[dict[str, Any]]:
 def everydeck_files(repo: Path) -> list[str]:
     """everydeck's own files in the repo (migrations everydeck_*, Edge Functions everydeck-*), to compare with the plan of everydeck_live_files."""
     out = []
-    for p in sorted(repo.rglob("*")):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file(): continue
         if EVERYDECK_FILE.search(rel.as_posix()): out.append(rel.as_posix())

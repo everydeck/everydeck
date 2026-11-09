@@ -24,6 +24,12 @@ everydeck's rules ship inside the package (`everydeck_check/rules/everydeck-rule
 
 ## Changes
 
+### 0.3.22
+
+- The scan reads only the app's own files, as git and ripgrep do: folders and files `.gitignore` leaves out, `node_modules`, other worktrees in the folder (`.claude/worktrees`, `git worktree add`) and other repositories inside it are never entered; a submodule is read. Before, a repository with many worktrees ran the scan out of memory.
+- Tables come only from what the app runs: never from a test script (a folder `tests/`, `e2e/` or `…-test/`, a file `test-….sql`, `…-test.sql` or `….test.sql`; a migration folder is never one), never from text in quotes or a comment, never from an SQL word without quotes (`CREATE TABLE IF …`). `validate --repo` no longer asks for such tables (shared version with `@everydeck/check` 0.3.22).
+- A review queue in `moderation.queues[]` may say more (all optional): `open_when` with the conditions of the app's own list beyond `closed` (`where`: a column of the entry or of the records it is about, with `equals`, `in`, `not_in`, `at_least`, `at_most` or `set`, and the place of the query), so everydeck counts open entries the way the app does; `reason_words` with the app's own words for the keys of a reason that is an object (`{key}`, `{key|km}`); `pair_column` for the second record of a pair; `screen` with the path of the page where the team works the queue. `validate` refuses a condition on a column its table does not have, a condition that says nothing, a condition on records when the entry points to no record, and `reason_words` without `reason_column` (shared version with `@everydeck/check` 0.3.22).
+
 ### 0.3.21
 
 - The app map can name every table whose rows the app deletes itself (`row_deletes[]`, optional): the place of the DELETE or TRUNCATE, who deletes (`schedule` for a job or a time window, `on_write` for a trigger or code that deletes while something else is written, `person` when a person asks for it) and the window (`older_than`, ISO 8601) when the code shows it; a job that deletes names its tables in `jobs[].deletes`. `validate` refuses an entry without a place, a place that names the table but deletes nothing, a place that deletes another table, a table that is not in the app map, another value for who deletes, a window that is no ISO 8601 duration, and a job that deletes a table without its entry by schedule. everydeck no longer warns about data loss in a table the app empties itself.

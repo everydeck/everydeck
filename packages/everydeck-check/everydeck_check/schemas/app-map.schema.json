@@ -2521,6 +2521,144 @@
        "evidence": {
         "$ref": "#/$defs/evidence",
         "description": "where the app shows the queue to its team"
+       },
+       "open_when": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "where",
+         "evidence"
+        ],
+        "description": "what the app's own list counts as open beyond closed (a score threshold, one kind only, records not deleted), so everydeck shows the same number; leave it out when the app lists every entry that is not closed",
+        "properties": {
+         "where": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+           "type": "object",
+           "additionalProperties": false,
+           "required": [
+            "column"
+           ],
+           "description": "one condition of the app's own list; all conditions hold for an entry the app shows as open",
+           "properties": {
+            "column": {
+             "$ref": "#/$defs/name"
+            },
+            "of": {
+             "enum": [
+              "entry",
+              "records"
+             ],
+             "description": "entry (default): a column of the queue table; records: a column of the table of the record(s) the entry is about (target, and the second record of a pair), every one of them must hold"
+            },
+            "equals": {
+             "type": "string",
+             "minLength": 1,
+             "maxLength": 80,
+             "description": "the column has this value (as text: true, open, 3)"
+            },
+            "in": {
+             "type": "array",
+             "minItems": 1,
+             "maxItems": 20,
+             "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+             },
+             "description": "the column has one of these values"
+            },
+            "not_in": {
+             "type": "array",
+             "minItems": 1,
+             "maxItems": 20,
+             "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+             },
+             "description": "the column has none of these values (an empty column holds)"
+            },
+            "at_least": {
+             "type": "number",
+             "description": "the column is a number at least this (a score threshold)"
+            },
+            "at_most": {
+             "type": "number",
+             "description": "the column is a number at most this"
+            },
+            "set": {
+             "type": "boolean",
+             "description": "true: the column is set (not empty, not false); false: it is empty"
+            }
+           }
+          }
+         },
+         "evidence": {
+          "$ref": "#/$defs/evidence",
+          "description": "where the app selects the entries it lists (the query, the function, the filter in the page)"
+         }
+        }
+       },
+       "pair_column": {
+        "$ref": "#/$defs/name",
+        "description": "the second record of a pair (for example matched_property_id), when the entry compares two records; leave it out when the table has a second foreign key to the same table as the target"
+       },
+       "reason_words": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "description": "when reason_column holds an object (JSON with keys such as image, distance_m): the app's own words for its keys, as the app shows them; everydeck builds the reason as a sentence from them instead of showing the object",
+        "items": {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "key",
+          "says",
+          "evidence"
+         ],
+         "properties": {
+          "key": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 64,
+           "description": "the key; the words show when its value is set (not false, not 0, not empty)"
+          },
+          "says": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 120,
+           "description": "the words, with {key} for the value of any key of the object and {key|km} for metres shown as kilometres, for example '{matching_photos} of {photos} photos match' or '{distance_m|km} km apart'"
+          },
+          "evidence": {
+           "$ref": "#/$defs/evidence",
+           "description": "where the app shows these words"
+          }
+         }
+        }
+       },
+       "screen": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "path",
+         "evidence"
+        ],
+        "description": "the page of the app where the team works the queue (its admin page); everydeck links to it when the app map names no function to close an entry",
+        "properties": {
+         "path": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 200,
+          "description": "the path of the page in the app, for example /admin/duplicates"
+         },
+         "evidence": {
+          "$ref": "#/$defs/evidence",
+          "description": "the route of the page"
+         }
+        }
        }
       }
      }

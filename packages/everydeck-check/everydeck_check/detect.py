@@ -19,7 +19,9 @@ For a false hit the agent writes an entry not_everydeck with a reason.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +30,39 @@ CODE_FILE_MAX = 400_000      # code hints: larger source files are skipped
 SCHEMA_FILE_MAX = 2_000_000  # schema detection: larger files are skipped
 PACKAGE_DEPTH = 3            # package.json, requirements, pubspec: folders deeper than this are not read
 SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", ".next", ".expo", "coverage", "__pycache__", ".venv", "venv", "Pods", ".everydeck", "everydeck"}
+OTHER_TREES = (".claude/worktrees",)   # Claude Code's worktrees of the same repository (also without their .git, as a copy)
+
+
+def other_tree(d: Path) -> bool:
+    """A folder with its own .git: another worktree (gitdir …/worktrees/…) or another repository. A submodule (gitdir …/modules/…) is part of the app."""
+    g = d / ".git"
+    if g.is_dir(): return True
+    if not g.is_file(): return False
+    try: return "/modules/" not in g.read_text(encoding="utf-8", errors="replace").replace("\\", "/")
+    except OSError: return True
+
+
+def _git_ignored(repo: Path) -> set[str]:
+    """What git leaves out (.gitignore, .git/info/exclude, the global excludes), an ignored folder as one entry; empty outside git."""
+    try: out = subprocess.run(["git", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], cwd=repo, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError): return set()
+    if out.returncode != 0: return set()
+    paths = {p.rstrip("/") for p in out.stdout.decode("utf-8", "replace").split("\0") if p}
+    return set() if paths & {"", "."} else paths   # the repository itself ignored by an outer one: nothing is left out
+
+
+def repo_files(repo: Path, ignored: bool = False) -> list[Path]:
+    """Every file of the app in the repository, sorted. Like git and ripgrep: folders .gitignore leaves out, node_modules, other worktrees
+    (.claude/worktrees, `git worktree add` into the folder) and other repositories are never entered. With ignored=True the ignored files stay
+    (env files). Before, every scan went through `rglob("*")` and read each file of ~85 worktrees under .claude/worktrees: out of memory in a real app."""
+    skip = set() if ignored else _git_ignored(repo)
+    out: list[Path] = []
+    for d, dirs, files in os.walk(repo):
+        rel = os.path.relpath(d, repo).replace(os.sep, "/"); rel = "" if rel == "." else rel
+        at = (lambda n: f"{rel}/{n}") if rel else (lambda n: n)
+        dirs[:] = [x for x in dirs if x not in (".git", "node_modules") and at(x) not in skip and at(x) not in OTHER_TREES and not other_tree(Path(d) / x)]
+        out += [Path(d) / f for f in files if at(f) not in skip]
+    return sorted(out)
 
 # dependency → block (npm). Prefix match with "*".
 NPM: dict[str, str] = {
@@ -111,6 +146,57 @@ def prisma_tables(text: str) -> list[str]:
 
 # a migration step of the schema; a reset or seed script elsewhere (scripts/sql/dev-reset.sql) drops nothing, the same rule as the scaffold
 MIGRATION_PATH = re.compile(r"(^|/)(migrations?|drizzle|alembic|versions|schema|schemas|sql/migrations|db/migrate)(/|$)|(^|/)(\d{3,}[^/]*|schema)\.sql$", re.I)
+
+# Tables only from what the app runs, the same rule as the scaffold. Never from a test script (a folder tests/, e2e/ or …-test/, a file
+# test-….sql, …-test.sql, ….test.sql; a migration folder is never one), never from text in quotes or a comment (RAISE NOTICE 'create table worked (…)'),
+# never an SQL word without quotes (CREATE TABLE IF …: "if"); in quotes it is a name ("user"). Before, both landed in the app map of a real app.
+TEST_DIR = re.compile(r"^(tests?|__tests__|e2e|cypress|spec)$|[-_.]tests?$", re.I)
+TEST_SQL_FILE = re.compile(r"^tests?[-_.]|[-_.]tests?\.sql$|\.(test|spec)\.sql$", re.I)
+MIGRATION_DIRS = {"migrations", "migration", "drizzle", "alembic", "versions", "migrate"}
+SQL_WORDS = frozenset("""all and any as asc between by case check column constraint create default desc distinct do else end exists false for foreign from
+    grant group having if in into is join like limit not null on only or order primary references returning select set table then to true union
+    unique using values when where with""".split())
+
+
+def is_test_sql(rel: str) -> bool:
+    *dirs, name = rel.split("/")
+    if any(TEST_DIR.search(d) for d in dirs): return True
+    return not any(d.lower() in MIGRATION_DIRS for d in dirs) and bool(TEST_SQL_FILE.search(name))
+
+
+def sql_code(text: str) -> str:
+    """The SQL without what is no statement: the inside of '…' literals and comments (-- …, /* … */) become spaces, lines and places stay.
+    "…" names and $$ bodies stay (a DO block creates tables)."""
+    out = list(text); i = 0; n = len(text)
+
+    def blank(a: int, b: int) -> None:
+        for k in range(a, min(b, n)):
+            if out[k] != "\n": out[k] = " "
+    while i < n:
+        c = text[i]; two = text[i:i + 2]
+        if c == '"':   # a name: stays
+            j = text.find('"', i + 1); i = n if j < 0 else j + 1
+        elif two == "--":
+            j = text.find("\n", i); j = n if j < 0 else j; blank(i, j); i = j
+        elif two == "/*":
+            j = text.find("*/", i + 2); j = n if j < 0 else j + 2; blank(i, j); i = j
+        elif c == "'":   # '' is a quote inside; E'…' also \'
+            esc = i > 0 and text[i - 1] in "eE" and not (i > 1 and (text[i - 2].isalnum() or text[i - 2] == "_")); j = i + 1
+            while j < n:
+                if esc and text[j] == "\\": j += 2; continue
+                if text[j] == "'" and text[j + 1:j + 2] == "'": j += 2; continue
+                if text[j] == "'": break
+                j += 1
+            blank(i + 1, j); i = j + 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+def table_name(text: str, m: re.Match[str]) -> str | None:
+    """The table of a CREATE TABLE match, or None for an SQL word without quotes."""
+    name = m.group(1); quoted = m.start(1) > 0 and text[m.start(1) - 1] == '"'
+    return name if quoted or name.lower() not in SQL_WORDS else None
 DRIZZLE_TABLE = re.compile(r"""\b(?:pgTable|mysqlTable|sqliteTable)\(\s*['"]([A-Za-z_]\w*)['"]""")
 SQLALCHEMY_TABLE = re.compile(r"""__tablename__\s*(?::\s*[\w\[\]]+\s*)?=\s*['"]([A-Za-z_]\w*)['"]""")   # also annotated (__tablename__: str = "x")
 # SQLModel: class X(Base, table=True) without __tablename__ is the table x (class name in lower case)
@@ -135,7 +221,7 @@ def _match(name: str, table: dict[str, str]) -> str | None:
 
 
 def _walk(repo: Path, names: set[str], max_depth: int = PACKAGE_DEPTH):
-    for p in repo.rglob("*"):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or len(rel.parts) > max_depth or not p.is_file():
             continue
@@ -178,7 +264,7 @@ def detect_schema(repo: Path) -> list[tuple[str, str]]:
         if b and b not in found:
             found[b] = f"{kind} {name} in {rel}"
 
-    for p in sorted(repo.rglob("*")):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.stat().st_size > SCHEMA_FILE_MAX:
             continue
@@ -190,7 +276,10 @@ def detect_schema(repo: Path) -> list[tuple[str, str]]:
         except OSError:
             continue
         if suf == ".sql":
-            for name in SQL_CREATE.findall(text): add(name, "table", rel)
+            if is_test_sql(rel.as_posix()): continue
+            code = sql_code(text)
+            for m in SQL_CREATE.finditer(code):
+                if name := table_name(code, m): add(name, "table", rel)
         elif suf == ".prisma":
             for n in prisma_tables(text): add(n, "model", rel)
         elif suf == ".rules":
@@ -252,7 +341,7 @@ def detect_blocks(repo: Path) -> list[Detected]:
         except Exception:
             pass
     # code hints: only unambiguous imports/calls, limited to source code
-    for p in repo.rglob("*"):
+    for p in repo_files(repo):
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in CODE_EXT or p.stat().st_size > CODE_FILE_MAX:
             continue

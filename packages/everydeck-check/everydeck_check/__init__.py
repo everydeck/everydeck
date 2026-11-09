@@ -24,6 +24,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from .detect import repo_files
+
 __all__ = ["validate_manifest", "reference_errors", "digest", "check_drift", "freeze_lock", "DriftReport", "Finding", "split_proposal", "reverses_of", "every_ok", "iso_duration_seconds"]
 
 
@@ -670,7 +672,7 @@ def _relay_in_text(path: Path, text: str) -> bool:
 def _relay_in_repo(repo: Path) -> bool:
     """A relay of the app anywhere in the repository; not in the bundle under vendor/, not in node_modules."""
     skip = {".git", "node_modules", "vendor", "dist", "build", ".next", "__pycache__", ".venv"}
-    for f in repo.rglob("*"):
+    for f in repo_files(repo):
         if not f.is_file() or any(p in skip for p in f.relative_to(repo).parts): continue
         if f.suffix not in {".mjs", ".js", ".ts", ".yml", ".yaml", ".toml"} and f.name not in _START_FILES: continue
         try:
@@ -733,7 +735,7 @@ def check_screens(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> Non
     if not wanted:
         return
     found: set[str] = set(); browser = False
-    for f in repo.rglob("*"):
+    for f in repo_files(repo):
         if any(part in _SCREEN_SKIP for part in f.relative_to(repo).parts) or not f.is_file() or f.suffix not in _SCREEN_EXT:
             continue
         try:
@@ -763,7 +765,7 @@ def check_subject(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> Non
     if not people:
         return
     browser = False
-    for f in repo.rglob("*"):
+    for f in repo_files(repo):
         if any(part in _SCREEN_SKIP for part in f.relative_to(repo).parts) or not f.is_file() or f.suffix not in _SCREEN_EXT or f.suffix in {".json", ".py", ".html"}:
             continue
         try:

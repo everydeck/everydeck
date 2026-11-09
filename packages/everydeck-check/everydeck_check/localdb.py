@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from .detect import PACKAGE_DEPTH, SKIP_DIRS
+from .detect import PACKAGE_DEPTH, SKIP_DIRS, repo_files
 from .stack import stack_dir
 
 SUPABASE_DB_PORT = 54322   # `supabase init` writes [db] port = 54322; the CLI uses it when config.toml sets none
@@ -56,7 +56,7 @@ def _db_port(config: Path) -> int:
 def env_files(repo: Path) -> list[Path]:
     """The app's env files (also git-ignored ones), at most PACKAGE_DEPTH folders deep; no examples."""
     out: list[Path] = []
-    for p in sorted(repo.rglob(".env*")):
+    for p in (p for p in repo_files(repo, ignored=True) if p.name.startswith(".env")):
         rel = p.relative_to(repo).parts
         if len(rel) - 1 > PACKAGE_DEPTH or any(part in SKIP_DIRS for part in rel[:-1]) or not p.is_file(): continue
         if ENV_FILE.match(p.name) and not p.name.endswith(NOT_ENV): out.append(p)

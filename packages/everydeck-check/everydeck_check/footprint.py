@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .detect import repo_files
+
 LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "poetry.lock", "uv.lock", "Pipfile.lock")
 MEDIA = re.compile(r"\.(png|jpe?g|gif|webp|webm|mp4|mov|har|trace|zip)$", re.I)
 LEFT_DIRS = re.compile(r"(^|/)(\.playwright-mcp|\.playwright|playwright-report|test-results)/")
@@ -70,7 +72,7 @@ def outside_writes(repo: Path, base: str, url: str) -> list[dict[str, str]]:
     since = _git(repo, "show", "-s", "--format=%cd", "--date=format-local:%Y%m%d%H%M%S", base).strip()
     known = _rows(url, "SELECT to_regclass('supabase_migrations.schema_migrations') IS NOT NULL")[0][0] in ("t", "True")
     rows = _rows(url, "SELECT version, coalesce(name, '') FROM supabase_migrations.schema_migrations ORDER BY version") if known else []
-    files = {p.name.split("_", 1)[0] for p in repo.rglob("migrations/*.sql") if "node_modules" not in p.parts}
+    files = {p.name.split("_", 1)[0] for p in repo_files(repo) if p.parent.name == "migrations" and p.suffix == ".sql"}
     return [{"what": f"migration {v} {n}".strip(), "fact": "applied to the database during the setup, but not in this repository: it was written outside the repository"}
             for v, n in rows if v >= since and v not in files]
 

@@ -23,6 +23,11 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.22
+
+- Same version as `everydeck-check` 0.3.22. The scaffold never enters folders `.gitignore` leaves out, other worktrees in the folder (`.claude/worktrees`, `git worktree add`) or other repositories inside it; a repository with many worktrees no longer runs it out of memory. Tables come only from what the app runs: never from a test script, text in quotes, a comment or an SQL word without quotes (`CREATE TABLE IF …`). `--merge` drops what an older scaffold read from there, in `tables` and in `not_in_database`, so nothing has to be added back by hand.
+- The app map schema of `everydeck-check` 0.3.22 takes new optional fields on `moderation.queues[]`: `open_when`, `reason_words`, `pair_column` and `screen`. `--merge` keeps them like every field the agent sets; nothing else changes in the scaffold.
+
 ### 0.3.21
 
 - Same version as `everydeck-check` 0.3.21, whose app map can name the tables the app deletes rows from itself (`row_deletes[]`, `jobs[].deletes`). `--merge` keeps the agent's entries, except for a table the code no longer has. `validate` refuses an entry without a place, a place that names the table but deletes nothing, a place that deletes another table, a table that is not in the app map, another value for who deletes, a window that is no ISO 8601 duration, and a job that deletes a table without its entry by schedule.

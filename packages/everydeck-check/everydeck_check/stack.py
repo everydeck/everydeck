@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .detect import PACKAGE_DEPTH, SKIP_DIRS
+from .detect import PACKAGE_DEPTH, SKIP_DIRS, repo_files
 
 STACK_RESTART_TIMEOUT = 300   # seconds per command (supabase stop, supabase start)
 
@@ -23,7 +23,7 @@ STALLED = ('Do not restart it any other way (no npx supabase, no pkill, killall 
 def stack_dir(repo: Path) -> Path | None:
     """The folder of this repository's local stack: the one with supabase/config.toml, the repository itself first."""
     if (repo / "supabase/config.toml").is_file(): return repo
-    for cfg in sorted(repo.rglob("supabase/config.toml"), key=lambda p: len(p.parts)):
+    for cfg in sorted((p for p in repo_files(repo) if p.relative_to(repo).as_posix().endswith("supabase/config.toml")), key=lambda p: len(p.parts)):
         rel = cfg.relative_to(repo).parts
         if len(rel) - 2 <= PACKAGE_DEPTH and not any(part in SKIP_DIRS for part in rel): return cfg.parent.parent
     return None
