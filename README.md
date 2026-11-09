@@ -17,4 +17,4 @@ Each package is published on its own, by publishing a GitHub release whose tag n
 
 ## Where the code comes from
 
-This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit 5bd71c6b6e86). Change the code there, run the script, commit the result here.
+This repository is generated from everydeck's main repository by `scripts/build-public.mjs` (commit a82bafe13fce). Change the code there, run the script, commit the result here.
