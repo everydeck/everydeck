@@ -41,7 +41,14 @@ export interface BrowserOptions extends EverydeckOptions { /** keep where the pe
   /** a visit per page: one event `everydeck.sdk.page` on every change of the address (and every `screen()` in native apps) with the page only as its pattern (`screens`), the session of this page life and the person of `setSubject`; one event `everydeck.sdk.sign_in` when `setSubject` names a person who was not signed in on this device. Like PostHog `$pageview` and `$identify`. everydeck never counts them towards the month. On by default */
   capturePageViews?: boolean;
   /** also send page views and sign-ins from automated browsers and bots (`navigator.webdriver`, headless Chrome, crawlers, the screenshot of a deploy); off by default, like PostHog's user agent filter */
-  captureBots?: boolean }
+  captureBots?: boolean;
+  /**
+   * wait for the person's consent before anything personal, like PostHog `opt_out_capturing_by_default` with its cookieless mode: until `consent(true)`
+   * the SDK sends only errors, failed requests, load times and page views as counts, without the person, the organization or where the visitor came from,
+   * and writes nothing to `localStorage`, the `storage` passed or cookies. `consent(true)` turns everything on and remembers it on this device,
+   * `consent(false)` turns it off again and removes what the SDK kept. Off by default (everything as before)
+   */
+  waitForConsent?: boolean }
 /**
  * A write from the app map (`flows[].result.write`): flow, table, kind. Since 0.5.5, as everydeck hands them out: `object` (the object type of the table)
  * with `key` (its key column) names the record of an update or delete from the request's filter (`?id=eq.<ref>`, a reference like the outbox sends), and
@@ -195,20 +202,42 @@ export const defaultRoute = (u: URL): string => apiRouteOf(u.pathname, []);
 type G = Record<string, unknown> & { navigator?: { userAgent?: string; product?: string; userAgentData?: { platform?: string; mobile?: boolean } }; location?: { href?: string } };
 const ID_SEGMENT = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,}|[A-Za-z0-9_-]{20,})$/i;
 // ── Page and API patterns: the same rules as screenOf/apiRouteOf/scrubPaths in everydeck (the SDK has no dependencies; a test checks they are equal)
-/** Most specific matching pattern (fixed segment before `:param` before `*`) or null */
+/** A catch-all segment of a router: `*`, `**`, `:rest*`, `:rest+`, `(.*)`, `:rest(.*)`, Next.js `[...slug]` and `[[...slug]]` */
+const CATCH_ALL = /^(?:\*{1,2}|:[A-Za-z_][A-Za-z0-9_]*(?:[*+]|\(\.\*\))|\(\.\*\)|\[\[?\.\.\.[^\]]+\]\]?)$/;
+/**
+ * Most specific matching pattern (fixed segment before `:param` before `*`) or null. A catch-all alone (`/*`, `*`, `/:rest*`) is the app's
+ * fallback route (a 404 page, a client-side router), never the name of a page: it matches nothing.
+ */
 function bestPattern(segs: string[], patterns: readonly string[]): string | null {
   let best: { p: string; score: number[] } | null = null;
   for (const p of patterns) {
-    const ps = p.split('/').filter(Boolean); const wild = ps.at(-1) === '*'; const fixed = wild ? ps.slice(0, -1) : ps;
+    const ps = p.split('/').filter(Boolean); const wild = ps.length > 0 && CATCH_ALL.test(ps.at(-1)!); const fixed = wild ? ps.slice(0, -1) : ps;
+    if (wild && !fixed.length) continue;
     if (wild ? segs.length < fixed.length : segs.length !== fixed.length) continue;
     if (!fixed.every((x, i) => x.startsWith(':') || x === segs[i])) continue;
     const score = [...fixed.map((x) => (x.startsWith(':') ? 2 : 3)), ...(wild ? [1] : [])];
     const better = !best || (() => { for (let i = 0; i < Math.max(score.length, best.score.length); i++) { const a = score[i] ?? 0; const b = best.score[i] ?? 0; if (a !== b) return a > b; } return false; })();
-    if (better) best = { p: p === '/*' || p === '/' ? p : `/${ps.join('/')}`, score };
+    if (better) best = { p: p === '/' ? p : `/${[...fixed, ...(wild ? ['*'] : [])].join('/')}`, score };
   }
   return best?.p ?? null;
 }
 const segsOf = (address: string) => String(address).replace(/[?#].*$/, '').split('/').filter(Boolean);
+/** a lowercase word without digits or separators (`property`, `login`): a route of the app, never a slug or a name with a separator */
+const ROUTE_WORD = /^[a-z]{1,32}$/;
+/** a single segment that is a page of the app (`/login`, `/view-all`): lowercase words, joined by `-` or `_` */
+const PAGE_WORD = /^[a-z]{1,32}(?:[-_][a-z]{1,32}){0,3}$/;
+/**
+ * An address that no declared pattern matches (also one that only the app's catch-all route matches) keeps its shape, never `/*`. A segment
+ * stays as it is where it is a fixed segment of a declared pattern, a lowercase word in the first place (`/login`, a single segment also with `-` or `_`
+ * like `/view-all`) or a lowercase word before an identifier (`/property/1094` → `/property/:id`, as the app's own admin groups it); every other
+ * segment (identifiers, slugs, names) becomes `:id`, from the ninth segment on `*`. A `*` stays `*` (a page an older SDK already sent as `/*`). Profiles
+ * right under `/` are a route the map names (`/:username`): that pattern matches first, so a name never stays.
+ */
+function shapeOf(segs: string[], patterns: readonly string[]): string {
+  const known = new Set(patterns.flatMap((p) => p.split('/').filter((x) => x && !x.startsWith(':') && !CATCH_ALL.test(x))));
+  const keep = (x: string, i: number) => x === '*' || known.has(x) || (!ID_SEGMENT.test(x) && (ROUTE_WORD.test(x) || (segs.length === 1 && PAGE_WORD.test(x))) && (i === 0 || ID_SEGMENT.test(segs[i + 1] ?? '') || (segs[i + 1] ?? '').startsWith(':')));
+  return `/${segs.slice(0, 8).map((x, i) => (keep(x, i) ? x : ':id')).join('/')}${segs.length > 8 ? '/*' : ''}`;
+}
 /** Without a matching pattern: the first segment; with declared patterns only a fixed first segment of a pattern (otherwise `/*`), without patterns only if it is not an identifier (otherwise `/:id`) */
 function firstSegment(segs: string[], patterns: readonly string[]): string {
   const first = segs[0]!;
@@ -217,12 +246,13 @@ function firstSegment(segs: string[], patterns: readonly string[]): string {
 }
 /**
  * Address → the app's page pattern. The most specific matching pattern wins (fixed segment before `:param` before `*`); without a matching pattern
- * only the first segment remains (see firstSegment). That way no slug, name or identifier leaves the browser. Same rule in the SDK.
+ * the shape of the address with declared patterns (see shapeOf), only the first segment without (see firstSegment). That way no slug, name or
+ * identifier leaves the browser. Same rule in everydeck.
  */
 export function screenOf(address: string, patterns: readonly string[]): string {
   const segs = segsOf(address);
   if (!segs.length) return '/';
-  return bestPattern(segs, patterns) ?? firstSegment(segs, patterns);
+  return bestPattern(segs, patterns) ?? (patterns.length ? shapeOf(segs, patterns) : firstSegment(segs, patterns));
 }
 /**
  * Paths that carry no names by themselves: Supabase REST (`/rest/v1/<table>`, `/rest/v1/rpc/<function>`), Edge Functions
@@ -403,6 +433,8 @@ export const SIGN_IN_EVENT = 'everydeck.sdk.sign_in';
 export const PAGE_VIEWS_MAX = 500;
 /** the person last signed in on this device, written only once `setSubject` names one and removed by `reset()` */
 const SIGNED_IN_KEY = 'everydeck.signed_in';
+/** the person's consent on this device (`granted`), written only by `consent(true)` and removed by `consent(false)` */
+const CONSENT_KEY = 'everydeck.consent';
 
 /** Step with the origin of a person's first visit (like PostHog $initial_utm_* and $initial_referring_domain), sent once per person and device */
 export const ORIGIN_EVENT = 'everydeck.sdk.origin';
@@ -459,7 +491,7 @@ export class EverydeckBrowser {
     return null;
   }
   constructor(o: BrowserOptions) {
-    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, screenObjects, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, captureBots, ...core } = o;
+    const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, screenObjects, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, captureBots, waitForConsent, ...core } = o;
     // valid entries only (flow like a signal name, known kind)
     this.writes = (writes ?? []).filter((w) => w && SAFE.test(String(w.flow)) && typeof w.table === 'string' && w.table.length > 0 && WRITE_KINDS.has(w.kind)).slice(0, 200)
       .map((w) => ({ flow: w.flow, table: w.table, kind: w.kind, ...(w.object && OBJECT_TYPE.test(w.object) && w.key && COLUMN.test(w.key) ? { object: w.object, key: w.key } : {}), ...(w.status && COLUMN.test(w.status) ? { status: w.status } : {}) }));
@@ -473,6 +505,14 @@ export class EverydeckBrowser {
     this.client = new EverydeckClient({ ...core, ...(core.fetch ? {} : orig ? { fetch: orig } : {}), keepalive: true, client: { platform: 'web', ...(found.client ?? {}), ...originOf(globalThis as unknown as G), ...(o.client ?? {}) } as Partial<ClientInfo>,
       onSendResult: (r, pending) => { if (r === 'retry') this.savePending(); else if (r === 'accepted' && (pending === 0 || (!this.persistOn && this.stored))) this.clearPending(); } });
     const detected = found.later ? found.later.then((x) => { this.client.setClient({ ...x, ...(o.client ?? {}) }); }).catch(() => undefined) : Promise.resolve();
+    // With waitForConsent nothing personal until the person agrees; a consent given on this device before counts (read, never written here)
+    this.usageDefault = core.usageConsent === undefined;
+    let remembered: Promise<void> = Promise.resolve();
+    if (waitForConsent === true) {
+      this.waiting = true; this.consented = false;
+      try { const got = this.storage()?.getItem(CONSENT_KEY); if (got instanceof Promise) remembered = got.then((v) => { if (v === 'granted') this.consent(true); }, () => undefined); else if (got === 'granted') this.consented = true; } catch { /* storage blocked: wait for consent */ }
+    }
+    this.applyConsent();
     this.screens = (screens ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 300);
     // only valid entries (a parameter name, a kind of record like `writes[].object`)
     this.screenObjects = new Map(Object.entries(screenObjects ?? {}).filter(([k, v]) => PARAM.test(k) && typeof v === 'string' && OBJECT_TYPE.test(v)).slice(0, 100));
@@ -482,7 +522,7 @@ export class EverydeckBrowser {
     this.pageViewsOn = capturePageViews !== false && this.client.opts.enabled && (captureBots === true || !isLikelyBot((globalThis as unknown as G).navigator));
     // the person signed in on this device (until reset()) carries the page views until the app names someone, like PostHog's stored distinct_id after a
     // reload; otherwise the first page view after every reload would stay anonymous (a restored session sends no sign-in that could claim it)
-    if (this.pageViewsOn) { try { const v = this.storage()?.getItem(SIGNED_IN_KEY); if (typeof v === 'string' && v) this.restored = v; } catch { /* storage blocked */ } }
+    if (this.pageViewsOn && this.consented) { try { const v = this.storage()?.getItem(SIGNED_IN_KEY); if (typeof v === 'string' && v) this.restored = v; } catch { /* storage blocked */ } }
     this.trackRoutes();
     // offline on the phone: save unsent events on exit and send them on the next start (everydeck deduplicates)
     const native = ['ios', 'android'].includes(this.client.getClient()?.platform ?? '');
@@ -490,7 +530,7 @@ export class EverydeckBrowser {
     // a web page keeps only what everydeck refused (429 or 503 with Retry-After) and the visitor left before the wait ended; the next visit sends it
     this.keepRefused = !this.persistOn && persist !== false && this.client.opts.enabled;
     // restoring can be asynchronous (AsyncStorage): `ready` waits for it, and the first flush after that also sends the old events
-    this.ready = Promise.all([detected, this.persistOn || this.keepRefused ? this.restorePending() : Promise.resolve()]).then(() => undefined);
+    this.ready = Promise.all([detected, remembered, (this.persistOn || this.keepRefused) && this.consented ? this.restorePending() : Promise.resolve()]).then(() => undefined);
     this.baseFetch = (o.fetch ?? orig ?? ((...a: Parameters<typeof fetch>) => globalThis.fetch(...a)));
     this.apiRoutes = (apiRoutes ?? []).filter((x) => typeof x === 'string' && x.startsWith('/')).slice(0, 500);
     // the path of a request only as a pattern, also the result of a custom sanitizeRoute function
@@ -514,8 +554,10 @@ export class EverydeckBrowser {
       this.uninstall = () => { before(); if (proto[XHR_PATCHED]) { proto['open'] = open; proto['send'] = send; delete proto[XHR_PATCHED]; } };
     }
     this.correlate = correlate ?? (() => true);
-    // keep where the person came from on the first visit (once; later visits do not overwrite it)
-    this.origin = captureOrigin !== false && this.client.opts.enabled ? this.rememberOrigin() : Promise.resolve(null);
+    // keep where the person came from on the first visit (once; later visits do not overwrite it); before consent only in memory, kept and sent after consent(true)
+    this.originOn = captureOrigin !== false && this.client.opts.enabled;
+    if (this.originOn) { const g = globalThis as unknown as { location?: { href?: string }; document?: { referrer?: string } }; this.landingOrigin = initialOriginOf(String(g.location?.href ?? ''), String(g.document?.referrer ?? '')) as Record<string, string>; }
+    this.origin = this.originOn && this.consented ? this.rememberOrigin() : Promise.resolve(null);
     if (captureUnhandled !== false && captureConsole !== false && this.client.opts.enabled) this.patchConsole();
     // load times of every page view, only in a browser page (not React Native, Expo or Capacitor) that can observe them
     this.vitals = captureVitals !== false && this.client.opts.enabled && measuresVitals(this.client.getClient()) ? this.startVitals() : null;
@@ -723,7 +765,7 @@ export class EverydeckBrowser {
   persist(): Promise<void> { return this.savePending(); }
   private async savePending(): Promise<void> {
     const wait = this.client.refusedUntilMs;
-    if (!this.persistOn && !(this.keepRefused && wait)) return;
+    if (!this.consented || (!this.persistOn && !(this.keepRefused && wait))) return;
     try {
       const ev = this.client.exportPending(300); const st = this.storage(); if (!st) return;
       if (ev.length) await st.setItem(PENDING_KEY, JSON.stringify(ev)); else await st.removeItem(PENDING_KEY);
@@ -757,9 +799,40 @@ export class EverydeckBrowser {
     // PostHog group that stays set until reset(); `null` removes it, another person starts without it
     const account = accountRef === undefined && subjectRef && subjectRef === this.subject.subjectRef ? this.subject.accountRef : accountRef;
     this.subject = { ...(subjectRef ? { subjectRef } : {}), ...(account ? { accountRef: account } : {}) };
-    if (subjectRef) void this.sendOrigin(subjectRef);
     if (subjectRef) this.restored = null;
-    if (this.pageViewsOn && subjectRef) void this.noteSignIn(subjectRef);
+    if (subjectRef && this.consented) void this.sendOrigin(subjectRef);
+    if (this.pageViewsOn && subjectRef && this.consented) void this.noteSignIn(subjectRef);
+  }
+  /**
+   * The person's answer to the app's consent banner, like PostHog `opt_in_capturing()` and `opt_out_capturing()`. `true`: page views and errors carry
+   * the person and the organization again, sign-ins and where the visitor came from are sent, the SDK may use the storage, and it remembers the consent on
+   * this device. `false`: nothing personal from now on, and everything the SDK kept on this device is removed (consent, signed-in person, origin, unsent
+   * events). Call it where the banner is answered and again on every start with the answer the app keeps.
+   */
+  consent(granted: boolean): void {
+    if (granted) {
+      const was = this.consented; this.consented = true; this.applyConsent();
+      try { const w = this.storage()?.setItem(CONSENT_KEY, 'granted'); if (w instanceof Promise) void w.catch(() => undefined); } catch { /* storage blocked: consent for this page life */ }
+      if (was) return;
+      if (this.originOn) this.origin = this.rememberOrigin();
+      const who = this.subject.subjectRef;
+      if (who) { void this.sendOrigin(who); if (this.pageViewsOn) void this.noteSignIn(who); }
+      return;
+    }
+    this.consented = false; this.applyConsent();
+    this.signedIn = null; this.restored = null; this.stored = false; this.origin = Promise.resolve(null);
+    try { const st = this.storage(); if (st) for (const k of [CONSENT_KEY, SIGNED_IN_KEY, ORIGIN_KEY, ORIGIN_SENT_KEY, PENDING_KEY, WAIT_KEY]) { const w = st.removeItem(k); if (w instanceof Promise) void w.catch(() => undefined); } } catch { /* storage blocked */ }
+  }
+  /** whether the SDK may send personal data now: always without `waitForConsent`, otherwise after `consent(true)` */
+  hasConsent(): boolean { return this.consented; }
+  private consented = true;
+  /** started with waitForConsent */
+  private waiting = false;
+  /** `usageConsent` not set by the app: it follows the consent (with personal reference only after consent(true)) */
+  private usageDefault = false;
+  private applyConsent(): void {
+    this.client.setAnonymous(!this.consented);
+    if (this.usageDefault) this.client.opts.usageConsent = this.consented && this.waiting ? 'consented' : 'anonymous';
   }
   /**
    * The person signs out (like PostHog `reset()`): forgets the person of this session and of this device, so the next person named is a sign-in again.
@@ -792,14 +865,16 @@ export class EverydeckBrowser {
     } catch { /* storage blocked: no sign-in sent */ }
   }
   /** Origin of the first visit on this device (null: not kept) */
-  private readonly origin: Promise<Record<string, string> | null>;
+  private origin: Promise<Record<string, string> | null>;
+  private originOn = false;
+  /** the origin of this page life's first address, read when the SDK starts (with waitForConsent the address may have changed by the time of consent) */
+  private landingOrigin: Record<string, string> = {};
   private async rememberOrigin(): Promise<Record<string, string> | null> {
     try {
       const st = this.storage(); if (!st) return null;
       const got = st.getItem(ORIGIN_KEY); const raw = got instanceof Promise ? await got : got;
       if (raw) return JSON.parse(raw) as Record<string, string>;
-      const g = globalThis as unknown as { location?: { href?: string }; document?: { referrer?: string } };
-      const o = initialOriginOf(String(g.location?.href ?? ''), String(g.document?.referrer ?? '')) as Record<string, string>;
+      const o = this.landingOrigin;
       // only when there is an origin: a page opened directly writes nothing to the page's storage
       if (Object.keys(o).length) { const w = st.setItem(ORIGIN_KEY, JSON.stringify(o)); if (w instanceof Promise) await w; }
       return o;

@@ -344,6 +344,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "last_active": {
+          "enum": [
+            "app",
+            "sign_in"
+          ],
+          "description": "where everydeck reads when a person was last active: a column the app writes itself (app) or the last sign-in of Supabase Auth (sign_in); without it only visits and events everydeck saw"
+        },
         "source": {
           "enum": [
             "sdk_identity",
@@ -997,6 +1004,101 @@
                     }
                   },
                   "description": "1.11-r0: the field is managed in another system (e.g. the subscription in Stripe); everydeck shows the link instead of a form"
+                },
+                "image_src": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "form"
+                  ],
+                  "properties": {
+                    "form": {
+                      "enum": [
+                        "url",
+                        "storage"
+                      ]
+                    },
+                    "base": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300,
+                      "pattern": "^https://[^\\s]+$"
+                    },
+                    "bucket": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100,
+                      "pattern": "^[A-Za-z0-9._-]+$"
+                    },
+                    "access": {
+                      "enum": [
+                        "public",
+                        "signed"
+                      ]
+                    },
+                    "key": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    },
+                    "detail": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "host": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 253,
+                            "pattern": "^[A-Za-z0-9.-]+$"
+                          },
+                          "replace_ext": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "pattern": "^[A-Za-z0-9._-]+$"
+                          },
+                          "before_ext": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "pattern": "^[A-Za-z0-9._-]+$"
+                          }
+                        }
+                      }
+                    },
+                    "thumb": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "host": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 253,
+                            "pattern": "^[A-Za-z0-9.-]+$"
+                          },
+                          "replace_ext": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "pattern": "^[A-Za-z0-9._-]+$"
+                          },
+                          "before_ext": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 40,
+                            "pattern": "^[A-Za-z0-9._-]+$"
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               },
               "required": [
@@ -1438,6 +1540,20 @@
                   }
                 },
                 "description": "the price list of the app: key = the field of the price list the product field names (without key: the identifier of the price list record)"
+              },
+              "closed": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "field"
+                ],
+                "description": "requests: a request is done once this field is set (handled by the team)",
+                "properties": {
+                  "field": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+                  }
+                }
               }
             }
           }

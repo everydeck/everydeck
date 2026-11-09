@@ -443,8 +443,15 @@ export class EverydeckClient {
     this.schedule(this.opts.flushIntervalMs);
   }
 
+  /**
+   * Without the person's consent (the browser SDK's `waitForConsent` until `consent(true)`, or after `consent(false)`) no event names a person or an
+   * organization and no identity is sent, like PostHog before `opt_in_capturing()`; errors and counts go out without them.
+   */
+  private anonymous = false;
+  setAnonymous(on: boolean): void { this.anonymous = on; }
   private enqueue(ev: Event): void {
     if (!this.opts.enabled || this.closed) return;
+    if (this.anonymous) { if (ev.name === 'everydeck.sdk.identity') return; delete ev['subject_ref']; delete ev['account_ref']; }
     try {
       if (!UUID_RE.test(ev.event_id) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(ev.occurred_at) || !Number.isFinite(Date.parse(ev.occurred_at))) { this.stats.dropped_oversize++; return; }
       if (!NAME.test(ev.name)) { this.stats.dropped_oversize++; this.opts.onWarning(`event name rejected: ${ev.name}`); return; }

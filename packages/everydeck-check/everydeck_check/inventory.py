@@ -104,6 +104,7 @@ def build_inventory(repo: Path, app_map: dict[str, Any]) -> dict[str, Any]:
         **({"schedules": schedules} if schedules else {}),
         **({"server_settings": reads} if (reads := server_settings(repo)) else {}),
         **({"everydeck_files": files} if (files := everydeck_files(repo)) else {}),
+        **({"consent_banners": banners} if (banners := consent_banners(repo)) else {}),
     }
     inv["excerpts"] = _excerpts(repo, inv)
     inv["digest"] = digest_of(inv)
@@ -131,6 +132,35 @@ def server_settings(repo: Path) -> list[dict[str, Any]]:
             if SERVER_SETTINGS.search(line) and not line.lstrip().startswith(("//", "#", "*")):
                 out.append({"path": rel.as_posix(), "line": i})
                 if len(out) >= SERVER_SETTINGS_MAX: return out
+    return out
+
+
+# Where the app asks its visitors for consent (a cookie or consent banner, a consent manager): the package of a known consent manager, the
+# consent API of an analytics tool (PostHog opt_in_capturing, Google consent mode), or the app's own banner by its name. everydeck's own call
+# (`everydeck.consent(...)`, the place the agent records as identity.browser_consent) is not a banner. Never OAuth consent screens.
+CONSENT_BANNER = re.compile(
+    r"""['"](?:react-cookie-consent|vanilla-cookieconsent|cookieconsent|@cookieconsent/[\w-]+|klaro(?:/[\w./-]+)?|@usercentrics/[\w-]+|@cookiehub/[\w-]+|react-cookiebot|@c15t/[\w-]+|@consent-manager/[\w-]+|tarteaucitronjs)['"]"""
+    r"""|consent\.cookiebot\.com|cdn\.cookielaw\.org|app\.usercentrics\.eu|cmp\.osano\.com|cdn\.iubenda\.com|app\.termly\.io"""
+    r"""|\.opt_in_capturing\s*\(|\.opt_out_capturing\s*\(|\bgtag\s*\(\s*['"]consent['"]"""
+    r"""|\b(?:use)?(?:Cookie|Consent|Gdpr|GDPR|Tracking)(?:Consent|Banner|Notice|Popup|Manager|Dialog|Modal|Bar)"""
+    r"""|\b(?:cookie|analytics|tracking|marketing)_?[Cc]onsent\b"""
+)
+CONSENT_BANNERS_MAX = 20
+
+
+def consent_banners(repo: Path) -> list[dict[str, Any]]:
+    """Every place in the app's frontend code that asks for consent (path, line), at most CONSENT_BANNERS_MAX; everydeck's own consent call is not one."""
+    out: list[dict[str, Any]] = []
+    for p in sorted(repo.rglob("*")):
+        rel = p.relative_to(repo)
+        # a consent manager is often a script tag in the page itself (index.html of Vite, Create React App)
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or (p.suffix not in CODE_EXT and p.suffix != ".html") or p.suffix in (".py", ".dart") or p.stat().st_size > CODE_FILE_MAX: continue
+        try: text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError: continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if CONSENT_BANNER.search(line) and not line.lstrip().startswith(("//", "#", "*")) and "everydeck" not in line.lower():
+                out.append({"path": rel.as_posix(), "line": i})
+                if len(out) >= CONSENT_BANNERS_MAX: return out
     return out
 
 

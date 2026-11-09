@@ -35,6 +35,7 @@ PAGE_MAX = 200
 # Refs per page of GET /everydeck/read/keys/{type}: everydeck's daily inventory compares only the refs to find deleted records (like Fivetran), as in read-bridge.ts
 KEYS_PAGE_MAX = 2000
 VALUE_MAX = 256
+LIST_MAX = 1024  # a list keeps whole entries up to this length, always valid JSON (photo addresses: about 8)
 # Bounds of GET /everydeck/read/etags: the bridge reads the pages as for a full read. A type with more rows gets no fingerprint (everydeck reads it in full as
 # before), the types after it keep theirs; past the time of the whole request (serverless functions have time limits) the rest is left out and read in full
 ETAGS_BUDGET_SECONDS = 5
@@ -74,7 +75,20 @@ def _value(v: Any) -> Any:
     if isinstance(v, decimal.Decimal):
         f = float(v)
         return f if f == f and abs(f) != float("inf") else str(v)
+    if isinstance(v, (list, tuple)):
+        return _list(v)
     return _text(v)[:VALUE_MAX]
+
+
+def _list(v: Sequence[Any]) -> str:
+    """a list as JSON text with whole entries only (up to LIST_MAX); cutting the text would leave no readable entry (the photo addresses of a record)"""
+    out: list[Any] = []
+    for x in v:
+        out.append(x)
+        if len(json.dumps(out, separators=(",", ":"), default=_day)) > LIST_MAX:
+            out.pop()
+            break
+    return json.dumps(out, separators=(",", ":"), default=_day)
 
 
 def _b64(values: Sequence[str]) -> str:
@@ -213,7 +227,7 @@ class ReadBridge:
         objects += [{"type": r["id"], "fields": [f["name"] for f in r["fields"]], "changed_since": False, "keys": True, **counted} for r in self.scope.get("relations", [])]
         people = self.scope.get("people")
         convs = self.scope.get("conversations") or []
-        return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys()), "fetch_one": self.one is not None}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), **({"messages_grant": True} if self.match is not None else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
+        return {"version": "1", **({"app": self.app} if self.app else {}), "identity": "subject_ref", "objects": objects, **({"people": {"fields": list(people["fields"].keys()), "fetch_one": self.one is not None, **({"active": people["active"]["source"]} if people.get("active") else {})}} if people else {}), **({"messages": [c["type"] for c in convs]} if self.match is not None and convs else {}), **({"messages_grant": True} if self.match is not None else {}), "signed": self.signatures != "off", "rights": self.rights(), "page_limit": self.page_limit, "fetch_one": self.one is not None}
 
     def _page(self, query: Mapping[str, str] | None) -> tuple[int, list[str] | None, bool]:
         q = query or {}
@@ -306,6 +320,24 @@ class ReadBridge:
             if self.count is None:
                 return 404, {"error": "this bridge does not count"}
             return 200, {"as_of": as_of, "counts": {typ: max(0, int(self.count(x["table"], x["keys"]) or 0)) for typ, x in self.types.items()}}
+        if path == "/everydeck/read/active":
+            # when each person was last active, as the app stores it (people.active), only rows at or after `since`, stable by (time, ref) like changed_since;
+            # people without a time are left out (as GET /everydeck/read/active in read-bridge.ts)
+            a = (self.scope.get("people") or {}).get("active")
+            if not a:
+                return 404, {"error": "no last-active column in the read scope"}
+            limit, after, bad = self._page(query)
+            if bad or (after is not None and len(after) != 2):
+                return 400, {"error": "bad cursor"}
+            since_raw = (query or {}).get("since")
+            since = "1970-01-01T00:00:00.000Z" if since_raw is None else _iso(since_raw)
+            if since is None:
+                return 400, {"error": "bad since (ISO-8601 expected)"}
+            rows = list(self.rows(a["table"], [a["ref"], a["column"]], [a["ref"]], after, limit + 1, {"column": a["column"], "since": since}))
+            kept = rows[:limit]
+            items = [{"subject_ref": _text(r[a["ref"]])[:128], "last_active_at": _iso(r[a["column"]])} for r in kept]
+            return 200, {"as_of": as_of, "source": a["source"], "since": since, "items": [x for x in items if x["last_active_at"] is not None],
+                         "next_cursor": _b64([_iso(kept[-1][a["column"]]) or "", _text(kept[-1][a["ref"]])]) if len(rows) > limit else None}
         one_person = unquote(path[len("/everydeck/read/people/"):]) if path.startswith("/everydeck/read/people/") and path.count("/") == 4 else None
         if path == "/everydeck/read/people" or one_person:
             p = self.scope.get("people")
@@ -522,7 +554,7 @@ def scope_tables(scope: Mapping[str, Any]) -> list[str]:
     """All tables of the scope (objects, relations, conversations, people)."""
     out: list[str] = []
     convs = [t for c in (scope.get("conversations") or []) for t in [c["table"], c["messages"]["table"], *([c["attachments"]["table"]] if c.get("attachments") else [])]]
-    for t in [o["table"] for o in scope.get("objects", [])] + [r["table"] for r in scope.get("relations", [])] + convs + ([scope["people"]["table"]] if scope.get("people") else []):
+    for t in [o["table"] for o in scope.get("objects", [])] + [r["table"] for r in scope.get("relations", [])] + convs + ([scope["people"]["table"], *([scope["people"]["active"]["table"]] if scope["people"].get("active") else [])] if scope.get("people") else []):
         if t not in out:
             out.append(t)
     return out

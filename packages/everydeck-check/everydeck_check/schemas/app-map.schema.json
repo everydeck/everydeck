@@ -288,6 +288,106 @@
       }
      },
      "description": "only for a text column whose name says e-mail, phone or IP address (for example email, contact_email, phone, mobile, whatsapp, ip_address): everydeck leaves such a column out of its read scope by default. Write not_contact only when the column holds something else, with one sentence (reason) and the place where the app uses the value as that other thing (for example the name of a mail template). Never together with contact."
+    },
+    "image_src": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "form",
+      "evidence"
+     ],
+     "properties": {
+      "form": {
+       "enum": [
+        "url",
+        "storage"
+       ]
+      },
+      "base": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 300,
+       "pattern": "^https://[^\\s]+$"
+      },
+      "bucket": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 100,
+       "pattern": "^[A-Za-z0-9._-]+$"
+      },
+      "access": {
+       "enum": [
+        "public",
+        "signed"
+       ]
+      },
+      "key": {
+       "type": "string",
+       "minLength": 1,
+       "maxLength": 64,
+       "pattern": "^[A-Za-z0-9_]+$"
+      },
+      "detail": {
+       "type": "array",
+       "maxItems": 8,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9.-]+$"
+         },
+         "replace_ext": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[A-Za-z0-9._-]+$"
+         },
+         "before_ext": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[A-Za-z0-9._-]+$"
+         }
+        }
+       }
+      },
+      "thumb": {
+       "type": "array",
+       "maxItems": 8,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9.-]+$"
+         },
+         "replace_ext": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[A-Za-z0-9._-]+$"
+         },
+         "before_ext": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[A-Za-z0-9._-]+$"
+         }
+        }
+       }
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      }
+     },
+     "description": "only when the app does not show the stored value as it is: how the app builds the address of the image it shows, with the place where it does (for example a helper that turns the stored address into a size variant). form url: the value is an address (base: the address in front when the app stores only a path); form storage: a path in the app's Supabase Storage bucket, public or only with a signed address (access). key: the value is an object and the address is under this key (for example src). detail: rules for the photos of a record, thumb: rules for small previews in lists (without: detail). A rule replaces the file ending (replace_ext, for example -detail.webp turns a.jpg into a-detail.webp) or inserts text before it (before_ext, for example -thumb); host limits it to addresses on that host; the first rule that fits applies, a rule without replace_ext and before_ext keeps the address."
     }
    }
   },
@@ -368,6 +468,35 @@
     }
    },
    "description": "The first value of the app: the moment a new person gets what they came for, the first result of one of the app's main flows (core_object or its main flow), never sign-up or sign-in. everydeck shows on Growth how many new people reach it and how long it takes; the owner confirms it on the approval page and can change it under Settings. Leave it out when no flow is it; everydeck then says Not set."
+  },
+  "closed": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "column",
+    "evidence"
+   ],
+   "description": "when the app treats a row as done (handled, dismissed, answered): the column holds one of values (a status), or, without values, the column is set (a time such as handled_at, a flag)",
+   "properties": {
+    "column": {
+     "$ref": "#/$defs/name"
+    },
+    "values": {
+     "type": "array",
+     "minItems": 1,
+     "maxItems": 20,
+     "items": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+     },
+     "description": "the values of column that mean done; leave it out when a set column means done"
+    },
+    "evidence": {
+     "$ref": "#/$defs/evidence",
+     "description": "where the app closes the row (the update that sets it) or lists only the open ones"
+    }
+   }
   }
  },
  "properties": {
@@ -570,6 +699,9 @@
         "$ref": "#/$defs/evidence"
        }
       }
+     },
+     "server_url": {
+      "$ref": "#/$defs/evidence"
      }
     }
    }
@@ -748,9 +880,30 @@
       }
      }
     },
+    "last_active": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "column",
+      "evidence"
+     ],
+     "properties": {
+      "column": {
+       "$ref": "#/$defs/name"
+      },
+      "evidence": {
+       "$ref": "#/$defs/evidence"
+      }
+     },
+     "description": "Optional: the column of the identity table in which the app itself stores when the person was last active (e.g. profiles.last_active_at, set on every visit or sign-in), with the place in the code that writes it with the current time. everydeck then counts active people from the app's own data, with history, instead of only from visits since the SDK. Without it a Supabase app counts from auth.users.last_sign_in_at. Never a column the database only sets on creation."
+    },
     "browser_subject": {
      "$ref": "#/$defs/evidence",
      "description": "Where the browser names the signed-in person to the everydeck SDK (everydeck.setSubject(<user id>); everydeck.reset() where the app signs the person out, never setSubject(null) for that). Without it every visit and sign-in stays anonymous."
+    },
+    "browser_consent": {
+     "$ref": "#/$defs/evidence",
+     "description": "Where the app hands its visitors' answer to its consent banner to the everydeck SDK (initEverydeckBrowser with waitForConsent: true, everydeck.consent(<answer>) where the banner is answered and on every start). Without it the browser SDK sends visits with the person and their origin before anyone agreed."
     },
     "name_rule": {
      "type": "object",
@@ -922,6 +1075,10 @@
         },
         "public": {
          "$ref": "#/$defs/evidence"
+        },
+        "waits": {
+         "$ref": "#/$defs/evidence",
+         "description": "where the app shows records in this status as waiting for someone to act (a review queue, a list of open ones); only then everydeck counts it under needs attention. A status records stay in while they are live (a published record) has none"
         }
        }
       }
@@ -2051,6 +2208,10 @@
           "$ref": "#/$defs/evidence"
          }
         }
+       },
+       "closed": {
+        "$ref": "#/$defs/closed",
+        "description": "requests: when the team handled a request (handled_at set, a status); without it every request waits for payment"
        }
       },
       "not": {
@@ -2208,6 +2369,31 @@
        "evidence": {
         "$ref": "#/$defs/evidence",
         "description": "where the app files the report (the insert or the update that sets the flag)"
+       },
+       "closed": {
+        "$ref": "#/$defs/closed",
+        "description": "when the app treats a report as done (status handled or dismissed, reviewed_at set); without it everydeck counts a report as new only after everydeck was set up"
+       },
+       "target": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "column",
+         "table"
+        ],
+        "description": "the reported record when the column has no foreign key in the app map (for example property_id of a report table)",
+        "properties": {
+         "column": {
+          "$ref": "#/$defs/name"
+         },
+         "table": {
+          "$ref": "#/$defs/name"
+         },
+         "evidence": {
+          "$ref": "#/$defs/evidence",
+          "description": "where the app opens the reported record from the row"
+         }
+        }
        }
       }
      }
@@ -2236,13 +2422,68 @@
        }
       }
      }
+    },
+    "queues": {
+     "type": "array",
+     "maxItems": 20,
+     "description": "review queues the app fills itself (possible duplicates, flagged uploads, verification requests): everydeck shows the open ones under Moderation with their number; its own duplicate check does not replace them",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "table",
+       "evidence"
+      ],
+      "properties": {
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "closed": {
+        "$ref": "#/$defs/closed",
+        "description": "when the app treats an entry as done (dismissed, confirmed)"
+       },
+       "score_column": {
+        "$ref": "#/$defs/name",
+        "description": "the column with the score or severity the app shows"
+       },
+       "reason_column": {
+        "$ref": "#/$defs/name",
+        "description": "the column that says why the entry is in the queue (the kind, the signals)"
+       },
+       "target": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "column",
+         "table"
+        ],
+        "description": "the record the entry is about when the column has no foreign key in the app map",
+        "properties": {
+         "column": {
+          "$ref": "#/$defs/name"
+         },
+         "table": {
+          "$ref": "#/$defs/name"
+         },
+         "evidence": {
+          "$ref": "#/$defs/evidence",
+          "description": "where the app opens the reported record from the row"
+         }
+        }
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence",
+        "description": "where the app shows the queue to its team"
+       }
+      }
+     }
     }
    }
   },
   "outcomes": {
    "type": "array",
    "maxItems": 500,
-   "description": "The outcome of each open part everydeck found (ids from everydeck-check validate, field open[].id). covered_by: the flow that explains this concrete operation; not_applicable: why it does not apply, with a place in the code that shows it. Both close the part. deferred and unsupported keep it open and visible to the owner; a text such as 'later' never closes anything. covered_by may name further parts in also (ids from open[], each listed explicitly) that the same flow explains in exactly the same way, for example the same report sent from several pages; parts not listed stay open",
+   "description": "The outcome of each open part everydeck found (ids from everydeck-check validate, field open[].id). covered_by: the flow that explains this concrete operation; not_applicable: why it does not apply, with a place in the code that shows it. Both close the part. deferred and unsupported keep it open and visible to the owner; a text such as 'later' never closes anything. covered_by may name further parts in also (ids from open[], each listed explicitly) that the same flow explains in exactly the same way, for example the same report sent from several pages; parts not listed stay open. false_positive: for a part everydeck found only by a name (a report, block, money or status table, listed in open[].places), each place that is no such thing with a reason and the place in the code that shows it; that place no longer counts, the other places of the part stay",
    "items": {
     "type": "object",
     "additionalProperties": false,
@@ -2298,6 +2539,36 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 300
+     },
+     "false_positive": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "description": "Places of this part (open[].places) that are no such thing: everydeck found them only by a name",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "place",
+        "reason",
+        "evidence"
+       ],
+       "properties": {
+        "place": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 200
+        },
+        "reason": {
+         "type": "string",
+         "minLength": 3,
+         "maxLength": 300
+        },
+        "evidence": {
+         "$ref": "#/$defs/evidence"
+        }
+       }
+      }
      }
     },
     "oneOf": [
@@ -2319,6 +2590,11 @@
      {
       "required": [
        "unsupported"
+      ]
+     },
+     {
+      "required": [
+       "false_positive"
       ]
      }
     ],
@@ -2660,6 +2936,30 @@
      "type": "array",
      "maxItems": 20,
      "description": "Where the app's own server reads its everydeck settings from public.everydeck_server_config() (everydeckFromSupabase, Everydeck.from_supabase, rpc('everydeck_server_config')); the plan of everydeck_live_files must then carry that function",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "path",
+       "line"
+      ],
+      "properties": {
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "line": {
+        "type": "integer",
+        "minimum": 1
+       }
+      }
+     }
+    },
+    "consent_banners": {
+     "type": "array",
+     "maxItems": 20,
+     "description": "Where the app's frontend asks its visitors for consent (a cookie or consent banner, a consent manager, PostHog opt_in_capturing, Google consent mode); then the browser SDK waits for that answer (identity.browser_consent)",
      "items": {
       "type": "object",
       "additionalProperties": false,

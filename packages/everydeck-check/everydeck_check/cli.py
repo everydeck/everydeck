@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import check_drift, digest, freeze_lock, reference_errors, split_proposal, coverage_of, validate_manifest
+from . import NOT_DRIFT, check_drift, digest, freeze_lock, reference_errors, split_proposal, coverage_of, validate_manifest
 from .change import check_change
 
 LOCK_NAME = "everydeck-manifest.lock.json"
@@ -199,7 +199,8 @@ def cmd_drift(a: argparse.Namespace) -> int:
     out = {"status": rep.status, "head": rep.head, "findings": [f.__dict__ for f in rep.findings], "call_sites": rep.call_sites, **({"note": a.file_note} if a.file_note else {})}
     # right after approval the code is already ahead of the app map (adapter, door); "new_build" alone does not prevent freezing;
     # the call sites as of now are recorded. Every other finding (missing signal, job without heartbeat) stays drift.
-    only_new_build = bool(rep.findings) and all(f.kind == "new_build" for f in rep.findings)
+    real = [f for f in rep.findings if f.kind not in NOT_DRIFT]   # notes (a job without heartbeat) do not stop freezing
+    only_new_build = bool(real) and all(f.kind == "new_build" for f in real)
     if a.freeze and (rep.status != "drift" or only_new_build):
         lock_path.write_text(json.dumps(freeze_lock(rep), indent=1) + "\n", encoding="utf-8")
         out["lock"] = str(lock_path)

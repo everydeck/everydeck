@@ -23,6 +23,14 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.20
+
+- Same version as `everydeck-check` 0.3.20, whose app map can say how the app builds the address of a photo (`columns[].image_src`). `--merge` keeps the agent's `image_src` like `contact` and `not_contact`.
+- Same version as `everydeck-check` 0.3.20: `false_positive` per place in `outcomes[]`, `places` and `form` on every open part, no open part for a money table only its name points to.
+- Same version as `everydeck-check` 0.3.20, whose app map schema takes new optional fields: `moderation.reports[].closed` and `target`, `moderation.queues`, `money.tables[].closed` and `tables[].statuses[].waits`. `--merge` keeps them like every field the agent sets; nothing else changes in the scaffold.
+- Same version as `everydeck-check` 0.3.20, whose app map schema takes more optional fields: `platforms[].server_url` (native shell loading the web app from a server), `identity.browser_consent` and `inventory.consent_banners` (consent banner), `identity.last_active` (where the app stores when a person was last active).
+- Same version as `everydeck-check` 0.3.20, whose `drift` no longer counts a schedule in SQL without a heartbeat (everydeck reads pg_cron itself); any other job without one is a note.
+
 ### 0.3.19
 
 - Same version as `everydeck-check` 0.3.19, whose `validate --repo` now names in the inventory where the app's own server reads its everydeck settings. `--merge` keeps that inventory as before; nothing else changes in the scaffold.

@@ -160,6 +160,7 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         for k, v in (ident.get("fields") or {}).items():
             if ident.get("table") and v: col(ident["table"], v["column"], f"identity.fields.{k}")
         if ident.get("suspend") and ident.get("table"): col(ident["table"], ident["suspend"]["column"], "identity.suspend")
+        if ident.get("last_active") and ident.get("table"): col(ident["table"], ident["last_active"]["column"], "identity.last_active")
         for s in (ident.get("suspend", {}).get("set_true_by"), ident.get("suspend", {}).get("set_false_by")):
             if s: fn_ref(s, "identity.suspend")
         for m in ident.get("memberships", []) or []:
@@ -465,9 +466,13 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         for k, v in (ident.get("fields") or {}).items():
             if v: _check_evidence(files, v["evidence"], f"identity.fields.{k}", [v["column"]], errs)
         if ident.get("suspend"): _check_evidence(files, ident["suspend"]["checked"], "identity.suspend.checked", [ident["suspend"]["column"]], errs)
+        # where the app writes "last active" with the current time (the column is named in that line)
+        if ident.get("last_active"): _check_evidence(files, ident["last_active"]["evidence"], "identity.last_active", [ident["last_active"]["column"]], errs)
         for j, m in enumerate(ident.get("memberships", []) or []): _check_evidence(files, m["evidence"], f"identity.memberships[{j}]", [m["table"]], errs)
         # the browser names the signed-in person to the SDK there (visits and sign-ins, without it every visit stays anonymous)
         if ident.get("browser_subject"): _check_evidence(files, ident["browser_subject"], "identity.browser_subject", ["setSubject"], errs)
+        # There the app hands the answer of its consent banner to the SDK (everydeck.consent(...))
+        if ident.get("browser_consent"): _check_evidence(files, ident["browser_consent"], "identity.browser_consent", ["consent"], errs)
     # the core object (what the people of the app create most): the place where they create it exists
     if b.get("core_object"): _check_evidence(files, b["core_object"]["evidence"], f"core_object {b['core_object']['table']}", [], errs)
     # the place of the description "what the users work with" is in the UI and names the table, or it coincides with a
@@ -509,6 +514,11 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
             if c.get("contact"): _check_evidence(files, c["contact"]["evidence"], f"{at}.columns[{j}] {c['name']}.contact", [c["name"]], errs)   # the place where the app treats the value as a contact names the column (or its symbol)
             # the place where the app uses a column named like contact data as something else names the column (or its symbol); never both
             if c.get("not_contact"): _check_evidence(files, c["not_contact"]["evidence"], f"{at}.columns[{j}] {c['name']}.not_contact", [c["name"]], errs)
+            # the place where the app builds the image address names the column, a rule's text (-detail.webp), the bucket or the key
+            if c.get("image_src"):
+                src = c["image_src"]; words = [c["name"]] + [x for r in (src.get("detail") or []) + (src.get("thumb") or []) for x in (r.get("replace_ext"), r.get("before_ext"), r.get("host")) if x] + [x for x in (src.get("bucket"), src.get("key"), src.get("base")) if x]
+                _check_evidence(files, src["evidence"], f"{at}.columns[{j}] {c['name']}.image_src", words, errs)
+                if src["form"] == "storage" and not src.get("bucket"): errs.append(f"{at}.columns[{j}] {c['name']}.image_src: form storage names no bucket; name the bucket the app reads the photos from")
             if c.get("not_contact") and c.get("contact"): errs.append(f"{at}.columns[{j}] {c['name']}: contact and not_contact together; keep the one the code shows")
         for j, s in enumerate(t.get("statuses", []) or []):
             _check_evidence(files, s["evidence"], f"{at}.statuses[{j}] {s['value']}", [s["value"]], errs)

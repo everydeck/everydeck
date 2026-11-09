@@ -537,9 +537,13 @@ def digest(manifest: dict[str, Any]) -> str:
 
 @dataclass
 class Finding:
-    kind: str          # missing_file | missing_symbol | signal_not_in_symbol | call_sites_decreased | new_build | job_not_in_heartbeat | screen_not_in_code | api_route_not_in_code | subject_not_in_code
+    kind: str          # missing_file | missing_symbol | signal_not_in_symbol | call_sites_decreased | new_build | job_not_in_heartbeat | job_without_heartbeat (a note) | screen_not_in_code | api_route_not_in_code | subject_not_in_code
     signal: str
     where: str
+
+
+# findings that are notes, not drift (the check stays green)
+NOT_DRIFT = {"job_without_heartbeat"}
 
 
 @dataclass
@@ -550,9 +554,11 @@ class DriftReport:
 
     @property
     def status(self) -> str:
-        if not self.findings:
+        # a job that never had a heartbeat is a note, not drift (everydeck shows it after its first run or reads pg_cron itself)
+        real = [f for f in self.findings if f.kind not in NOT_DRIFT]
+        if not real:
             return "ok"
-        if all(f.kind == "new_build" for f in self.findings):
+        if all(f.kind == "new_build" for f in real):
             return "revision_only"
         return "drift"
 
@@ -642,7 +648,7 @@ def check_drift(repo: Path, manifest: dict[str, Any], lock: dict[str, int] | Non
             rep.findings.append(Finding("call_sites_decreased", s["name"], f"{loc['path']}::{loc['symbol']} {lock[key]}→{n}"))
         if rep.head and loc["commit"] != rep.head:
             rep.findings.append(Finding("new_build", s["name"], f"manifest@{loc['commit'][:7]} repo@{rep.head[:7]}"))
-    check_jobs(repo, manifest, rep)
+    check_jobs(repo, manifest, rep, lock)
     check_screens(repo, manifest, rep)
     check_subject(repo, manifest, rep)
     return rep
@@ -674,30 +680,45 @@ def _relay_in_repo(repo: Path) -> bool:
     return False
 
 
-def check_jobs(repo: Path, manifest: dict[str, Any], rep: DriftReport) -> None:
+def _pg_cron_job(j: dict[str, Any]) -> bool:
+    """A schedule in SQL (cron.schedule in a migration): pg_cron writes every run to cron.job_run_details and everydeck reads it from there, like the
+    Supabase dashboard. The outbox relay keeps its own beat (it is everydeck's, not the app's)."""
+    return j.get("id") != "everydeck_outbox_relay" and any(str(ev.get("path", "")).endswith(".sql") for ev in j.get("evidence", []) or [])
+
+
+def check_jobs(repo: Path, manifest: dict[str, Any], rep: DriftReport, lock: dict[str, int] | None = None) -> None:
     """Every place of a job must contain a heartbeat call with exactly this job id (all languages, text check). A schedule in SQL beats through the
     outbox (everydeck_outbox.run_job('<id>', …) or everydeck_outbox.job_heartbeat('<id>')), a run outside the app with a check-in step that calls
-    …/v1/jobs/<id>/check-in."""
+    …/v1/jobs/<id>/check-in.
+    A schedule in SQL needs no heartbeat at all (everydeck reads pg_cron; before 0.3.20 the check turned red for a heartbeat that never existed). A job
+    whose heartbeat is missing was "removed" only if the lock file recorded it (`job:<id>@<path>`); otherwise it never had one: `job_without_heartbeat`,
+    a note, not drift (everydeck shows the job after its first run)."""
     import re as _re
     for j in manifest.get("jobs", []) or []:
         jid = j.get("id", "")
+        if _pg_cron_job(j):
+            continue
         call = _re.compile(r"(?:heartbeat\w*|run_job)\s*\([^)]*?[\"'`]" + _re.escape(jid) + r"[\"'`]", _re.S)
         checkin = _re.compile(r"/v1/jobs/" + _re.escape(jid) + r"/check-in(?![\w-])")
         for ev in j.get("evidence", []) or []:
+            key = f"job:{jid}@{ev['path']}"
+            had = lock is not None and lock.get(key, 0) > 0
             f = repo / ev["path"]
             if not f.exists():
-                rep.findings.append(Finding("missing_file", f"job:{jid}", ev["path"]))
+                rep.findings.append(Finding("missing_file" if had else "job_without_heartbeat", f"job:{jid}", ev["path"]))
                 continue
             text = f.read_text(encoding="utf-8", errors="replace")
             if ev.get("symbol") and not _symbol_in_text(text, ev["symbol"]):
-                rep.findings.append(Finding("missing_symbol", f"job:{jid}", f"{ev['path']}::{ev['symbol']}"))
+                rep.findings.append(Finding("missing_symbol", f"job:{jid}", f"{ev['path']}::{ev['symbol']}") if had else Finding("job_without_heartbeat", f"job:{jid}", ev["path"]))
                 continue
             # The outbox relay sends the beat in relayOnce (default id everydeck_outbox_relay or job: '<id>')
             relay = _relay_in_text(f, text) and (jid == "everydeck_outbox_relay" or _re.search(r"job\s*:\s*[\"'`]" + _re.escape(jid) + r"[\"'`]", text))
             # The place of the relay job is often the schedule (pg_cron → Edge Function); the beat is then in the app's relay
             if not relay and jid == "everydeck_outbox_relay": relay = _relay_in_repo(repo)
-            if not call.search(text) and not relay and not checkin.search(text):
-                rep.findings.append(Finding("job_not_in_heartbeat", f"job:{jid}", ev["path"]))
+            if call.search(text) or relay or checkin.search(text):
+                rep.call_sites[key] = 1
+            else:
+                rep.findings.append(Finding("job_not_in_heartbeat" if had else "job_without_heartbeat", f"job:{jid}", ev["path"]))
 
 
 _SCREEN_SKIP = {".git", "node_modules", "vendor", "dist", "build", ".next", ".expo", "everydeck", "coverage", "__pycache__", ".venv"}

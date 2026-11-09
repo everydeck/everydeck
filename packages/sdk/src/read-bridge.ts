@@ -8,7 +8,7 @@
  * Runs in Node >= 22, Deno (Supabase Edge Functions) and any fetch runtime: no `Buffer`, no `node:` module. `handle()` is the pure
  * function, `fetch()` the adapter for Request/Response (Deno.serve), `node()` the one for node:http.
  *
- * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref}
+ * Contract (read-bridge.schema.json): GET /everydeck/read/capabilities · GET /everydeck/read/objects/{type}?cursor&limit[&changed_since=<ISO>] · GET /everydeck/read/objects/{type}/{ref} · GET /everydeck/read/people?cursor&limit · GET /everydeck/read/people/{subject_ref} · GET /everydeck/read/active?since&cursor&limit
  * · GET /everydeck/read/messages/{type}/{ref}?cursor&limit (messages of a conversation, on demand only, with `match`)
  * · GET /everydeck/read/keys/{type}?cursor&limit (only the refs, up to KEYS_PAGE_MAX per page: everydeck's daily inventory finds deleted records with them, like Fivetran);
  * · GET /everydeck/read/counts (with `count`: per type the number of records a full read would deliver, so everydeck's data loss watch need not wait for a full read);
@@ -65,7 +65,10 @@ export interface ReadScopeObject { type: string; table: string; ref: string[]; t
   /** records are only appended, never changed (with `created`): `changed_since` reads the records created since then, stable by (created, key), like an incremental append */ appended?: true }
 export interface ReadScopeRelation { id: string; table: string; ref: string[]; fields: ReadScopeField[] }
 /** name = the app's rule for the display name (stages in order; per stage the columns, joined with the app's separator) */
-export interface ReadScopePeople { table: string; ref: string; fields: Record<string, string>; name?: { columns: string[]; separator?: string }[]; /** when the person signed up; delivered as `created_at` */ created?: string }
+/** when a person was last active, as the app stores it: a column of the people table the app writes with the current time (`app`), or Supabase Auth's
+ *  auth.users.last_sign_in_at (`sign_in`); `ref` is the column that holds the person's subject_ref in that table. Read on its own route (GET …/active) */
+export interface ReadScopeActive { table: string; ref: string; column: string; source: 'app' | 'sign_in' }
+export interface ReadScopePeople { table: string; ref: string; fields: Record<string, string>; name?: { columns: string[]; separator?: string }[]; /** when the person signed up; delivered as `created_at` */ created?: string; /** last active (GET …/active) */ active?: ReadScopeActive }
 /** A conversation: the bridge delivers its messages only on demand (GET /everydeck/read/messages/{type}/{ref}); everydeck does not store them */
 export interface ReadScopeConversation { type: string; table: string; ref: string[]; messages: { table: string; ref: string[]; conversation: string; sender: string; time: string; text: string[] }; attachments?: { table: string; message: string; url: string; name?: string; kind: 'image' | 'file' } }
 export interface ReadScope { version: '1'; objects: ReadScopeObject[]; relations: ReadScopeRelation[]; conversations?: ReadScopeConversation[]; people: ReadScopePeople | null }
@@ -94,7 +97,7 @@ export interface ReadBridgeRequest { method: string; path: string; query?: Recor
 export interface ReadBridgeResponse { status: number; body: unknown }
 export interface QueryClient { query: (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }
 
-const PAGE_MAX = 200; const VALUE_MAX = 256;
+const PAGE_MAX = 200; const VALUE_MAX = 256; /** a list (text[], jsonb array) keeps whole entries up to this length, always valid JSON (photo addresses: about 8) */ const LIST_MAX = 1024;
 /** Refs per page of GET /everydeck/read/keys/{type}: everydeck's daily inventory compares only the refs to find deleted records (like Fivetran), so a
  *  page carries ten times the rows of a full page at a fraction of the bytes (a ref is at most 128 characters) */
 export const KEYS_PAGE_MAX = 2000;
@@ -116,9 +119,16 @@ export function sameToken(a: string | undefined, b: string): boolean {
   return d === 0 && x.length === y.length;
 }
 const text = (v: unknown): string => (v instanceof Date ? v.toISOString() : typeof v === 'string' ? v : typeof v === 'object' ? JSON.stringify(v) : String(v));
-/** Field value in transport form: number, boolean, text (<= 256), otherwise JSON text; timestamps ISO-8601 */
+/** a list as JSON text with whole entries only (up to LIST_MAX); cutting the text would leave no readable entry (the photo addresses of a record) */
+const list = (v: unknown[]): string => {
+  const out: unknown[] = [];
+  for (const x of v) { out.push(x instanceof Date ? x.toISOString() : x ?? null); if (JSON.stringify(out).length > LIST_MAX) { out.pop(); break; } }
+  return JSON.stringify(out);
+};
+/** Field value in transport form: number, boolean, text (<= 256), a list with whole entries (<= 1024), otherwise JSON text; timestamps ISO-8601 */
 const value = (v: unknown): string | number | boolean | null => {
   if (v === null || v === undefined) return null;
+  if (Array.isArray(v)) return list(v);
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'boolean') return v;
   if (typeof v === 'bigint') return Number.isSafeInteger(Number(v)) ? Number(v) : v.toString();
@@ -152,7 +162,7 @@ export function createReadBridge(o: ReadBridgeOptions) {
   // the capabilities say per object type whether `changed_since` works (change column in the scope) and whether the single fetch works
   const capabilities = async () => ({ version: '1' as const, ...(o.app ? { app: o.app } : {}), identity: 'subject_ref' as const,
     objects: [...o.scope.objects.map((x) => ({ type: x.type, fields: x.fields.map((f) => f.name), ...(x.statuses?.length ? { statuses: x.statuses } : {}), changed_since: !!incrementalColumn(x), keys: true, ...(o.count ? { count: true } : {}) })), ...o.scope.relations.map((r) => ({ type: r.id, fields: r.fields.map((f) => f.name), changed_since: false, keys: true, ...(o.count ? { count: true } : {}) }))],
-    ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields), fetch_one: !!o.one } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
+    ...(o.scope.people ? { people: { fields: Object.keys(o.scope.people.fields), fetch_one: !!o.one, ...(o.scope.people.active ? { active: o.scope.people.active.source } : {}) } } : {}), ...(o.match && o.scope.conversations?.length ? { messages: o.scope.conversations.map((c) => c.type) } : {}), ...(o.match ? { messages_grant: true } : {}), rights: await rights(), page_limit: limitMax, fetch_one: !!o.one, signed: (o.signatures ?? 'required') !== 'off' });
   const page = (q: Record<string, string | undefined> | undefined) => { const limit = Math.min(limitMax, Math.max(1, Number(q?.['limit'] ?? limitMax) || limitMax)); const after = q?.['cursor'] ? unb64(q['cursor']) : null; return { limit, after, bad: !!q?.['cursor'] && !after }; };
   const refOf = (row: Record<string, unknown>, keys: string[]) => keys.map((k) => text(row[k])).join('|');
   // a timestamp as Postgres writes it as text ("2026-10-25 23:59:16.774+00", offset without minutes) is read too
@@ -242,6 +252,19 @@ export function createReadBridge(o: ReadBridgeOptions) {
         catch (e) { const m = missingOf(e, x.table); if (!m) throw e; missing[type] = m; }
       }
       return { status: 200, body: { as_of: asOf, counts, ...(Object.keys(missing).length ? { missing } : {}) } };
+    }
+    // GET /everydeck/read/active?since=<ISO>: when each person was last active, as the app stores it (people.active), only rows at or after `since`, stable by
+    // (time, ref) like changed_since; people without a time are left out. everydeck counts active people from it, with the app's own history
+    if (path === '/everydeck/read/active') {
+      const a = people?.active; if (!a) return { status: 404, body: { error: 'no last-active column in the read scope' } };
+      const { limit, after, bad } = page(req.query); if (bad || (after && after.length !== 2)) return { status: 400, body: { error: 'bad cursor' } };
+      const since = req.query?.['since'] === undefined ? '1970-01-01T00:00:00.000Z' : isoOf(req.query['since']); if (!since) return { status: 400, body: { error: 'bad since (ISO-8601 expected)' } };
+      let rows: Record<string, unknown>[];
+      try { rows = await o.rows({ table: a.table, columns: [a.ref, a.column], keys: [a.ref], after, limit: limit + 1, changed: { column: a.column, since } }); }
+      catch (e) { const m = missingOf(e, a.table); if (m) return missingReply('active', m); throw e; }
+      const kept = rows.slice(0, limit); const last = kept[kept.length - 1];
+      return { status: 200, body: { as_of: asOf, source: a.source, since, items: kept.map((r) => ({ subject_ref: text(r[a.ref]).slice(0, 128), last_active_at: isoOf(r[a.column]) })).filter((x) => x.last_active_at !== null),
+        next_cursor: rows.length > limit && last ? b64([isoOf(last[a.column]) ?? '', text(last[a.ref])]) : null } };
     }
     const pm = /^\/everydeck\/read\/people(?:\/([^/]+))?$/.exec(path);
     if (pm) {
@@ -417,7 +440,7 @@ export function pgMatch(client: QueryClient, o: { schema?: string } = {}): ReadM
   };
 }
 /** All tables of the scope (objects, relations, conversations, people), for the rights check and the reader role's SQL */
-export const scopeTables = (scope: ReadScope): string[] => uniq([...scope.objects.map((x) => x.table), ...scope.relations.map((r) => r.table), ...(scope.conversations ?? []).flatMap((c) => [c.table, c.messages.table, ...(c.attachments ? [c.attachments.table] : [])]), ...(scope.people ? [scope.people.table] : [])]);
+export const scopeTables = (scope: ReadScope): string[] => uniq([...scope.objects.map((x) => x.table), ...scope.relations.map((r) => r.table), ...(scope.conversations ?? []).flatMap((c) => [c.table, c.messages.table, ...(c.attachments ? [c.attachments.table] : [])]), ...(scope.people ? [scope.people.table, ...(scope.people.active ? [scope.people.active.table] : [])] : [])]);
 /** Checks the role's rights instead of claiming them: superuser (pg_roles.rolsuper) and INSERT/UPDATE/DELETE per scope table (has_table_privilege);
  * with `schema` (the reader role's views, e.g. everydeck_read) also whether the schema is reachable through the Supabase API (pgrst.db_schemas) or for anon/authenticated/PUBLIC */
 /** Reachability of the view schema: in pgrst.db_schemas of the authenticator role (Supabase API), USAGE for anon / authenticated, USAGE for PUBLIC (nspacl '=U') */
