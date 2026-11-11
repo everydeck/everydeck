@@ -17,18 +17,22 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .detect import PACKAGE_DEPTH, SKIP_DIRS
+from .detect import PACKAGE_DEPTH, SKIP_DIRS, repo_files
+from .workspaces import workspace_roots
 
 VERSION = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 FROM = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?(?:docker\.io/)?(?:library/)?(python|node)(?::([^\s@]+))?", re.I | re.M)
 
 
 def _files(repo: Path, names: tuple[str, ...]) -> list[Path]:
-    """Files with one of these names (any `Dockerfile*` for "Dockerfile") down to PACKAGE_DEPTH folders, without node_modules and the like (never walked)."""
+    """Files with one of these names (any `Dockerfile*` for "Dockerfile") down to PACKAGE_DEPTH folders and in every root a workspace manifest names
+    without node_modules and the like (never walked)."""
+    roots = workspace_roots(repo, repo_files(repo))[1]
     out: list[Path] = []
     for root, dirs, files in os.walk(repo):
-        depth = len(Path(root).relative_to(repo).parts)
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and depth < PACKAGE_DEPTH)
+        rel = Path(root).relative_to(repo).as_posix(); depth = 0 if rel == "." else rel.count("/") + 1; at = "" if rel == "." else f"{rel}/"
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and (depth < PACKAGE_DEPTH or any(r == f"{at}{d}" or r.startswith(f"{at}{d}/") for r in roots)))
+        if depth > PACKAGE_DEPTH and rel not in roots: continue
         out += [Path(root) / f for f in sorted(files) if f in names or ("Dockerfile" in names and f.startswith("Dockerfile"))]
     return out
 

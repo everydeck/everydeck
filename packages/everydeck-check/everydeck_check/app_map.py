@@ -34,6 +34,10 @@ EVERYDECK_SCHEMAS = {"everydeck", "everydeck_outbox", "everydeck_bridge", "every
 SQL_CREATE_IN_SCHEMA = re.compile(r"""create\s+table\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z_][\w]*)"?\.\s*"?[A-Za-z_][\w]*"?""", re.I)
 # what deletes rows in SQL and the usual clients (Supabase/Drizzle .delete(), Prisma deleteMany, Sequelize/Rails destroy)
 ROW_DELETE = re.compile(r"\b(?:delete|truncate)\b|\.delete\(|delete_?many|destroy", re.I)
+# An ISO 8601 duration of needs_attention (older_than, newer_than), the same form as row_deletes[].older_than
+DURATION = re.compile(r"^P(?:\d+W)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?)?$")
+# The place of a must_keep forbids or rejects the delete: a trigger or rule on DELETE, ON DELETE RESTRICT, or code that raises, refuses or throws
+MUST_KEEP = re.compile(r"\bon\s+delete\b|\bbefore\s+delete\b|\bdo\s+instead\s+nothing\b|\brestrict\b|\braise\b|\bthrow\b|\breject|\brefuse|\bforbid|\bnot\s+allowed\b", re.I)
 EVERYDECK_TABLES_NOTE = "tables in everydeck's schemas (everydeck_outbox, everydeck_bridge, everydeck_read) count by themselves: leave them out of everydeck_tables; any other table your installation adds stays in tables[] too"
 
 
@@ -55,7 +59,7 @@ def schema_errors(b: dict[str, Any]) -> list[str]:
             out.append(f"{where}: needs {'at least' if err.validator == 'minItems' else 'at most'} {err.validator_value} entries (has {len(err.instance)})")
         else:
             out.append(f"{where}: {err.message[:200]}")
-    return out[:30]
+    return out   # every error of the shape (before at most 30: the rest came only after the next run)
 
 
 # the result signal can be written before any key exists; an agent that thought otherwise asked the owner where it goes
@@ -205,6 +209,36 @@ def reference_errors(b: dict[str, Any]) -> list[str]:
         for t in j.get("deletes") or []:
             if t not in names: errs.append(f"jobs[{i}] {j['id']}: deletes table {t}, which is not in the app map")
             elif t not in scheduled: errs.append(f"jobs[{i}] {j['id']}: deletes {t}, but row_deletes has no entry by schedule for it (the place of the DELETE)")
+    # What the app itself counts as needing attention names tables and columns of the app map; either where or not_checkable (mirror of the contracts)
+    cols = {t["name"]: {c["name"] for c in t.get("columns", [])} for t in b.get("tables", [])}
+    def cond_errs(w: dict[str, Any], table: str, at: str) -> None:
+        if w["column"] not in cols.get(table, set()): errs.append(f"{at}: column {w['column']} is not in table {table}")
+        if all(w.get(k) is None for k in ("equals", "in", "not_in", "at_least", "at_most", "set", "older_than", "newer_than")): errs.append(f"{at}: says nothing about {w['column']} (equals, in, not_in, at_least, at_most, set, older_than or newer_than)")
+        for k in ("older_than", "newer_than"):
+            d = w.get(k)
+            if d is not None and (not DURATION.match(d) or d in ("P", "PT")): errs.append(f"{at}: {d} is no ISO 8601 duration (PT1H, P1D)")
+    ids = [n["id"] for n in b.get("needs_attention") or []]
+    for i, n in enumerate(b.get("needs_attention") or []):
+        at = f"needs_attention[{i}] {n['id']}"
+        if ids.count(n["id"]) > 1: errs.append(f"{at}: id listed twice")
+        if n["table"] not in names: errs.append(f"{at}: table {n['table']} is not in the app map"); continue
+        if (n.get("where") is None) == (n.get("not_checkable") is None): errs.append(f"{at}: name either where (the conditions of the app's count) or not_checkable (why everydeck cannot check it), not {'both' if n.get('where') is not None else 'neither'}")
+        for j, w in enumerate(n.get("where") or []): cond_errs(w, n["table"], f"{at}.where[{j}]")
+        h = n.get("has")
+        if h:
+            if h["table"] not in names: errs.append(f"{at}.has: table {h['table']} is not in the app map")
+            else:
+                if h["column"] not in cols.get(h["table"], set()): errs.append(f"{at}.has: column {h['column']} is not in table {h['table']}")
+                for j, w in enumerate(h.get("where") or []): cond_errs(w, h["table"], f"{at}.has.where[{j}]")
+            if n.get("not_checkable") is not None: errs.append(f"{at}.has: not_checkable names no conditions; leave has out")
+    # Rows that must stay are no rows the app empties itself (row_deletes by schedule or on_write)
+    keep = [k["table"] for k in b.get("must_keep") or []]
+    for i, k in enumerate(b.get("must_keep") or []):
+        at = f"must_keep[{i}] {k['table']}"
+        if k["table"] not in names: errs.append(f"{at}: table {k['table']} is not in the app map")
+        if keep.count(k["table"]) > 1: errs.append(f"{at}: listed twice")
+        empties = next((d for d in b.get("row_deletes") or [] if d["table"] == k["table"] and d["by"] != "person"), None)
+        if empties: errs.append(f"{at}: row_deletes says the app empties {k['table']} itself (by {empties['by']}); rows the app deletes on its own are no rows that must stay, keep one of the two")
     # a described screen names only tables and flows of the app map (mirror of the reference check in the contracts)
     for i, sc in enumerate(b.get("screens") or []):
         d = sc.get("described")
@@ -248,6 +282,8 @@ class _Files:
 
 # place "database" (the schema from the database): checked only with `--db`, against the catalog
 DB_TABLES: set[str] | None = None
+# --db was given but did not answer: the places with evidence "database" are counted here, not listed one by one (the database stage names the error)
+DB_FAILED: list[str] | None = None
 
 
 def _roles(req: dict[str, Any]) -> list[str]:
@@ -270,6 +306,7 @@ def _check_evidence(files: _Files, ev: dict[str, Any], at: str, expect: list[str
     """File there, line there, and at least one of the expected words is in the line ± LINE_SLACK."""
     rel = ev["path"]; ln = int(ev["line"])
     if rel == "database":
+        if DB_TABLES is None and DB_FAILED is not None: DB_FAILED.append(at); return
         if DB_TABLES is None: errs.append(f"{at}: evidence from the database; run everydeck-check validate with --db <url> (the read role is enough; for a hosted database the structure address everydeck gives) to confirm it"); return
         sym = str(ev.get("symbol") or "")
         name = sym.split(" ")[-1]; tbl = name.split(".")[0] if name.count(".") == 1 and not name.startswith("public.") and name.split(".")[0] not in {t.split(".")[0] for t in DB_TABLES} else name
@@ -506,6 +543,19 @@ def evidence_errors(b: dict[str, Any], repo: Path) -> list[str]:
         lines = files.lines(ev["path"]) if ev["path"] != "database" else None
         if len(errs) == before and lines is not None and not ROW_DELETE.search("\n".join(lines[max(0, int(ev["line"]) - 1 - LINE_SLACK):int(ev["line"]) + LINE_SLACK])):
             errs.append(f"{at}: {ev['path']}:{ev['line']} deletes nothing (no DELETE, TRUNCATE, .delete(), deleteMany or destroy ±{LINE_SLACK} lines); name the place that deletes the rows")
+    # The condition of what the app counts as needing attention names the table at its place; where the app shows it is a place in the code
+    for i, n in enumerate(b.get("needs_attention") or []):
+        at = f"needs_attention[{i}] {n['id']}"
+        _check_evidence(files, n["evidence"], f"{at}.evidence", [] if n.get("not_checkable") else table_names(n["table"]), errs)
+        _check_evidence(files, n["shown"], f"{at}.shown", [], errs)
+        if n.get("screen"): _check_evidence(files, n["screen"]["evidence"], f"{at}.screen", [], errs)
+    # The place of a must_keep names the table and forbids or rejects the delete there (± 3 lines); no DELETE found is no such place
+    for i, k in enumerate(b.get("must_keep") or []):
+        at = f"must_keep[{i}] {k['table']}"; ev = k["evidence"]; before = len(errs)
+        _check_evidence(files, ev, at, table_names(k["table"]) if k["by"] != "code" else [], errs)
+        lines = files.lines(ev["path"]) if ev["path"] != "database" else None
+        if len(errs) == before and lines is not None and not MUST_KEEP.search("\n".join(lines[max(0, int(ev["line"]) - 1 - LINE_SLACK):int(ev["line"]) + LINE_SLACK])):
+            errs.append(f"{at}: {ev['path']}:{ev['line']} forbids no delete (no trigger or rule on DELETE, no ON DELETE RESTRICT, no error that refuses it ±{LINE_SLACK} lines); name the place that keeps the rows, or leave must_keep out")
     for i, pc in enumerate((b.get("app") or {}).get("production_in_code") or []): _check_evidence(files, pc["evidence"], f"app.production_in_code[{i}] {pc['kind']}", [], errs)
     ic = (b.get("app") or {}).get("icon")
     if ic:   # the icon the app ships: file there, content = checksum, the place names the file (or is the file itself)
@@ -905,7 +955,7 @@ def money_ai_errors(b: dict[str, Any], repo: Path) -> list[str]:
             for kind, verb, re_ in PAY_CALL:
                 p = re_.search(line)
                 if p and not has(pay, r, i + 1): errs.append(f"money: the code {verb} ({p.group(1)}) at {r}:{i + 1} but money.providers names no call there; rerun the scaffold with --merge")
-    return errs[:50]
+    return errs   # every call (before at most 50)
 
 
 USE_FILES = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".vue", ".svelte", ".dart"}
@@ -1280,30 +1330,81 @@ SIGNAL_ERROR = re.compile(r"result signal|browser_subject|needs a signal|signal 
 
 
 def validate_app_map(doc: dict[str, Any], repo: Path | None, db: str | None = None) -> list[str]:
-    """Every stage in one run: before, the first stage with an error hid all later ones, and the missing result signal (a code change) hid
-    every place, table and money entry of the map; real apps saw only that error first. Only a map that does not have the shape stops early,
-    because nothing else can be read then. A stage that cannot run because of an earlier error says so instead of staying silent."""
-    global DB_TABLES
-    errs = schema_errors(doc)
-    if errs: return errs
-    errs = list(reference_errors(doc))
-    # the same check as everydeck on submission (bundled), derivation and derived manifest included
-    from .rules import app_map_rule_errors
-    # everydeck's own check says the missing result signal in its words; the reference check said it before: once is enough
-    one_signal = re.compile(r"at least one flow (?:needs a|with a) result signal")
-    errs += [e for e in app_map_rule_errors(doc) if e not in errs and not (one_signal.search(e) and any(one_signal.search(x) for x in errs))]
+    """Every error of every stage in one run (diagnose_app_map without the stages)."""
+    return diagnose_app_map(doc, repo, db)[0]
+
+
+# a rule line that repeats a local reference error in everydeck's words (the same check, "app map references unresolved: <the same text>")
+RULE_REF = "app map references unresolved: "
+
+
+def diagnose_app_map(doc: dict[str, Any], repo: Path | None, db: str | None = None, rules: dict[str, Any] | None = None) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+    """Every stage in one run: before, the first stage with an error hid all later ones, and a map with an error of its shape or a database that
+    did not answer was not checked further at all. Now each stage runs that can: one whose input an earlier error breaks says so (`not_checked`, `blocked_by`),
+    one that ran although an earlier stage had errors names them (`after_errors_in`: its result can change once they are fixed). Returns (errors with the
+    missing result signal last, the stages, everydeck's own check with the open parts: one call of the rules for all of it)."""
+    global DB_TABLES, DB_FAILED
+    DB_TABLES = None; DB_FAILED = None
+    errs: list[str] = []; stages: list[dict[str, Any]] = []
+    failed = lambda: [x["id"] for x in stages if x["state"] == "invalid"]
+
+    def stage(sid: str, run: Any) -> None:
+        before = failed()
+        try: found = run()
+        except Exception as e:   # noqa: BLE001 (an earlier error (no shape, a reference to nothing) can break a later stage; it says so and the rest still runs)
+            stages.append({"id": sid, "state": "not_checked", "count": 0, "blocked_by": before, "why": f"{type(e).__name__}: {str(e)[:120]}"})
+            errs.append(f"{sid}: not checked in this run because of the errors above ({type(e).__name__}: {str(e)[:120]}); fix them and run validate again")
+            return
+        new = [e for e in found if e not in errs]
+        errs.extend(new)
+        stages.append({"id": sid, "state": "invalid" if new else "valid", "count": len(new), **({"after_errors_in": before} if before else {})})
+
+    stage("shape", lambda: schema_errors(doc))
+    stage("references", lambda: list(reference_errors(doc)))
+    # the same check as everydeck on submission (bundled), derivation and derived manifest included; one call also gives the open parts
+    from .rules import RulesUnavailable, app_map_check
+    if rules is None:
+        try: rules = app_map_check(doc)
+        except RulesUnavailable as e: rules = {"unavailable": str(e)}
+    if "unavailable" in rules:
+        errs.append(f"everydeck rules: {rules['unavailable']}")
+        stages.append({"id": "rules", "state": "not_checked", "count": 0, "why": rules["unavailable"][:200]})
+    else:
+        # everydeck's own check says the missing result signal in its words; the reference check said it before: once is enough
+        one_signal = re.compile(r"at least one flow (?:needs a|with a) result signal")
+        local_shape = any(x["id"] == "shape" and x["state"] == "invalid" for x in stages)
+        mine = [e for e in rules.get("errors", []) if e not in errs and not (e.startswith(RULE_REF) and e[len(RULE_REF):] in errs)
+                and not (one_signal.search(e) and any(one_signal.search(x) for x in errs))
+                # its shape stage checks the same schema as the local one above: with local shape errors only the other stages of the rules count
+                and not (local_shape and e.startswith("app map violates contract: "))]
+        errs.extend(mine)
+        sub = [x for x in rules.get("stages", []) if x.get("id") != "open_parts"]
+        # its state follows its own stages (an error it shares with a local stage is listed once, under the local one)
+        state = "invalid" if mine or any(x.get("state") == "invalid" for x in sub) else "not_checked" if any(x.get("state") == "not_checked" and x.get("why") and not x.get("blocked_by") for x in sub) else "valid"
+        stages.append({"id": "rules", "state": state, "count": len(mine), "stages": sub})
     if db:
-        try: DB_TABLES = database_tables(db)
-        except RuntimeError as e: return errs + [f"--db: {e}"]
-        errs += database_errors(doc, DB_TABLES)
-        try: errs += default_errors(doc, database_time_defaults(db))
-        except RuntimeError as e: return errs + [f"--db: {e}"]
+        def tables() -> list[str]:
+            global DB_TABLES
+            try: DB_TABLES = database_tables(db)
+            except RuntimeError as e:
+                return [f"--db: {e}"]
+            found = database_errors(doc, DB_TABLES)
+            try: return found + default_errors(doc, database_time_defaults(db))
+            except RuntimeError as e: return found + [f"--db: {e}"]
+        stage("database", tables)
+        if DB_TABLES is None: DB_FAILED = []
+    else:
+        stages.append({"id": "database", "state": "not_checked", "count": 0, "why": "run with --db"})
     if repo:
-        for stage, check in (("places", evidence_errors), ("completeness", completeness_errors), ("contact copies", contact_copy_errors)):
-            try: errs += [e for e in check(doc, repo) if e not in errs]
-            except Exception as e:   # noqa: BLE001 (an earlier error (a reference to nothing) can break a later stage; it says so and the rest still runs)
-                errs.append(f"{stage}: not checked in this run because of the errors above ({type(e).__name__}: {str(e)[:120]}); fix them and run validate again")
-    return [e for e in errs if not SIGNAL_ERROR.search(e)] + [e for e in errs if SIGNAL_ERROR.search(e)]
+        for sid, check in (("places", evidence_errors), ("completeness", completeness_errors), ("contact_copies", contact_copy_errors)):
+            stage(sid, lambda check=check: check(doc, repo))
+    else:
+        stages += [{"id": sid, "state": "not_checked", "count": 0, "why": "run with --repo ."} for sid in ("places", "completeness", "contact_copies")]
+    if DB_FAILED:
+        db_stage = next(x for x in stages if x["id"] == "database")
+        db_stage["places_not_checked"] = len(DB_FAILED)
+        errs.append(f"--db: {len(DB_FAILED)} places with evidence \"database\" are not checked until the database answers (the --db error above); fix it and run validate again")
+    return [e for e in errs if not SIGNAL_ERROR.search(e)] + [e for e in errs if SIGNAL_ERROR.search(e)], stages, rules
 
 
 def drift_manifest(b: dict[str, Any]) -> dict[str, Any]:

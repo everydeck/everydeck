@@ -22,13 +22,17 @@ import json
 import os
 import re
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
+
+from .workspaces import workspace_roots
 
 # limits of the scan (everydeck lists them with the other limits): what the scan does not read; the inventory names skipped files, never "not there"
 CODE_FILE_MAX = 400_000      # code hints: larger source files are skipped
 SCHEMA_FILE_MAX = 2_000_000  # schema detection: larger files are skipped
-PACKAGE_DEPTH = 3            # package.json, requirements, pubspec: folders deeper than this are not read
+PACKAGE_DEPTH = 3            # package.json, requirements, pubspec: folders deeper than this are not read, unless a workspace manifest names them
 SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", ".next", ".expo", "coverage", "__pycache__", ".venv", "venv", "Pods", ".everydeck", "everydeck"}
 OTHER_TREES = (".claude/worktrees",)   # Claude Code's worktrees of the same repository (also without their .git, as a copy)
 
@@ -51,10 +55,41 @@ def _git_ignored(repo: Path) -> set[str]:
     return set() if paths & {"", "."} else paths   # the repository itself ignored by an outer one: nothing is left out
 
 
+# One command walked the repository once per scan (validate --repo at an app with 88 tables: 31 walks, each with `git ls-files`); inside
+# files_session() the walk is done once per repository and kind and shared; a command that adds a file says so (forget_files). Outside a session no cache.
+_FILES: dict[tuple[str, bool], list[Path]] | None = None
+WALKS = 0   # walks of the repository in this process (measured by the tests)
+
+
+@contextmanager
+def files_session() -> Iterator[None]:
+    global _FILES
+    if _FILES is not None:
+        yield
+        return
+    _FILES = {}
+    try: yield
+    finally: _FILES = None
+
+
+def forget_files() -> None:
+    """A file was added or removed inside the session: the next scan walks again."""
+    if _FILES is not None: _FILES.clear()
+
+
 def repo_files(repo: Path, ignored: bool = False) -> list[Path]:
+    if _FILES is None: return _walk_files(repo, ignored)
+    key = (str(Path(repo).resolve()), ignored)
+    if key not in _FILES: _FILES[key] = _walk_files(repo, ignored)
+    return list(_FILES[key])
+
+
+def _walk_files(repo: Path, ignored: bool = False) -> list[Path]:
     """Every file of the app in the repository, sorted. Like git and ripgrep: folders .gitignore leaves out, node_modules, other worktrees
     (.claude/worktrees, `git worktree add` into the folder) and other repositories are never entered. With ignored=True the ignored files stay
     (env files). Before, every scan went through `rglob("*")` and read each file of ~85 worktrees under .claude/worktrees: out of memory in a real app."""
+    global WALKS
+    WALKS += 1
     skip = set() if ignored else _git_ignored(repo)
     out: list[Path] = []
     for d, dirs, files in os.walk(repo):
@@ -221,9 +256,13 @@ def _match(name: str, table: dict[str, str]) -> str | None:
 
 
 def _walk(repo: Path, names: set[str], max_depth: int = PACKAGE_DEPTH):
-    for p in repo_files(repo):
+    """Files with these names down to max_depth folders, and in every root a workspace manifest names, however deep (a monorepo with
+    apps/web/packages/billing lost its packages at depth 3 without a word)."""
+    files = repo_files(repo)
+    roots = set(workspace_roots(repo, files)[1])
+    for p in files:
         rel = p.relative_to(repo)
-        if any(part in SKIP_DIRS for part in rel.parts) or len(rel.parts) > max_depth or not p.is_file():
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or (len(rel.parts) > max_depth and rel.parent.as_posix() not in roots):
             continue
         if p.name in names:
             yield p, rel

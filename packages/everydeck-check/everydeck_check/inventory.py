@@ -22,6 +22,8 @@ import re
 from . import rules
 from .app_map import candidate_ways, detect_providers, detect_tables, scan_candidates
 from .schedules import detect_schedules
+from .environment import detect_environment
+from .workspaces import workspace_roots
 from .detect import CODE_EXT, CODE_FILE_MAX, NPM, PACKAGE_DEPTH, PY, SCHEMA_FILE_MAX, SKIP_DIRS, _match, detect_blocks, repo_files
 
 # code that everydeck-check does not read: a backend in this language is "not inspected"; native shells of an app (ios/, android/) are no backend
@@ -65,11 +67,12 @@ def digest_of(inv: dict[str, Any]) -> str:
 
 def _scanned(repo: Path) -> dict[str, Any]:
     files = 0; skipped: list[dict[str, str]] = []; other: dict[str, list[str]] = {}
-    for p in repo_files(repo):
+    every = repo_files(repo); roots = set(workspace_roots(repo, every)[1])   # a root a workspace manifest names is read however deep
+    for p in every:
         rel = p.relative_to(repo)
         if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file(): continue
-        if p.name in PACKAGE_FILES and len(rel.parts) > PACKAGE_DEPTH:
-            skipped.append({"path": rel.as_posix(), "why": f"deeper than {PACKAGE_DEPTH} folders, dependencies not read"})
+        if p.name in PACKAGE_FILES and len(rel.parts) > PACKAGE_DEPTH and rel.parent.as_posix() not in roots:
+            skipped.append({"path": rel.as_posix(), "why": f"deeper than {PACKAGE_DEPTH} folders and in no workspace, dependencies not read"})
         if p.suffix in CODE_EXT or p.suffix == ".sql":
             files += 1
             size = p.stat().st_size
@@ -105,6 +108,10 @@ def build_inventory(repo: Path, app_map: dict[str, Any]) -> dict[str, Any]:
         **({"server_settings": reads} if (reads := server_settings(repo)) else {}),
         **({"everydeck_files": files} if (files := everydeck_files(repo)) else {}),
         **({"consent_banners": banners} if (banners := consent_banners(repo)) else {}),
+        **({"admin_attention": counts} if (counts := admin_attention(repo)) else {}),
+        **({"delete_guards": guards} if (guards := delete_guards(repo)) else {}),
+        # The environment before anything is built in (workspaces, server entries, Sentry/PostHog, transformations, release age); `apply` applies
+        **({"environment": env} if (env := detect_environment(repo)) else {}),
     }
     inv["excerpts"] = _excerpts(repo, inv)
     inv["digest"] = digest_of(inv)
@@ -164,6 +171,45 @@ def consent_banners(repo: Path) -> list[dict[str, Any]]:
     return out
 
 
+# Where the app's code counts what its team must look at: a needs attention list, an admin dashboard count (rpc admin_dashboard_counts,
+# useAdminStats), a count of what waits for review. Only a hint to describe it (needs_attention) or answer it (outcomes): everydeck never makes a task
+# from a name, the agent names the condition with its place.
+ADMIN_ATTENTION = re.compile(
+    r"\b(?:needs?_?attention|needsAttention|NeedsAttention|attention_?(?:count|items|list)s?)\b"
+    r"|\badmin\w*?_(?:counts?|stats|summary|dashboard|alerts?)\b|\buseAdmin\w*?(?:Counts?|Stats|Summary|Dashboard|Alerts?)\b"
+    r"|\b(?:pending|awaiting|unreviewed)_(?:reviews?|approvals?|verifications?)(?:_count)?\b"
+)
+ADMIN_ATTENTION_MAX = 20
+# Where the schema forbids deleting rows: a trigger before DELETE (it may raise), a rule DO INSTEAD NOTHING, ON DELETE RESTRICT (SQL, Prisma).
+# Only a hint: the agent names a real guard in must_keep and answers the others (an audit trigger) in outcomes; no DELETE found is never such a place
+DELETE_GUARD = re.compile(r"\bbefore\s+(?:(?:insert|update)\s+or\s+)*delete\b|\bon\s+delete\s+do\s+instead\s+nothing\b|\bon\s+delete\s+restrict\b|\bonDelete\s*:\s*Restrict\b", re.I)
+DELETE_GUARDS_MAX = 20
+
+
+def _places_matching(repo: Path, pattern: re.Pattern[str], suffixes: set[str], limit: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for p in repo_files(repo):
+        rel = p.relative_to(repo)
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or p.suffix not in suffixes or p.stat().st_size > CODE_FILE_MAX: continue
+        try: text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError: continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if pattern.search(line) and not line.lstrip().startswith(("//", "#", "*", "--")) and "everydeck" not in line.lower():
+                out.append({"path": rel.as_posix(), "line": i})
+                if len(out) >= limit: return out
+    return out
+
+
+def admin_attention(repo: Path) -> list[dict[str, Any]]:
+    """Every place in the app's code that counts what its team must look at (path, line), at most ADMIN_ATTENTION_MAX."""
+    return _places_matching(repo, ADMIN_ATTENTION, set(CODE_EXT) | {".sql"}, ADMIN_ATTENTION_MAX)
+
+
+def delete_guards(repo: Path) -> list[dict[str, Any]]:
+    """Every place in the app's schema that forbids deleting rows (path, line), at most DELETE_GUARDS_MAX."""
+    return _places_matching(repo, DELETE_GUARD, {".sql", ".prisma"}, DELETE_GUARDS_MAX)
+
+
 def everydeck_files(repo: Path) -> list[str]:
     """everydeck's own files in the repo (migrations everydeck_*, Edge Functions everydeck-*), to compare with the plan of everydeck_live_files."""
     out = []
@@ -208,6 +254,8 @@ def _places(inv: dict[str, Any]) -> list[tuple[str, int | None, str | None]]:
         if m: out.append((m.group(1), int(m.group(2)) if m.group(2) else None, d["evidence"].split(" in ")[0]))
     # where the app's own server reads its everydeck settings (everydeck's own review sees how the client is started, e.g. its refresh)
     out += [(r["path"], r["line"], None) for r in inv.get("server_settings") or []][:3]
+    # Where the app counts what its team must look at (everydeck's own review compares it with needs_attention)
+    out += [(r["path"], r["line"], None) for r in inv.get("admin_attention") or []][:3]
     return out
 
 

@@ -39,8 +39,12 @@ interface ResolvedConfigLike { root: string; mode?: string; envDir?: string | fa
 export function everydeckSourceMaps(o: EverydeckSourceMapsOptions = {}) {
   let outDir: string | null = null; let envAt = { cwd: process.cwd(), mode: 'production', prefixes: [] as string[] };
   const report = o.onResult ?? ((r: UploadResult & { injected: number }) => {
-    const line = r.ok ? `[everydeck] ${r.uploaded.length} source map(s) uploaded (build ${r.build}), ${r.removed.length} removed from the output`
-      : `[everydeck] source maps not uploaded: ${r.reason ?? r.failed.map((f) => `${f.file}: ${f.status ?? ''} ${f.error}`).join('; ')}; ${r.removed.length} removed from the output`;
+    const unchanged = r.unchanged.length ? `, ${r.unchanged.length} unchanged (everydeck has them)` : '';
+    // after a refusal for the build no further map is sent: the reason once, not once per map
+    const failed = r.failed.filter((f) => !r.stopped || f.status !== r.stopped.status || f.error !== r.stopped.error);
+    const stopped = r.stopped ? `stopped after HTTP ${r.stopped.status}: ${r.stopped.error}; ${r.stopped.not_sent} not sent` : '';
+    const line = r.ok ? `[everydeck] ${r.uploaded.length} source map(s) uploaded${unchanged} (build ${r.build}), ${r.removed.length} removed from the output`
+      : `[everydeck] source maps not ${r.uploaded.length || r.unchanged.length ? 'all ' : ''}uploaded: ${r.reason ?? [stopped, ...failed.map((f) => `${f.file}: ${f.status ?? ''} ${f.error}`)].filter(Boolean).join('; ')}; ${r.uploaded.length} uploaded${unchanged}, ${r.removed.length} removed from the output`;
     process.stderr.write(`${line}\n`);
   });
   return {

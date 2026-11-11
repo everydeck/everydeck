@@ -23,6 +23,12 @@ The rules it applies are everydeck's own (`rules/everydeck-rules.mjs`, the same 
 
 ## Changes
 
+### 0.3.23
+
+- The rules inside this package (`rules/everydeck-rules.mjs`, shared with `everydeck-check` 0.3.23) write the `jobs[]` entry of a named pg_cron schedule from the inventory and give the outbox entries an app map proves; the scaffold itself does not change, and `--merge` keeps those entries like every other job.
+- Same version as `everydeck-check` 0.3.23, whose app map schema takes `flows[].result.write.attribution` (why every such row is one run of exactly this flow, and who did it). `--merge` keeps it like every field the agent sets; nothing else changes in the scaffold.
+- The app map schema of `everydeck-check` 0.3.23 also takes `needs_attention[]` (what the app shows its team as needing attention, with the conditions of its query) and `must_keep[]` (tables whose rows must stay, with the place that forbids deleting them). The scaffold never writes either itself; `--merge` keeps them with their places as long as their tables exist.
+
 ### 0.3.22
 
 - Same version as `everydeck-check` 0.3.22. The scaffold never enters folders `.gitignore` leaves out, other worktrees in the folder (`.claude/worktrees`, `git worktree add`) or other repositories inside it; a repository with many worktrees no longer runs it out of memory. Tables come only from what the app runs: never from a test script, text in quotes, a comment or an SQL word without quotes (`CREATE TABLE IF …`). `--merge` drops what an older scaffold read from there, in `tables` and in `not_in_database`, so nothing has to be added back by hand.

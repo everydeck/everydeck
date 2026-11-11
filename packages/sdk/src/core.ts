@@ -85,6 +85,11 @@ export const CONTEXT_FRAMES = 5; export const CONTEXT_LINES = 5; export const CO
 /** Supabase Edge Functions run as a compiled bundle under this path; the source files are not readable at runtime (checked) */
 const BUNDLED_RUNTIME = /^\/var\/tmp\/sb-compile-edge-runtime\//;
 const LIBRARY = /(^|[\\/])node_modules[\\/]|^node:|^internal[\\/]|^ext:|^deno:|^https?:|^<anonymous>|^native$/;
+/**
+ * A source of a source map that is a library (node_modules) or the bundler's runtime, not the app's code: its `sourcesContent` never leaves the machine
+ * (`@everydeck/sdk/sourcemaps`), and everydeck drops it again with this same function.
+ */
+export const isLibrarySource = (source: string): boolean => /(^|[/\\])node_modules[/\\]|^webpack\/(?:runtime|bootstrap)|^\(webpack\)|^\/?@vite\/|^vite\/|^\0/.test(source);
 /** Frames from an exception's stack (Node, Deno): innermost first; the full path stays internal only (`_abs`) for the code lines */
 export function serverFramesOf(err: unknown, max = 20): (Frame & { _abs?: string })[] | undefined {
   const st = err instanceof Error ? err.stack : undefined; if (!st) return undefined;

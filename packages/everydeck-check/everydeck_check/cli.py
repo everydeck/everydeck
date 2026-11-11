@@ -126,46 +126,100 @@ def _coverage_errors(doc: dict, m: dict, form: str, repo: str | None) -> tuple[l
     return errs, [{"block": b, "evidence": w} for b, w in detected], coverage_questions(entries)
 
 
+def validate_map(raw: dict, manifest: str, repo: str | None, db: str | None, file_note: str | None, guard=None) -> tuple[dict, int]:
+    """validate of an app map: inventory and generated jobs written into the file (with repo), then every check; (the answer, the exit code).
+    `guard(target)` runs right before the file is written (apply: the target must still lie in the repository)."""
+    from .app_map import diagnose_app_map
+    # the inventory (what everydeck-check finds itself) goes into the app map; everydeck compares it with the description
+    inventory = None
+    jobs_written: dict = {}
+    if repo:
+        from .inventory import build_inventory
+        from .rules import RulesUnavailable, schedule_jobs
+        before = raw.get("inventory")
+        inv = build_inventory(Path(repo).resolve(), raw)
+        inventory = "unchanged" if before == inv else "written"
+        if inventory == "written":
+            raw["inventory"] = inv
+        # a named schedule in SQL is a job by itself (everydeck reads its runs from cron.job): its jobs[] entry is written here, with the inventory,
+        # never copied by hand; a field the agent changed stays its own
+        # one more call of the rules (in the one node process of this command), only when a schedule is or was in the inventory
+        had = (before or {}).get("schedules") if isinstance(before, dict) else None
+        try:
+            gen = schedule_jobs(raw, before if isinstance(before, dict) else None) if (inv.get("schedules") or had) else {}
+            if gen.get("patch"):
+                raw["jobs"] = gen["jobs"]
+                jobs_written = {k: gen[k] for k in ("added", "renewed", "removed") if gen.get(k)}
+        except RulesUnavailable:
+            pass
+        if inventory == "written" or jobs_written:
+            # an old file name (everydeck-befund.json) is read, but written is only the new one
+            if guard: guard(write_path(manifest))
+            _write_like(manifest, write_path(manifest), raw)
+    errs, stages, rules = diagnose_app_map(raw, Path(repo).resolve() if repo else None, db)
+    # server code reads public.everydeck_server_config() while the repository has no migration of that function: the server would stay silent
+    if repo:
+        from .inventory import server_config_errors
+        cfg = [e for e in server_config_errors(raw.get("inventory")) if e not in errs]
+        errs += cfg; stages.append({"id": "server_config", "state": "invalid" if cfg else "valid", "count": len(cfg)})
+    from .rules import open_of
+    # the open parts also while errors remain: the agent sees everything in its first run; a map everydeck cannot read yet has none
+    parts = open_of(rules) if "unavailable" not in rules else {"setup": None, "open": [], "still_open": 0}
+    rule_open = next((x for x in rules.get("stages", []) if x.get("id") == "open_parts"), None)
+    stages.append({"id": "open_parts", "state": "not_checked", "count": 0, "why": "everydeck rules unavailable"} if rule_open is None else rule_open)
+    outbox = parts.get("outbox") or {}
+    over = outbox.get("limit") is not None and len(outbox.get("entries") or []) > outbox["limit"]
+    if outbox.get("entries"):
+        stages.append({"id": "live_outbox", "state": "invalid" if over else "valid", "count": len(outbox["entries"]), "limit": outbox.get("limit")})
+    nxt = (f"{len(parts['open'])} open parts nobody answered yet (diagnosis.state open; ready_for_submission once none is left): connect each (flow, channel, money entry) or record its outcome in outcomes[] (covered_by a flow that does exactly this, not_applicable with the place that shows it); deferred and unsupported stay open and the owner sees them"
+           if parts["open"] else None)
+    # a refusal says what comes next too, so the agent does not end its turn with a question to the owner
+    if errs: nxt = ("Fix each error in everydeck/app-map.json (and the code it names) yourself with your file tools: every error names the place and what to change. "
+                    "All checks ran: work through the list in order; the errors about the app map come first, a missing result signal (a change of the app's code) last. "
+                    + (f"Answer the {len(parts['open'])} open parts in the same pass. " if parts.get("open") else "")
+                    + "Then run validate again until diagnosis.state is ready_for_submission (exit 0 only means no errors). Nothing here is the owner's decision: do not ask the owner and do not end your turn.")
+    # places moved by the agent's own edits are moved by git, not by hand (and code goes where it belongs, not to the end of a file)
+    if errs and any(PLACE_MOVED.search(e) for e in errs):
+        nxt += (" Places that moved because you edited a file: run `everydeck-check reanchor --worktree --write` (it moves every place of the app map to the"
+                " files as they are now, from git) and validate again; do not correct line numbers by hand and do not move your code to the end of a file for it.")
+    diagnosis = diagnosis_of(raw, errs, parts["open"], stages, repo=bool(repo))
+    if over:
+        diagnosis["live_outbox_over_limit"] = (f"the app map proves {len(outbox['entries'])} outbox entries; everydeck_live_files takes at most {outbox['limit']} in one call and refuses more."
+                                                " This is a limit of everydeck, not an error of the app map: report it with everydeck_report_progress (stage remark) before you call everydeck_live_files")
+    return ({"status": "ok" if not errs else "invalid", "form": "app_map", "file": manifest, **({"note": file_note} if file_note else {}), "checked_against_repo": bool(repo), "checked_against_database": bool(db), "errors": errs,
+                      **({"inventory": inventory} if inventory else {"inventory": "not scanned: run with --repo ."}), **({"jobs_from_schedules": jobs_written} if jobs_written else {}),
+                      **({"setup": parts["setup"]} if parts.get("setup") else {}), "open": parts["open"], **({"next": nxt} if nxt else {}),
+                      # for a live app: the outbox entries the app map proves, ready for everydeck_live_files, and the flows it cannot write yet with the reason
+                      **({"live_outbox": outbox["entries"]} if outbox.get("entries") else {}), **({"live_outbox_open": outbox["open"]} if outbox.get("open") else {}),
+                      "counts": {"tables": len(raw.get("tables", [])), "functions": len(raw.get("functions", [])), "flows": len(raw.get("flows", [])), "present": sum(1 for c in raw.get("checklist", []) if c.get("present"))},
+                      "diagnosis": diagnosis}, 0 if not errs else 2)
+
+
+DIAGNOSIS_FORMAT = "everydeck.diagnosis/1"
+
+
+def map_digest(doc: dict) -> str:
+    """The digest everydeck takes over the stored app map (sha256 of JSON.stringify of the parsed upload): the same version locally and on submission."""
+    import hashlib
+    return "sha256:" + hashlib.sha256(json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def diagnosis_of(doc: dict, errs: list[str], open_: list, stages: list[dict], repo: bool) -> dict:
+    """One state for the whole check, the same format as everydeck's after a submission (everydeck_get_diagnosis): invalid (errors), open (no errors,
+    open parts nobody answered), valid (neither, but the places were not checked: no --repo), ready_for_submission (neither, everything checked that this
+    command checks; a database stage without --db does not stop it, everydeck does not check it either). The exit code stays 0 for every state without errors."""
+    state = "invalid" if errs else "open" if open_ else "not_checked" if any(x["id"] in ("rules", "open_parts") and x["state"] == "not_checked" for x in stages) else "ready_for_submission" if repo else "valid"
+    return {"format": DIAGNOSIS_FORMAT, "state": state, "digest": map_digest(doc), "counts": {"errors": len(errs), "open": len(open_)}, "stages": stages}
+
+
 def cmd_validate(a: argparse.Namespace) -> int:
     # an app map (1.12-r0): shape, references, every place against the repo, completeness (tables, routes, provider packages)
     raw = _load(a.manifest)
-    from .app_map import is_app_map, validate_app_map
+    from .app_map import is_app_map
     if is_app_map(raw):
-        repo = getattr(a, "repo", None)
-        db = getattr(a, "db", None) or os.environ.get("EVERYDECK_SCHEMA_DB_URL")
-        # the inventory (what everydeck-check finds itself) goes into the app map; everydeck compares it with the description
-        inventory = None
-        if repo:
-            from .inventory import build_inventory
-            inv = build_inventory(Path(repo).resolve(), raw)
-            inventory = "unchanged" if raw.get("inventory") == inv else "written"
-            if inventory == "written":
-                raw["inventory"] = inv
-                # an old file name (everydeck-befund.json) is read, but written is only the new one
-                _write_like(a.manifest, APP_MAP if a.file_note else a.manifest, raw)
-        errs = validate_app_map(raw, Path(repo).resolve() if repo else None, db)
-        # server code reads public.everydeck_server_config() while the repository has no migration of that function: the server would stay silent
-        if repo:
-            from .inventory import server_config_errors
-            errs += server_config_errors(raw.get("inventory"))
-        from .rules import app_map_open
-        # the open parts also while errors remain: the agent sees everything in its first run; a map everydeck cannot read yet has none
-        parts = app_map_open(raw, require_result_signal=not errs)
-        nxt = (f"{len(parts['open'])} open parts nobody answered yet: connect each (flow, channel, money entry) or record its outcome in outcomes[] (covered_by a flow that does exactly this, not_applicable with the place that shows it); deferred and unsupported stay open and the owner sees them"
-               if parts["open"] else None)
-        # a refusal says what comes next too, so the agent does not end its turn with a question to the owner
-        if errs: nxt = ("Fix each error in everydeck/app-map.json (and the code it names) yourself with your file tools: every error names the place and what to change. "
-                        "All checks ran: work through the list in order; the errors about the app map come first, a missing result signal (a change of the app's code) last. "
-                        + (f"Answer the {len(parts['open'])} open parts in the same pass. " if parts.get("open") else "")
-                        + "Then run validate again until it exits 0. Nothing here is the owner's decision: do not ask the owner and do not end your turn.")
-        # places moved by the agent's own edits are moved by git, not by hand (and code goes where it belongs, not to the end of a file)
-        if errs and any(PLACE_MOVED.search(e) for e in errs):
-            nxt += (" Places that moved because you edited a file: run `everydeck-check reanchor --worktree --write` (it moves every place of the app map to the"
-                    " files as they are now, from git) and validate again; do not correct line numbers by hand and do not move your code to the end of a file for it.")
-        print(json.dumps({"status": "ok" if not errs else "invalid", "form": "app_map", "file": a.manifest, **({"note": a.file_note} if a.file_note else {}), "checked_against_repo": bool(repo), "checked_against_database": bool(db), "errors": errs,
-                          **({"inventory": inventory} if inventory else {"inventory": "not scanned: run with --repo ."}), **({"setup": parts["setup"]} if parts.get("setup") else {}), "open": parts["open"], **({"next": nxt} if nxt else {}),
-                          "counts": {"tables": len(raw.get("tables", [])), "functions": len(raw.get("functions", [])), "flows": len(raw.get("flows", [])), "present": sum(1 for c in raw.get("checklist", []) if c.get("present"))}}, indent=1))
-        return 0 if not errs else 2
+        out, code = validate_map(raw, a.manifest, getattr(a, "repo", None), getattr(a, "db", None) or os.environ.get("EVERYDECK_SCHEMA_DB_URL"), a.file_note)
+        print(json.dumps(out, indent=1))
+        return code
     m, lc, form = _load_manifest(a.manifest)
     doc = _load(a.manifest)
     errs = validate_manifest(m) + reference_errors(m) + _local_check_errors(lc)
@@ -176,6 +230,94 @@ def cmd_validate(a: argparse.Namespace) -> int:
     print(json.dumps({"status": "ok" if not errs else "invalid", "form": form, "digest": digest(m) if not errs else None, "errors": errs,
                       "detected": detected, "notes": notes, "questions": question_counts(lc)}, indent=1))
     return 0 if not errs else 2
+
+
+def _setup_plan(a: argparse.Namespace) -> tuple[dict, Path, dict | None]:
+    from .app_map import is_app_map
+    from .setup import load_live, plan
+    repo = Path(a.repo).resolve()
+    raw = _load(a.app_map) if Path(a.app_map).exists() else None
+    try: map_rel = Path(a.app_map).resolve().relative_to(repo).as_posix()
+    except ValueError: map_rel = Path(a.app_map).resolve().as_posix()   # outside the repository: its digest is read where it is
+    live = load_live(a.live_files) if a.live_files else None
+    return plan(repo, raw if raw is not None and is_app_map(raw) else None, map_rel, a.sdk, live), repo, raw
+
+
+def cmd_plan(a: argparse.Namespace) -> int:
+    """What apply would change (each file with its digest before and after, the app map as a JSON Patch) and what stays by hand. Writes nothing
+    unless --out names the plan file, which apply --plan then applies exactly."""
+    from .setup import SetupError
+    try: p, _, _ = _setup_plan(a)
+    except SetupError as e: print(json.dumps({"status": "invalid", "errors": [str(e)]}, indent=1)); return 2
+    if a.out: Path(a.out).write_text(json.dumps(p, indent=1) + "\n", encoding="utf-8")
+    shown = {**p, "changes": [{k: v for k, v in c.items() if k != "content"} for c in p["changes"]]}
+    print(json.dumps({"status": "ok", **({"out": a.out} if a.out else {}), **shown}, indent=1))
+    return 0
+
+
+def cmd_apply(a: argparse.Namespace) -> int:
+    """Everything mechanical of the setup in one run: the planned files (only while each is as planned), the app map's patch, then reanchor and
+    validate --repo in the same run, so the app map on disk holds all of it. A second run changes nothing.
+    Whole or not at all: a path of the plan outside the repository, the app map's own file among them (exit 2), or an app map that is not the one
+    the plan read (exit 3) and nothing is written, neither a file nor the app map."""
+    from .reanchor import reanchor, record_places
+    from .setup import PatchFailed, SetupError, apply_changes, apply_patch, check_paths, digest, within
+    map_path_ = Path(a.app_map)
+    # where the app map is really written: under its new name in the same folder (write_path), also when it was read under its old one
+    def map_target(t: str) -> None: within(Path(a.repo), Path(t), t, "the app map would be written")
+    try:
+        if a.plan:
+            p = _load(a.plan); repo = Path(a.repo).resolve()
+        else:
+            p, repo, _ = _setup_plan(a)
+        check_paths(repo, p)
+        if map_path_.exists():
+            try: map_target(write_path(a.app_map))
+            except SetupError as e: raise SetupError(f"{e}; nothing was written") from None
+    except SetupError as e:
+        print(json.dumps({"status": "invalid", "errors": [str(e)]}, indent=1)); return 2
+    raw = _load(a.app_map) if map_path_.exists() else None
+    patch = p["app_map"]["patch"]
+    if patch:
+        # RFC 6902: the patch holds whole or not at all, and only on the app map the plan read; a signal someone edited since keeps its flow's id
+        try: now = digest(map_path_.read_text(encoding="utf-8")) if map_path_.is_file() else None
+        except (OSError, UnicodeDecodeError): now = None
+        why = None
+        try: apply_patch(raw, patch)
+        except (PatchFailed, KeyError, IndexError, ValueError, TypeError, AttributeError) as e: why = str(e) or type(e).__name__
+        if now != p["app_map"]["before"] or why:
+            print(json.dumps({"status": "invalid", "errors": [
+                f"{a.app_map} changed since the plan (the plan read {p['app_map']['before']}, now {now})" + (f": {why}" if why else "")
+                + "; nothing was written, neither a file nor the app map. Run everydeck-check plan again (or apply without --plan)"]}, indent=1))
+            return 3
+    try: files = apply_changes(repo, p)
+    except SetupError as e: print(json.dumps({"status": "invalid", "errors": [str(e)]}, indent=1)); return 2
+    report: dict = {"files": files, "by_hand": p["by_hand"]}
+    if raw is not None:
+        try: map_rel = str(map_path_.resolve().relative_to(repo))
+        except ValueError: map_rel = None
+        # the places of the app map follow the files just changed (git, text, symbol), before the new signals, whose places are already the files of now
+        ra = reanchor(raw, repo, None, worktree=True, map_rel=map_rel)
+        report["reanchor"] = ({"error": ra["error"]} if ra.get("error") else {k: ra[k] for k in ("moved", "by_text", "by_symbol")} | {"unresolved": ra["unresolved"]})
+        if patch:
+            # held above on the app map before reanchor, which moves places only, never a flow or its id
+            raw = apply_patch(raw, patch); report["app_map_changes"] = sum(1 for o in patch if o["op"] != "test")
+        def again(t: str) -> None:   # resolved again right before each write of the app map (a link made in between)
+            try: map_target(t)
+            except SetupError as e: raise SetupError(f"{e} (since the check a moment ago); stopped before writing the app map, written before: {files['written']}") from None
+        try:
+            again(write_path(a.app_map)); _write_like(a.app_map, write_path(a.app_map), raw)
+            if map_rel and not ra.get("error"): record_places(repo, map_rel)
+            out, code = validate_map(raw, write_path(a.app_map), str(repo), getattr(a, "db", None) or os.environ.get("EVERYDECK_SCHEMA_DB_URL"), a.file_note, guard=again)
+        except SetupError as e:
+            print(json.dumps({"status": "invalid", "errors": [str(e)], "apply": report}, indent=1)); return 2
+    else:
+        out, code = {"status": "ok", "note": f"{a.app_map} does not exist yet: write it with the scaffold first, then run apply again to add the signals and check it"}, 0
+    if files["changed_since_plan"] and code == 0: code = 3
+    print(json.dumps({**out, "apply": report,
+                      "still_yours": "The browser SDK, the signals at the results of flows, the wrappers of AI clients and payment events stay yours (step keys): each needs "
+                                     "the keys and the place of its flow. Everything in apply.by_hand also stays yours, each with what to do there."}, indent=1))
+    return code
 
 
 def cmd_reads(a: argparse.Namespace) -> int:
@@ -365,6 +507,14 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("drift"); d.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); d.add_argument("--repo", default="."); d.add_argument("--freeze", action="store_true"); d.set_defaults(fn=cmd_drift)
     ra = sub.add_parser("reanchor", help="move every place of the app map from its commit to HEAD (git diff, text, symbol); nothing guessed; unresolved places are listed")
     ra.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); ra.add_argument("--repo", default="."); ra.add_argument("--base", default=None, help="commit the places refer to (default: commit of the app map)"); ra.add_argument("--out", default=None); ra.add_argument("--write", action="store_true", help="write the re-anchored app map back to its file"); ra.add_argument("--worktree", action="store_true", help="to the files as they are now, before a commit: after your own edits during the setup (commit stays)"); ra.set_defaults(fn=cmd_reanchor)
+    for name, fn, hlp in (("plan", cmd_plan, "what apply changes (files with their digest before and after, the app map as a JSON Patch) and what stays by hand"),
+                          ("apply", cmd_apply, "everything mechanical of the setup in one run: the shared module and its import in each Edge Function, checked transformations, the files of everydeck_live_files with their signals, then reanchor and validate --repo")):
+        sp = sub.add_parser(name, help=hlp); sp.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); sp.add_argument("--repo", default=".")
+        sp.add_argument("--sdk", default=None, help="the @everydeck/sdk version of the packages line, e.g. @everydeck/sdk@0.5.20 (the shared module of the Edge Functions imports it)")
+        sp.add_argument("--live-files", default=None, help="the files address everydeck_live_files gave (files_address), or a JSON file with its answer")
+        if name == "plan": sp.add_argument("--out", default=None, help="write the plan here; apply --plan applies exactly it")
+        else: sp.add_argument("--plan", default=None, help="a plan file of everydeck-check plan --out: only what it planned, only in files that did not change since and only inside the repository; an app map that changed since its patch was planned and nothing is written (exit 3)"); sp.add_argument("--db", default=None, help="as for validate")
+        sp.set_defaults(fn=fn)
     rd = sub.add_parser("reads", help="the cross-check of display locations: every table named in a frontend string: main navigation (with access path), technical (with reason) or open"); rd.add_argument("app_map", nargs="?", default=None, help=f"default {APP_MAP}"); rd.add_argument("--repo", required=True); rd.add_argument("--markdown", action="store_true"); rd.set_defaults(fn=cmd_reads)
     pub = sub.add_parser("publish"); pub.add_argument("manifest", nargs="?", default=None, help=f"default {APP_MAP}"); pub.add_argument("--url", required=True); pub.add_argument("--project", required=True); pub.add_argument("--token", default=None, help="deprecated: visible in the process list; use EVERYDECK_PUBLISH_KEY or --token-file"); pub.add_argument("--token-file", default=None); pub.add_argument("--session", default=None, help="setup session id: an app map goes to its proposals endpoint"); pub.add_argument("--repo", default=None, help="check every place of an app map against this repository before publishing"); pub.set_defaults(fn=cmd_publish)
     fp = sub.add_parser("footprint", help="what the setup added and changed in the repository against --base (the commit before the setup); refuses a rewritten lockfile and leftovers")
@@ -387,7 +537,12 @@ def main(argv: list[str] | None = None) -> int:
         for attr in ("manifest", "app_map"):
             if hasattr(a, attr):
                 path, a.file_note = map_path(getattr(a, attr)); setattr(a, attr, path)
-    return a.fn(a)
+    # all rules of one command in one node process (started at the first rule, not at all without one)
+    from .rules import session
+    # and the files of the repository walked once per command, not once per scan
+    from .detect import files_session
+    with session(), files_session():
+        return a.fn(a)
 
 
 if __name__ == "__main__":

@@ -54,7 +54,9 @@ export interface BrowserOptions extends EverydeckOptions { /** keep where the pe
  * with `key` (its key column) names the record of an update or delete from the request's filter (`?id=eq.<ref>`, a reference like the outbox sends), and
  * `status` (the status column) the new status an update sets, only when it is a short code (`confirmed`, `completed`), never another value of the body.
  */
-export interface BrowserWrite { flow: string; table: string; kind: 'insert' | 'update' | 'upsert' | 'delete'; object?: string; key?: string; status?: string }
+export interface BrowserWrite { flow: string; table: string; kind: 'insert' | 'update' | 'upsert' | 'delete'; object?: string; key?: string; status?: string;
+  /** 0.5.20: the condition only rows of this flow meet (`when` from the app map): the request becomes a run of this flow only when its JSON body says so */ when?: WriteCondition }
+export interface WriteCondition { column: string; equals?: string; not_equals?: string; /** true: the body carries a value for the column; false: none (null or left out) */ set?: boolean }
 const WRITE_KINDS = new Set(['insert', 'update', 'upsert', 'delete']);
 const OBJECT_TYPE = /^[a-z][a-z0-9_-]{0,31}$/;
 /** a parameter name of a page pattern, and the identifier of a record in an address (never an e-mail, a name with blanks or a query) */
@@ -86,6 +88,21 @@ export function postgrestRecord(url: URL, key: string): string | null {
 export function postgrestStatus(body: unknown, column: string): string | null {
   if (typeof body !== 'string' || body.length > 100_000) return null;
   try { const v = (JSON.parse(body) as Record<string, unknown> | null)?.[column]; return typeof v === 'string' && STATUS_CODE.test(v) ? v : null; } catch { return null; }
+}
+/**
+ * 0.5.20: the flow of a write request, never a guess. Every declared write of that table and kind whose condition (`when`) the JSON body meets (an array: every
+ * row; a column the body does not carry: unknown, so no); exactly one left is the flow, none or several is no flow (before, the first of several won, so every
+ * default collection the app created on sign-up was "Created a collection"). A change (update) meets a condition only when its body writes that column: a column
+ * it leaves out keeps its value from before, so neither "set" nor "not set" is known (an insert without the column leaves it empty).
+ */
+export function writeOf(writes: readonly BrowserWrite[], table: string, kind: BrowserWrite['kind'], body: unknown): BrowserWrite | undefined {
+  const same = writes.filter((x) => x.table === table && x.kind === kind);
+  if (!same.length) return undefined;
+  let rows: Record<string, unknown>[] | null = null;
+  if (same.some((x) => x.when)) { try { const v = typeof body === 'string' && body.length <= 100_000 ? JSON.parse(body) as unknown : null; rows = (Array.isArray(v) ? v : [v]).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object'); } catch { rows = null; } }
+  const meets = (c: WriteCondition) => !!rows?.length && rows.every((r) => { const v = r[c.column]; if (kind === 'update' && v === undefined) return false; if (typeof c.set === 'boolean') return (v !== undefined && v !== null) === c.set; if (v === undefined || v === null || typeof v === 'object') return false; return c.equals !== undefined ? String(v) === c.equals : String(v) !== c.not_equals; });
+  const hit = same.filter((x) => !x.when || meets(x.when));
+  return hit.length === 1 ? hit[0] : undefined;
 }
 /** Kind of a PostgREST call to a table: POST = insert (with `Prefer: resolution=…` upsert), PUT = upsert, PATCH = update, DELETE = delete */
 export function postgrestWrite(method: string, url: URL, prefer: string | null): { table: string; kind: BrowserWrite['kind'] } | null {
@@ -494,7 +511,7 @@ export class EverydeckBrowser {
     const { sessionId, captureUnhandled, sanitizeRoute, captureHosts, correlate, detectClient: detect, runtime, routeName, persist, screens, screenObjects, apiRoutes, storage, captureBackground, captureConsole, writes, captureOrigin, captureVitals, capturePageViews, captureBots, waitForConsent, ...core } = o;
     // valid entries only (flow like a signal name, known kind)
     this.writes = (writes ?? []).filter((w) => w && SAFE.test(String(w.flow)) && typeof w.table === 'string' && w.table.length > 0 && WRITE_KINDS.has(w.kind)).slice(0, 200)
-      .map((w) => ({ flow: w.flow, table: w.table, kind: w.kind, ...(w.object && OBJECT_TYPE.test(w.object) && w.key && COLUMN.test(w.key) ? { object: w.object, key: w.key } : {}), ...(w.status && COLUMN.test(w.status) ? { status: w.status } : {}) }));
+      .map((w) => ({ flow: w.flow, table: w.table, kind: w.kind, ...(w.object && OBJECT_TYPE.test(w.object) && w.key && COLUMN.test(w.key) ? { object: w.object, key: w.key } : {}), ...(w.status && COLUMN.test(w.status) ? { status: w.status } : {}), ...(w.when && COLUMN.test(w.when.column) && [typeof w.when.equals === 'string', typeof w.when.not_equals === 'string', typeof w.when.set === 'boolean'].filter(Boolean).length === 1 ? { when: { column: w.when.column, ...(typeof w.when.set === 'boolean' ? { set: w.when.set } : typeof w.when.equals === 'string' ? { equals: w.when.equals.slice(0, 80) } : { not_equals: String(w.when.not_equals).slice(0, 80) }) } } : {}) }));
     // the original fetch: for the app's requests through the SDK and for the SDK's own sending (never through the wrapper)
     const g0 = globalThis as unknown as { fetch?: typeof fetch & { [PATCHED]?: boolean; [ORIGINAL]?: typeof fetch } };
     const orig: typeof fetch | null = typeof g0.fetch === 'function' ? (g0.fetch[ORIGINAL] ?? g0.fetch.bind(globalThis)) : null;
@@ -989,7 +1006,7 @@ export class EverydeckBrowser {
     let implicit = false; let toStatus: string | null = null;
     if (!ctx && this.writes.length && this.client.opts.enabled && url && !everydeckOwn) {
       const pw = postgrestWrite(method, url, new Headers(init?.headers ?? req?.headers ?? undefined).get('prefer'));
-      const w = pw ? this.writes.find((x) => x.table === pw.table && x.kind === pw.kind) : undefined;
+      const w = pw ? writeOf(this.writes, pw.table, pw.kind, init?.body ?? null) : undefined;
       // 0.5.5: the record of an update or delete (filter on the key column) and the new status of an update, as everydeck names them in `writes`
       const ref = w?.object && w.key && (w.kind === 'update' || w.kind === 'delete') ? postgrestRecord(url, w.key) : null;
       if (w) { ctx = this.newContext(w.flow, { ...this.subject, ...(ref ? { objectType: w.object!, objectRef: ref } : {}) }, uuid(), 1); implicit = true; const { sessionId, ...r } = this.ctxRefs(ctx); this.client.breadcrumb(`${w.flow}.started`, sessionId, r); }

@@ -57,6 +57,14 @@
               "instrumented"
             ]
           },
+          "result_proof": {
+            "enum": [
+              "map",
+              "browser_run",
+              "none"
+            ],
+            "description": "where a written result is proven as a run of this flow: map (the app map names the condition or the only writer and the person), browser_run (only runs the browser started for this flow; never for a result from an outbox trigger), none (not proven: the rows stay visible, the flow is not measurable through them)"
+          },
           "description": {
             "type": "string",
             "minLength": 1,
@@ -242,7 +250,8 @@
           "location"
         ]
       },
-      "minItems": 1,
+      "minItems": 0,
+      "description": "May be empty: an app whose flows report only through outbox triggers without proof in the app map (result.write.attribution) has no signal that stands for a flow until its next update",
       "maxItems": 100
     },
     "rules": {

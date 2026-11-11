@@ -844,6 +844,10 @@ const skeletonOut = { schema_version: '1.12-r0', release_key: merge?.release_key
   ...(merge?.everydeck_tables ? { everydeck_tables: merge.everydeck_tables.filter((y) => mergedTables.some((t) => t.name === y.table)) } : {}),
   // the tables the agent says the app empties itself stay with their place (as long as the table exists); validate checks the place again
   ...(merge?.row_deletes ? { row_deletes: merge.row_deletes.filter((d) => mergedTables.some((t) => t.name === d.table)) } : {}),
+  // What the app counts for its team (needs_attention) and the tables whose rows must stay (must_keep) stay with their places, as long as their tables exist;
+  // the skeleton never writes them itself (a condition comes from the app's query, never from a name), validate checks the places again
+  ...(merge?.needs_attention ? { needs_attention: merge.needs_attention.filter((n) => mergedNames.has(n.table) && (!n.has || mergedNames.has(n.has.table))) } : {}),
+  ...(merge?.must_keep ? { must_keep: merge.must_keep.filter((k) => mergedNames.has(k.table)) } : {}),
   // the agent's description stays; entries for tables that are not in the merged app map are dropped. Checked against the tables of the output, not
   // against the ones this run found itself: a table the agent read from the database (`defined: database`, kept from the app map) is not in the repository,
   // and in a GitHub Action without a database the skeleton does not find it; its object type then left the sidebar without a word.

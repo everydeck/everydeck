@@ -1347,6 +1347,65 @@
            "update",
            "delete"
           ]
+         },
+         "attribution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "actor",
+           "evidence"
+          ],
+          "description": "why every such row is one run of exactly this flow and who did it: the condition only its rows meet (when) or that nothing else writes such rows (only_writer: no other code, trigger, database function, job or service), and the column with the person who did it; leave it out when other places write such rows too and no column tells them apart, or when the app writes them on its own; then everydeck shows the rows but does not count them as this flow",
+          "properties": {
+           "when": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+             "column"
+            ],
+            "description": "the condition only rows of this flow meet, on a column of the row (kind = 'invoice', status <> 'draft', a column left empty); exactly one of equals, not_equals or set. For a change (kind update): a column the same change writes that only this flow sets so (confirmed_by set), never the column whose new value is the result",
+            "properties": {
+             "column": {
+              "$ref": "#/$defs/name"
+             },
+             "equals": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+             },
+             "not_equals": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "description": "the column has a value and it is not this one (an empty column does not meet it)"
+             },
+             "set": {
+              "type": "boolean",
+              "description": "true: the column has a value; false: the column is empty (rows another way fills, such as an import that sets its own reference)"
+             }
+            }
+           },
+           "only_writer": {
+            "const": true,
+            "description": "nothing else writes such rows into the table: no other place in the code, no trigger, no database function, no job, no other service"
+           },
+           "actor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+             "column"
+            ],
+            "description": "the column of the row with the person who did it (who pressed the button), never the person it is for",
+            "properties": {
+             "column": {
+              "$ref": "#/$defs/name"
+             }
+            }
+           },
+           "evidence": {
+            "$ref": "#/$defs/evidence"
+           }
+          }
          }
         }
        },
@@ -3165,6 +3224,358 @@
       }
      }
     },
+    "environment": {
+     "type": "object",
+     "additionalProperties": false,
+     "description": "The environment of the app before anything is built in, read by everydeck-check (never edited by hand): workspace manifests and the package roots they name, server entries (known forms with the SDK line that hooks into them, unknown ones at places where an entry belongs), Sentry and PostHog already in the app, checked transformations the setup needs (`everydeck-check apply` applies them), and the minimum release age of the app's tools",
+     "properties": {
+      "workspaces": {
+       "type": "array",
+       "maxItems": 50,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "path",
+         "kind",
+         "patterns",
+         "roots"
+        ],
+        "properties": {
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         },
+         "kind": {
+          "enum": [
+           "pnpm",
+           "npm",
+           "lerna",
+           "deno",
+           "uv"
+          ]
+         },
+         "patterns": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 300
+          }
+         },
+         "roots": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 300
+          }
+         },
+         "unmatched": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 300
+          }
+         }
+        }
+       }
+      },
+      "servers": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "entries",
+        "unknown"
+       ],
+       "properties": {
+        "entries": {
+         "type": "array",
+         "maxItems": 200,
+         "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "path",
+           "line",
+           "form",
+           "runtime",
+           "hookup"
+          ],
+          "properties": {
+           "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+           },
+           "line": {
+            "type": "integer",
+            "minimum": 1
+           },
+           "form": {
+            "enum": [
+             "deno_serve",
+             "deno_std_serve",
+             "bun_serve",
+             "fetch_export",
+             "express",
+             "fastify",
+             "koa",
+             "hono",
+             "node_http",
+             "next_route",
+             "next_api",
+             "vercel_function",
+             "netlify_function",
+             "fastapi",
+             "starlette",
+             "flask",
+             "django"
+            ]
+           },
+           "runtime": {
+            "enum": [
+             "deno",
+             "bun",
+             "fetch",
+             "node",
+             "python"
+            ]
+           },
+           "hookup": {
+            "type": [
+             "string",
+             "null"
+            ],
+            "maxLength": 200
+           },
+           "via": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+           }
+          }
+         }
+        },
+        "unknown": {
+         "type": "array",
+         "maxItems": 50,
+         "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "path",
+           "why"
+          ],
+          "properties": {
+           "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+           },
+           "why": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+           }
+          }
+         }
+        },
+        "counts": {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "entries",
+          "unknown"
+         ],
+         "properties": {
+          "entries": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "unknown": {
+           "type": "integer",
+           "minimum": 0
+          }
+         }
+        }
+       }
+      },
+      "monitoring": {
+       "type": "array",
+       "maxItems": 100,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "tool",
+         "kind",
+         "path",
+         "line",
+         "detail"
+        ],
+        "properties": {
+         "tool": {
+          "enum": [
+           "sentry",
+           "posthog"
+          ]
+         },
+         "kind": {
+          "enum": [
+           "package",
+           "init",
+           "hook",
+           "consent",
+           "build_plugin"
+          ]
+         },
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         },
+         "line": {
+          "type": "integer",
+          "minimum": 1
+         },
+         "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+         }
+        }
+       }
+      },
+      "transformations": {
+       "type": "array",
+       "maxItems": 20,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "id",
+         "path",
+         "line",
+         "end_line",
+         "before",
+         "after",
+         "checked",
+         "file_digest",
+         "why"
+        ],
+        "properties": {
+         "id": {
+          "enum": [
+           "sentry_keeps_source_maps"
+          ]
+         },
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         },
+         "line": {
+          "type": "integer",
+          "minimum": 1
+         },
+         "end_line": {
+          "type": "integer",
+          "minimum": 1
+         },
+         "before": {
+          "type": "string",
+          "maxLength": 4000
+         },
+         "after": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "maxLength": 4000
+         },
+         "checked": {
+          "type": "boolean"
+         },
+         "why_not": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         },
+         "file_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+         },
+         "why": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+         }
+        }
+       }
+      },
+      "release_age": {
+       "type": "array",
+       "maxItems": 20,
+       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "tool",
+         "setting",
+         "value",
+         "path",
+         "line"
+        ],
+        "properties": {
+         "tool": {
+          "enum": [
+           "pnpm",
+           "npm",
+           "uv"
+          ]
+         },
+         "setting": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+         },
+         "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+         },
+         "hours": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "before": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+         },
+         "understood": {
+          "const": false
+         },
+         "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+         },
+         "line": {
+          "type": "integer",
+          "minimum": 1
+         }
+        }
+       }
+      }
+     }
+    },
     "everydeck_files": {
      "type": "array",
      "maxItems": 50,
@@ -3174,6 +3585,54 @@
       "minLength": 1,
       "maxLength": 300
      }
+    },
+    "admin_attention": {
+     "type": "array",
+     "maxItems": 20,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "path",
+       "line"
+      ],
+      "properties": {
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "line": {
+        "type": "integer",
+        "minimum": 1
+       }
+      }
+     },
+     "description": "Where the app's code counts what its team must look at (an admin dashboard count, a needs attention list, a badge with a number); each place is described in needs_attention or answered in outcomes"
+    },
+    "delete_guards": {
+     "type": "array",
+     "maxItems": 20,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "path",
+       "line"
+      ],
+      "properties": {
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "line": {
+        "type": "integer",
+        "minimum": 1
+       }
+      }
+     },
+     "description": "Where the app's schema forbids deleting rows (a trigger that raises on DELETE, a rule DO INSTEAD NOTHING, ON DELETE RESTRICT); each place is described in must_keep or answered in outcomes"
     }
    }
   },
@@ -3228,6 +3687,270 @@
      },
      "first_value": {
       "$ref": "#/$defs/first_value"
+     }
+    }
+   }
+  },
+  "needs_attention": {
+   "type": "array",
+   "maxItems": 30,
+   "description": "what the app itself shows its team as needing attention (an admin counter, a needs attention list, a badge): each with the app's words, the rows it counts and the place of the condition in the code. Facts only, never invented: everydeck makes each one a task under Needs you, checked the way the app checks it. A count everydeck cannot check (another service, a condition outside this form) says why in not_checkable",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "says",
+     "table",
+     "evidence",
+     "shown"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,59}$",
+      "description": "a short key of this entry, the same in every update (stuck_imports)"
+     },
+     "says": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 120,
+      "description": "the words the app shows its team for it, in English (Imports stuck for over an hour)"
+     },
+     "table": {
+      "$ref": "#/$defs/name",
+      "description": "the table whose rows the app counts"
+     },
+     "where": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "column"
+       ],
+       "description": "one condition of the app's own count; all conditions hold for a row the app counts",
+       "properties": {
+        "column": {
+         "$ref": "#/$defs/name",
+         "description": "a column of table"
+        },
+        "equals": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 80,
+         "description": "the column has this value (as text: true, running, 3)"
+        },
+        "in": {
+         "type": "array",
+         "minItems": 1,
+         "maxItems": 20,
+         "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+         },
+         "description": "the column has one of these values"
+        },
+        "not_in": {
+         "type": "array",
+         "minItems": 1,
+         "maxItems": 20,
+         "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+         },
+         "description": "the column has none of these values (an empty column holds)"
+        },
+        "at_least": {
+         "type": "number",
+         "description": "the column is a number at least this"
+        },
+        "at_most": {
+         "type": "number",
+         "description": "the column is a number at most this"
+        },
+        "set": {
+         "type": "boolean",
+         "description": "true: the column is set (not empty, not false); false: it is empty"
+        },
+        "older_than": {
+         "type": "string",
+         "pattern": "^P(?:\\d+W)?(?:\\d+D)?(?:T(?:\\d+H)?(?:\\d+M)?)?$",
+         "minLength": 3,
+         "maxLength": 20,
+         "description": "the column is a time longer ago than this ISO 8601 duration (stuck for over an hour: PT1H), counted from the moment everydeck checks"
+        },
+        "newer_than": {
+         "type": "string",
+         "pattern": "^P(?:\\d+W)?(?:\\d+D)?(?:T(?:\\d+H)?(?:\\d+M)?)?$",
+         "minLength": 3,
+         "maxLength": 20,
+         "description": "the column is a time within this ISO 8601 duration before the moment everydeck checks (new in the last day: P1D)"
+        }
+       }
+      },
+      "description": "the conditions of the app's own count, all of them hold for a row it counts; leave it out only with not_checkable"
+     },
+     "has": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "table",
+       "column",
+       "where"
+      ],
+      "description": "the row counts only when at least one row of another table points to it and meets where (a person with a hidden record)",
+      "properties": {
+       "table": {
+        "$ref": "#/$defs/name"
+       },
+       "column": {
+        "$ref": "#/$defs/name",
+        "description": "the column of that table that points to the counted row"
+       },
+       "where": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 10,
+        "items": {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "column"
+         ],
+         "description": "one condition of the app's own count; all conditions hold for a row the app counts",
+         "properties": {
+          "column": {
+           "$ref": "#/$defs/name",
+           "description": "a column of has.table"
+          },
+          "equals": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 80,
+           "description": "the column has this value (as text: true, running, 3)"
+          },
+          "in": {
+           "type": "array",
+           "minItems": 1,
+           "maxItems": 20,
+           "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+           },
+           "description": "the column has one of these values"
+          },
+          "not_in": {
+           "type": "array",
+           "minItems": 1,
+           "maxItems": 20,
+           "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+           },
+           "description": "the column has none of these values (an empty column holds)"
+          },
+          "at_least": {
+           "type": "number",
+           "description": "the column is a number at least this"
+          },
+          "at_most": {
+           "type": "number",
+           "description": "the column is a number at most this"
+          },
+          "set": {
+           "type": "boolean",
+           "description": "true: the column is set (not empty, not false); false: it is empty"
+          },
+          "older_than": {
+           "type": "string",
+           "pattern": "^P(?:\\d+W)?(?:\\d+D)?(?:T(?:\\d+H)?(?:\\d+M)?)?$",
+           "minLength": 3,
+           "maxLength": 20,
+           "description": "the column is a time longer ago than this ISO 8601 duration (stuck for over an hour: PT1H), counted from the moment everydeck checks"
+          },
+          "newer_than": {
+           "type": "string",
+           "pattern": "^P(?:\\d+W)?(?:\\d+D)?(?:T(?:\\d+H)?(?:\\d+M)?)?$",
+           "minLength": 3,
+           "maxLength": 20,
+           "description": "the column is a time within this ISO 8601 duration before the moment everydeck checks (new in the last day: P1D)"
+          }
+         }
+        }
+       }
+      }
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence",
+      "description": "the place of the condition: the query, the database function or the filter in the code that counts these rows"
+     },
+     "shown": {
+      "$ref": "#/$defs/evidence",
+      "description": "where the app shows it to its team (the counter, the badge, the list)"
+     },
+     "screen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "path",
+       "evidence"
+      ],
+      "description": "the page of the app where the team works it",
+      "properties": {
+       "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+       },
+       "evidence": {
+        "$ref": "#/$defs/evidence"
+       }
+      }
+     },
+     "not_checkable": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 300,
+      "description": "one sentence why everydeck cannot check it the way the app does (it counts errors in another service, it needs an OR, a count over many rows, a second relation); then leave where out"
+     }
+    }
+   }
+  },
+  "must_keep": {
+   "type": "array",
+   "maxItems": 60,
+   "description": "tables whose rows must stay, each with the place in the code that forbids deleting them or treats it as an error (a trigger that raises on DELETE, a rule DO INSTEAD NOTHING, a foreign key ON DELETE RESTRICT, a function that refuses to delete). Only such an explicit place counts: no DELETE found is no must_keep. everydeck then treats a drop in that table as urgent; without an entry a drop stays an observation",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "table",
+     "by",
+     "evidence"
+    ],
+    "properties": {
+     "table": {
+      "$ref": "#/$defs/name"
+     },
+     "by": {
+      "enum": [
+       "trigger",
+       "rule",
+       "constraint",
+       "code"
+      ],
+      "description": "trigger = a trigger that raises an error on DELETE; rule = a rule that turns DELETE into nothing; constraint = a foreign key ON DELETE RESTRICT that keeps the rows while others point to them; code = a function of the app that refuses to delete these rows or reports a delete as an error"
+     },
+     "evidence": {
+      "$ref": "#/$defs/evidence",
+      "description": "the place of that trigger, rule, constraint or function: the line forbids or rejects the delete"
      }
     }
    }

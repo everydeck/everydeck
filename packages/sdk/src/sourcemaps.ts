@@ -7,11 +7,14 @@
  * snippet's length on that line. The id comes from the file and its map: building the same code again gives the same id.
  *
  * `uploadSourceMaps(dir, target)` sends each map with a debug id to everydeck (`POST <everydeck>/api/agent/sourcemaps`) and then removes every source map
- * from the folder, uploaded or not, together with its `//# sourceMappingURL` comment, so the maps are never public. It signs in without a key that
+ * from the folder, uploaded or not, together with its `//# sourceMappingURL` comment, so the maps are never public. Like sentry-cli's chunk upload it asks
+ * first: one request with the list of the build (debug id and SHA-256 of each map as it would be sent, `POST …/sourcemaps/check`); everydeck assigns the
+ * maps it already has to the build and names the ones it lacks, and only those are sent (an everydeck without that route gets every map, as before). After
+ * a refusal for the build (429: the key's data for this hour, 413: the build's size) no further map of the build is sent, and the result says why once. It signs in without a key that
  * someone must add, like Vercel and GitHub let a build sign in to a cloud: on Vercel with the build's OIDC token (`VERCEL_OIDC_TOKEN`, when OIDC
  * federation is on in the project), in GitHub Actions with the run's OIDC token (`permissions: id-token: write`), each together with the public browser
- * key that names the app and environment. Elsewhere (Netlify, other CI) with the key that can only upload source maps, `EVERYDECK_SOURCEMAPS_KEY`. Before a map leaves the machine, the code of libraries (`node_modules`) is dropped from `sourcesContent` and every other line is
- * scrubbed like error messages (secrets, bearer tokens, e-mail addresses); everydeck scrubs again.
+ * key that names the app and environment. Elsewhere (Netlify, other CI) with the key that can only upload source maps, `EVERYDECK_SOURCEMAPS_KEY`. Before a map leaves the machine, the code of libraries (`node_modules`) and of the bundler's runtime is dropped from `sourcesContent` (`isLibrarySource`, the
+ * same function everydeck drops them with) and every other line is scrubbed like error messages (secrets, bearer tokens, e-mail addresses); everydeck scrubs again.
  *
  * The same code runs in `everydeck-agent sourcemaps inject|upload <folder>` (any bundler) and in the Vite plugin (`@everydeck/sdk/vite`).
  * No dependencies.
@@ -19,7 +22,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { clipForScrub, scrubText } from './core.js';
+import { clipForScrub, isLibrarySource, scrubText } from './core.js';
 
 export const DEBUG_IDS_GLOBAL = '_everydeckDebugIds';
 /** The one name the key is read from, in the build's environment or the app's env files; never with a public prefix */
@@ -39,7 +42,11 @@ export interface InjectedFile { file: string; map: string; debug_id: string; alr
 export interface InjectResult { injected: InjectedFile[]; skipped: { file: string; reason: string }[] }
 /** `key`: the upload key, or an OIDC token of the build together with the public `browserKey` (`via` says whose) */
 export interface UploadTarget { url: string; key: string; browserKey?: string; via?: 'vercel' | 'github_actions' }
-export interface UploadResult { ok: boolean; build: string; uploaded: { file: string; debug_id: string; bytes: number }[]; failed: { file: string; status: number | null; error: string }[]; removed: string[]; reason?: string }
+/**
+ * `unchanged`: maps everydeck already had (same debug id, same checksum), assigned to this build without sending them. `stopped`: everydeck refused the build
+ * (429 or 413 for the build) and `not_sent` further maps were not sent. `list_bytes`: size of the list sent first (0 when everydeck has no such route).
+ */
+export interface UploadResult { ok: boolean; build: string; uploaded: { file: string; debug_id: string; bytes: number }[]; unchanged: { file: string; debug_id: string }[]; failed: { file: string; status: number | null; error: string }[]; removed: string[]; reason?: string; stopped?: { status: number; error: string; not_sent: number }; list_bytes: number }
 
 /** Debug id of a built file: a UUID from the SHA-256 of the file and its map (version 4 and variant bits set, like Sentry's content-based ids) */
 export function debugIdOf(code: string, map: string): string {
@@ -123,7 +130,7 @@ export function injectDebugIds(dir: string): InjectResult {
   return res;
 }
 
-/** A map as it leaves the machine: library code (node_modules) dropped from sourcesContent, every other line scrubbed */
+/** A map as it leaves the machine: library code (node_modules, the bundler's runtime) dropped from sourcesContent, every other line scrubbed */
 export function mapForUpload(map: Record<string, unknown>): Record<string, unknown> {
   const sources = Array.isArray(map['sources']) ? (map['sources'] as unknown[]) : [];
   const content = Array.isArray(map['sourcesContent']) ? (map['sourcesContent'] as unknown[]) : null;
@@ -132,10 +139,13 @@ export function mapForUpload(map: Record<string, unknown>): Record<string, unkno
   if (typeof map['sourceRoot'] === 'string') out['sourceRoot'] = map['sourceRoot'];
   if (content) out['sourcesContent'] = sources.map((s, i) => {
     const c = content[i];
-    return typeof c !== 'string' || /(^|\/)node_modules\//.test(String(s)) ? null : c.split(/\r?\n/).map((l) => scrubText(clipForScrub(l, SOURCE_MAP_LINE_MAX).text)).join('\n');
+    return typeof c !== 'string' || isLibrarySource(String(s)) ? null : c.split(/\r?\n/).map((l) => scrubText(clipForScrub(l, SOURCE_MAP_LINE_MAX).text)).join('\n');
   });
   return out;
 }
+
+/** Checksum of a map as it is sent (SHA-256 of its JSON); everydeck keeps the same of what it received */
+export const checksumOf = (mapJson: string): string => createHash('sha256').update(mapJson, 'utf8').digest('hex');
 
 /** The build these maps belong to: the same maps give the same build (an upload again replaces nothing) */
 export const buildOf = (ids: string[]): string => `b-${createHash('sha256').update([...ids].sort().join(',')).digest('hex').slice(0, 16)}`;
@@ -152,8 +162,8 @@ export function removeSourceMaps(dir: string): string[] {
 }
 
 /**
- * Uploads every map below `dir` that has a debug id (one request per map), then removes all JavaScript source maps from the folder, also when an upload
- * failed: a map is never left public. Errors are returned, never thrown.
+ * Uploads every map below `dir` that has a debug id: first the list (debug id and checksum of each map), then one request per map everydeck lacks; then
+ * removes all JavaScript source maps from the folder, also when an upload failed: a map is never left public. Errors are returned, never thrown.
  */
 export async function uploadSourceMaps(dir: string, target: UploadTarget | { refused: string } | Missing | null, o: { build?: string; fetch?: typeof fetch } = {}): Promise<UploadResult> {
   const root = resolve(dir);
@@ -165,23 +175,51 @@ export async function uploadSourceMaps(dir: string, target: UploadTarget | { ref
     if (id && DEBUG_ID_COMMENT.exec(code.replace(MAP_URL, '').trimEnd())?.[1] === id) found.push({ file: rel(root, file), map, debug_id: id });
   }
   const build = o.build ?? buildOf(found.map((f) => f.debug_id));
-  const res: UploadResult = { ok: false, build, uploaded: [], failed: [], removed: [] };
+  const res: UploadResult = { ok: false, build, uploaded: [], unchanged: [], failed: [], removed: [], list_bytes: 0 };
   if (!found.length) res.reason = 'no source map with a debug id (run inject first)';
   else if (target && 'refused' in target) res.reason = `${target.refused}; the maps were removed without upload`;
   else if (!target || 'missing' in target) res.reason = `${target && 'missing' in target ? MISSING_SENTENCE[target.missing] : `no key: set ${SOURCEMAPS_KEY_ENV} (and the everydeck address) where the app is built`}; the maps were removed without upload`;
   else {
     const doFetch = o.fetch ?? globalThis.fetch;
-    for (const f of found) {
-      const body = JSON.stringify({ build, debug_id: f.debug_id, file: f.file, map: mapForUpload(f.map) });
+    const base = `${target.url.replace(/\/$/, '')}/api/agent/sourcemaps`;
+    const headers = { authorization: `Bearer ${target.key}`, 'content-type': 'application/json', ...(target.browserKey ? { 'x-everydeck-browser-key': target.browserKey } : {}) };
+    const post = async (url: string, body: string, timeout: number): Promise<{ status: number; text: string }> => { const r = await doFetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(timeout) }); return { status: r.status, text: await r.text() }; };
+    const errorOf = (text: string): { error: string; build: boolean } => {
+      try { const j = JSON.parse(text) as { error?: { message?: string } | string; message?: string; details?: { build_max_bytes?: unknown } }; return { error: typeof j.error === 'string' ? j.error : j.error?.message ?? j.message ?? text.slice(0, 300), build: j.details?.build_max_bytes !== undefined }; }
+      catch { return { error: text.slice(0, 300), build: false }; }
+    };
+    // 429 refuses the key for this hour; 413 with the build's size refuses the build (a 413 for one map that is too large does not)
+    const refusesBuild = (status: number, e: { build: boolean }) => status === 429 || (status === 413 && e.build);
+    const items = found.map((f) => { const json = JSON.stringify(mapForUpload(f.map)); return { ...f, json, checksum: checksumOf(json) }; });
+    let send = items;
+    // first the list: everydeck assigns what it has and names what it lacks
+    const list = JSON.stringify({ build, maps: items.map((f) => ({ debug_id: f.debug_id, checksum: f.checksum, file: f.file })) });
+    try {
+      const r = await post(`${base}/check`, list, 60_000);
+      if (r.status === 200) {
+        res.list_bytes = Buffer.byteLength(list, 'utf8');
+        const lacks = new Set(((JSON.parse(r.text) as { missing?: unknown }).missing as string[] | undefined) ?? items.map((f) => f.debug_id));
+        res.unchanged = items.filter((f) => !lacks.has(f.debug_id)).map((f) => ({ file: f.file, debug_id: f.debug_id }));
+        send = items.filter((f) => lacks.has(f.debug_id));
+      } else if (r.status >= 400 && r.status < 500 && r.status !== 404) {
+        // refused (key, limit, build too large): the maps would be refused the same way, so none is sent
+        res.list_bytes = Buffer.byteLength(list, 'utf8');
+        const e = errorOf(r.text); res.stopped = { status: r.status, error: e.error, not_sent: items.length }; send = [];
+      }
+      // 404 (an everydeck without the list), 5xx or another answer: every map, as before
+    } catch { /* the list could not be sent: every map, as before */ }
+    for (let i = 0; i < send.length; i++) {
+      const f = send[i]!;
+      const body = `{"build":${JSON.stringify(build)},"debug_id":${JSON.stringify(f.debug_id)},"file":${JSON.stringify(f.file)},"map":${f.json}}`;
       if (Buffer.byteLength(body, 'utf8') > SOURCE_MAP_MAX_BYTES + 4096) { res.failed.push({ file: f.file, status: null, error: `larger than ${SOURCE_MAP_MAX_BYTES} bytes` }); continue; }
       try {
-        const r = await doFetch(`${target.url.replace(/\/$/, '')}/api/agent/sourcemaps`, { method: 'POST', headers: { authorization: `Bearer ${target.key}`, 'content-type': 'application/json', ...(target.browserKey ? { 'x-everydeck-browser-key': target.browserKey } : {}) }, body, signal: AbortSignal.timeout(60_000) });
-        const text = await r.text();
-        if (r.status === 201) res.uploaded.push({ file: f.file, debug_id: f.debug_id, bytes: Buffer.byteLength(body, 'utf8') });
-        else { let error = text.slice(0, 300); try { const j = JSON.parse(text) as { error?: { message?: string } | string; message?: string }; error = typeof j.error === 'string' ? j.error : j.error?.message ?? j.message ?? error; } catch { /* keep the text */ } res.failed.push({ file: f.file, status: r.status, error }); }
+        const r = await post(base, body, 60_000);
+        if (r.status === 201) { res.uploaded.push({ file: f.file, debug_id: f.debug_id, bytes: Buffer.byteLength(body, 'utf8') }); continue; }
+        const e = errorOf(r.text); res.failed.push({ file: f.file, status: r.status, error: e.error });
+        if (refusesBuild(r.status, e)) { res.stopped = { status: r.status, error: e.error, not_sent: send.length - i - 1 }; break; }
       } catch (e) { res.failed.push({ file: f.file, status: null, error: `network error: ${(e as Error).message}` }); }
     }
-    res.ok = res.uploaded.length === found.length;
+    res.ok = res.uploaded.length + res.unchanged.length === found.length;
   }
   res.removed = removeSourceMaps(root);
   // A build that could sign in but cannot (OIDC off at Vercel) says so once per build, with the public browser key: everydeck shows the owner the switch
